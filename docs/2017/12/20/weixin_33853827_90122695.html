@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>关于linux系统如何实现fork的研究(二)【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.aichengxu.com/linux/7166015.htm    本文为原创，转载请注明：http://www.cnblogs.com/tolimit/       引言    　　前一篇关于linux系统如何实现fork的研究(一)通过代码已经说明了从用...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/20/weixin_33853827_90122695.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">关于linux系统如何实现fork的研究(二)【转】</h1>
+    <p class="post-meta">Dec 20, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://www.aichengxu.com/linux/7166015.htm" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.aichengxu.com/linux/7166015.htm</a></p> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">本文为原创，转载请注明：<a href="http://www.cnblogs.com/tolimit/" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.cnblogs.com/tolimit/</a> </h3> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"> <br> 引言</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">　　前一篇<a href="http://www.aichengxu.com/content/4157180.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">关于linux系统如何实现fork的研究(一)</a>通过代码已经说明了从用户态怎么通过软中断实现调用系统调用clone函数，而clone函数的精华copy_process函数就在此篇文章中进行分析。我们知道，在linux系统中，应用层可以创建子进程和子线程(轻量级进程)两种程序分支结构。而对于linux内核而且，并不详细区分子进程和子线程(轻量级进程)的区别，他们都使用的是task_struct结构(此结构极其复杂，包含非常多的数据结构)，而不同的是子进程和子线程的task_struct初始化结果不同。task_struct结构是一个进程或线程的标识和存在的凭证，调度程序就是通过task_struct结构来区分不同的进程(线程)。里面包含了进程(线程)所有需要用到的结构(内存描述符，文件描述符，信号描述符，信号处理函数，调度优先级等)。而我们知道，一个进程(线程)不止有自己的task_struck结构，还必须有一个自己的内核栈，当执行进程切换时，部分进程上下文会保存于其进程的内核栈中，而中断发生时的中断上下文也会保存于正在持续的进程内核栈中。在copy_process函数中内核栈的初始化导致了fork()的两次返回值不同(之后会说明)。当然，copy_process还涉及到许多操作，比如新进程(线程)的安全检测，pid的分配，关系调整(父子进程、进程组关系，命名空间关系等)，内存结构的初始化等等，这些我们在之后的代码中慢慢道来。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"> <br> copy_process</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="" style="border:none;"></p> 
+   <pre>1 /* 代码目录：linux源码/kernel/Fork.c */
+  2 
+  3 static struct task_struct *copy_process(unsigned long clone_flags,
+  4                     unsigned long stack_start,
+  5                     unsigned long stack_size,
+  6                     int __user *child_tidptr,
+  7                     struct pid *pid,
+  8                     int trace)
+  9 {
+ 10     int retval;
+ 11     struct task_struct *p;
+ 12 
+ 13     /* CLONE_FS 不能与 CLONE_NEWNS 或 CLONE_NEWUSER 同时设置 */
+ 14     if ((clone_flags &amp; (CLONE_NEWNS|CLONE_FS)) == (CLONE_NEWNS|CLONE_FS))
+ 15         return ERR_PTR(-EINVAL);
+ 16 
+ 17     if ((clone_flags &amp; (CLONE_NEWUSER|CLONE_FS)) == (CLONE_NEWUSER|CLONE_FS))
+ 18         return ERR_PTR(-EINVAL);
+ 19 
+ 20     /* 创建线程时线程之间要共享信号处理函数 */
+ 21     if ((clone_flags &amp; CLONE_THREAD) &amp;&amp; !(clone_flags &amp; CLONE_SIGHAND))
+ 22         return ERR_PTR(-EINVAL);
+ 23 
+ 24     /* 
+ 25      * 父子进程共享信号处理函数时必须共享内存地址空间
+ 26      * 这就是为什么书上写的fork出来的父子进程有其独立的信号处理函数，因为他们的内存地址空间不同
+ 27      */
+ 28     if ((clone_flags &amp; CLONE_SIGHAND) &amp;&amp; !(clone_flags &amp; CLONE_VM))
+ 29         return ERR_PTR(-EINVAL);
+ 30 
+ 31     /*
+ 32      * 防止参数init进程的兄弟进程
+ 33      * 只有init进程的 signal-&gt;flags &amp; SIGNAL_UNKILLABLE 为真
+ 34      * 因为当进程退出时实际上是成为了僵尸进程(zombie),而要通过init进程将它回收，而如果此进程为init的兄弟进程，则没办法将其回收
+ 35      */
+ 36     if ((clone_flags &amp; CLONE_PARENT) &amp;&amp;
+ 37                 current-&gt;signal-&gt;flags &amp; SIGNAL_UNKILLABLE)
+ 38         return ERR_PTR(-EINVAL);
+ 39 
+ 40     /* 如果新的进程将会有新的用户空间或者pid，则不能让它共享父进程的线程组或者信号处理或者父进程 */
+ 41     if (clone_flags &amp; CLONE_SIGHAND) {
+ 42         if ((clone_flags &amp; (CLONE_NEWUSER | CLONE_NEWPID)) ||
+ 43             (task_active_pid_ns(current) !=
+ 44                 current-&gt;nsproxy-&gt;pid_ns_for_children))
+ 45             return ERR_PTR(-EINVAL);
+ 46     }
+ 47 
+ 48     /* 附加安全检查 */
+ 49     retval = security_task_create(clone_flags);
+ 50     if (retval)
+ 51         goto fork_out;
+ 52 
+ 53     retval = -ENOMEM;
+ 54     /* 为新进程分配struct task_struct内存和内核栈内存 */
+ 55     p = dup_task_struct(current);
+ 56     if (!p)
+ 57         goto fork_out;
+ 58 
+ 59     /* ftrace是用于内核性能分析和跟踪的 */
+ 60     ftrace_graph_init_task(p);
+ 61 
+ 62     /* futex初始化，其用于SYSTEM V IPC,具体可见 <span style="text-decoration:underline;">http://blog.chinaunix.net/uid-7295895-id-3011238.html</span> */
+ 63     rt_mutex_init_task(p);
+ 64 
+ 65 #ifdef CONFIG_PROVE_LOCKING
+ 66     DEBUG_LOCKS_WARN_ON(!p-&gt;hardirqs_enabled);
+ 67     DEBUG_LOCKS_WARN_ON(!p-&gt;softirqs_enabled);
+ 68 #endif
+ 69     retval = -EAGAIN;
+ 70     /* 检查 tsk-&gt;signal-&gt;rlim[RLIMIT_NPROC].rlim_cur是否小于等于用户所拥有的进程数，rlim结构体表示相关资源的最大值 */
+ 71      if (atomic_read(&amp;p-&gt;real_cred-&gt;user-&gt;processes) &gt;= task_rlimit(p, RLIMIT_NPROC)) {
+ 72         /* INIT_USER是root权限。检查父进程是否有root权限 */
+ 73         if (p-&gt;real_cred-&gt;user != INIT_USER &amp;&amp; !capable(CAP_SYS_RESOURCE) &amp;&amp; !capable(CAP_SYS_ADMIN))
+ 74             goto bad_fork_free;
+ 75     }
+ 76     current-&gt;flags &amp;= ~PF_NPROC_EXCEEDED;
+ 77 
+ 78     /* 将父进程的cred复制到子进程的real_cred和cred。struct cred用于安全操作的结构 */
+ 79     retval = copy_creds(p, clone_flags);
+ 80     if (retval &lt; 0)
+ 81         goto bad_fork_free;
+ 82 
+ 83     retval = -EAGAIN;
+ 84     /* 进程数量是否超出系统允许最大进程数量，最大进程数量跟内存有关，一般原则是所有的进程内核栈(默认8K)加起来不超过总内存的1/8，可通过/proc/sys/kernel/threads-max改写此值 */
+ 85     if (nr_threads &gt;= max_threads)
+ 86         goto bad_fork_cleanup_count;
+ 87 
+ 88     /* 如果实现新进程的执行域和可执行格式的内核函数都包含在内核模块中，则递增其使用计数 */
+ 89     if (!try_module_get(task_thread_info(p)-&gt;exec_domain-&gt;module))
+ 90         goto bad_fork_cleanup_count;
+ 91 
+ 92     delayacct_tsk_init(p);    /* Must remain after dup_task_struct() */
+ 93 
+ 94     /* 清除 PF_SUPERPRIV(表示进程使用了超级用户权限) 和 PF_WQ_WORKER(使用了工作队列) */
+ 95     p-&gt;flags &amp;= ~(PF_SUPERPRIV | PF_WQ_WORKER);
+ 96     /* 设置 PF_FORKNOEXEC 表明此子进程还没有进行 execve() 系统调用 */
+ 97     p-&gt;flags |= PF_FORKNOEXEC;
+ 98 
+ 99     /* 初始化子进程的子进程链表和兄弟进程链表为空 */
+100     INIT_LIST_HEAD(&amp;p-&gt;children);
+101     INIT_LIST_HEAD(&amp;p-&gt;sibling);
+102     /* 见 <span style="text-decoration:underline;">http://www.ibm.com/developerworks/cn/linux/l-rcu/</span> */
+103     rcu_copy_process(p);
+104     p-&gt;vfork_done = NULL;
+105     /* 初始化分配锁，此锁用于保护分配内存，文件，文件系统等操作 */
+106     spin_lock_init(&amp;p-&gt;alloc_lock);
+107 
+108     /* 信号列表初始化，此列表保存被挂起的信号 */
+109     init_sigpending(&amp;p-&gt;pending);
+110 
+111     /* 代码执行时间变量都置为0 */
+112     p-&gt;utime = p-&gt;stime = p-&gt;gtime = 0;
+113     p-&gt;utimescaled = p-&gt;stimescaled = 0;
+114 #ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
+115     p-&gt;prev_cputime.utime = p-&gt;prev_cputime.stime = 0;
+116 #endif
+117 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
+118     seqlock_init(&amp;p-&gt;vtime_seqlock);
+119     p-&gt;vtime_snap = 0;
+120     p-&gt;vtime_snap_whence = VTIME_SLEEPING;
+121 #endif
+122 
+123 #if defined(SPLIT_RSS_COUNTING)
+124     memset(&amp;p-&gt;rss_stat, 0, sizeof(p-&gt;rss_stat));
+125 #endif
+126     /* 此变量一般用于epoll和select，从父进程复制过来 */
+127     p-&gt;default_timer_slack_ns = current-&gt;timer_slack_ns;
+128 
+129     /* 初始化进程IO计数结构 */
+130     task_io_accounting_init(&amp;p-&gt;ioac);
+131     acct_clear_integrals(p);
+132 
+133     /* 初始化cputime_expires结构 */
+134     posix_cpu_timers_init(p);
+135 
+136     /* 设置进程创建时间 */
+137     p-&gt;start_time = ktime_get_ns();
+138     p-&gt;real_start_time = ktime_get_boot_ns();
+139 
+140     /* io_context 和 audit_context 置空 */
+141     p-&gt;io_context = NULL;
+142     p-&gt;audit_context = NULL;
+143     /* 如果创建的是线程，因为需要修改到当前进程的描述符，会先上锁 */
+144     if (clone_flags &amp; CLONE_THREAD)
+145         threadgroup_change_begin(current);
+146     cgroup_fork(p);
+147 #ifdef CONFIG_NUMA
+148     p-&gt;mempolicy = mpol_dup(p-&gt;mempolicy);
+149     if (IS_ERR(p-&gt;mempolicy)) {
+150         retval = PTR_ERR(p-&gt;mempolicy);
+151         p-&gt;mempolicy = NULL;
+152         goto bad_fork_cleanup_threadgroup_lock;
+153     }
+154 #endif
+155 #ifdef CONFIG_CPUSETS
+156     p-&gt;cpuset_mem_spread_rotor = NUMA_NO_NODE;
+157     p-&gt;cpuset_slab_spread_rotor = NUMA_NO_NODE;
+158     seqcount_init(&amp;p-&gt;mems_allowed_seq);
+159 #endif
+160 #ifdef CONFIG_TRACE_IRQFLAGS
+161     p-&gt;irq_events = 0;
+162     p-&gt;hardirqs_enabled = 0;
+163     p-&gt;hardirq_enable_ip = 0;
+164     p-&gt;hardirq_enable_event = 0;
+165     p-&gt;hardirq_disable_ip = _THIS_IP_;
+166     p-&gt;hardirq_disable_event = 0;
+167     p-&gt;softirqs_enabled = 1;
+168     p-&gt;softirq_enable_ip = _THIS_IP_;
+169     p-&gt;softirq_enable_event = 0;
+170     p-&gt;softirq_disable_ip = 0;
+171     p-&gt;softirq_disable_event = 0;
+172     p-&gt;hardirq_context = 0;
+173     p-&gt;softirq_context = 0;
+174 #endif
+175 #ifdef CONFIG_LOCKDEP
+176     p-&gt;lockdep_depth = 0; /* no locks held yet */
+177     p-&gt;curr_chain_key = 0;
+178     p-&gt;lockdep_recursion = 0;
+179 #endif
+180 
+181 #ifdef CONFIG_DEBUG_MUTEXES
+182     p-&gt;blocked_on = NULL; /* not blocked yet */
+183 #endif
+184 #ifdef CONFIG_BCACHE
+185     p-&gt;sequential_io    = 0;
+186     p-&gt;sequential_io_avg    = 0;
+187 #endif
+188 
+189 
+190     /* 初始化子进程的调度优先级和策略，在此并没有将此进程加入到运行队列，在copy_process返回之后加入 */    
+191     retval = sched_fork(clone_flags, p);
+192     if (retval)
+193         goto bad_fork_cleanup_policy;
+194 
+195     /* perf event是一个性能调优工具，具体见 <span style="text-decoration:underline;">http://blog.sina.com.cn/s/blog_98822316010122ex.html</span> */
+196     retval = perf_event_init_task(p);
+197     if (retval)
+198         goto bad_fork_cleanup_policy;
+199     retval = audit_alloc(p);
+200     if (retval)
+201         goto bad_fork_cleanup_perf;
+202     /* 初始化 p-&gt;sysvshm.shm_clist 链表头 */
+203     shm_init_task(p);
+204 
+205     /* copy_semundo, copy_files, copy_fs, copy_sighand, copy_signal, copy_mm, copy_namespaces, copy_io都是根据clone_flags从父进程做相应的复制 */
+206     retval = copy_semundo(clone_flags, p);
+207     if (retval)
+208         goto bad_fork_cleanup_audit;
+209     retval = copy_files(clone_flags, p);
+210     if (retval)
+211         goto bad_fork_cleanup_semundo;
+212     retval = copy_fs(clone_flags, p);
+213     if (retval)
+214         goto bad_fork_cleanup_files;
+215     /* 判断是否设置 CLONE_SIGHAND ，如果是(线程必须为是)，增加父进行的sighand引用计数，如果否(创建的必定是子进程)，将父线程的sighand_struct复制到子进程中 */
+216     retval = copy_sighand(clone_flags, p);
+217     if (retval)
+218         goto bad_fork_cleanup_fs;
+219     /* 如果创建的是线程，直接返回0，如果创建的是进程，则会将父进程的信号屏蔽和安排复制到子进程中 */
+220     retval = copy_signal(clone_flags, p);
+221     if (retval)
+222         goto bad_fork_cleanup_sighand;
+223     /* 
+224      * 如果是进程，则将父进程的mm_struct结构复制到子进程中，然后修改当中属于子进程有别于父进程的信息(如页目录)
+225      * 如果是线程，则将子线程的mm指针和active_mm指针都指向父进程的mm指针所指结构。
+226      */
+227     retval = copy_mm(clone_flags, p);
+228     if (retval)
+229         goto bad_fork_cleanup_signal;
+230     retval = copy_namespaces(clone_flags, p);
+231     if (retval)
+232         goto bad_fork_cleanup_mm;
+233     retval = copy_io(clone_flags, p);
+234     if (retval)
+235         goto bad_fork_cleanup_namespaces;
+236     
+237     /* 
+238      * 初始化子进程内核栈和thread_struct结构体
+239      * 当进程切换时，进程的硬件上下文一般保存于三个地方: tss_struct(保存进程内核栈地址，I/O许可权限位)，thread_struct(大部分非通用寄存器)，进程内核栈(通用寄存器)
+240      * copy_thread函数会将父进程的thread_struct和内核栈数据复制到子进程中，并将子进程的返回值置为0(x86返回值保存在eax中，arm保存在r0中，即把eax或者r0所在的内核栈数据置为0)
+241      * copy_thread函数还会将子进程的eip寄存器值设置为ret_from_fork()的地址，即当子进程首次被调用就立即执行系统调用clone返回。
+242      * 所以应用层调用fork()函数后，子进程返回0，父进程返回子进程ID(返回子进程ID在之后代码中会实现)
+243      */
+244     retval = copy_thread(clone_flags, stack_start, stack_size, p);
+245     if (retval)
+246         goto bad_fork_cleanup_io;
+247 
+248     /* 判断是不是init进程 */
+249     if (pid != &amp;init_struct_pid) {
+250         retval = -ENOMEM;
+251         /* 分配pid */
+252         pid = alloc_pid(p-&gt;nsproxy-&gt;pid_ns_for_children);
+253         if (!pid)
+254             goto bad_fork_cleanup_io;
+255     }
+256 
+257     /* 如果设置了CLONE_CHILD_SETTID则将task_struct中的set_child_tid指向用户空间的child_tidptr，否则置空 */
+258     p-&gt;set_child_tid = (clone_flags &amp; CLONE_CHILD_SETTID) ? child_tidptr : NULL;
+259     /* 如果设置了CLONE_CHILD_CLEARTID则将task_struct中的clear_child_tid指向用户空间的child_tidptr，否则置空 */
+260     p-&gt;clear_child_tid = (clone_flags &amp; CLONE_CHILD_CLEARTID) ? child_tidptr : NULL;
+261     
+262 #ifdef CONFIG_BLOCK
+263     p-&gt;plug = NULL;
+264 #endif
+265 #ifdef CONFIG_FUTEX
+266     p-&gt;robust_list = NULL;
+267 #ifdef CONFIG_COMPAT
+268     p-&gt;compat_robust_list = NULL;
+269 #endif
+270     INIT_LIST_HEAD(&amp;p-&gt;pi_state_list);
+271     p-&gt;pi_state_cache = NULL;
+272 #endif
+273     /*
+274      * 如果共享VM或者vfork创建，信号栈清空
+275      */
+276     if ((clone_flags &amp; (CLONE_VM|CLONE_VFORK)) == CLONE_VM)
+277         p-&gt;sas_ss_sp = p-&gt;sas_ss_size = 0;
+278 
+279     /*
+280      * 系统调用跟踪时应该禁止单步执行
+281      */
+282     user_disable_single_step(p);
+283     clear_tsk_thread_flag(p, TIF_SYSCALL_TRACE);
+284 #ifdef TIF_SYSCALL_EMU
+285     clear_tsk_thread_flag(p, TIF_SYSCALL_EMU);
+286 #endif
+287     clear_all_latency_tracing(p);
+288 
+289 
+290     /* 将子进程的PID设置为分配的PID在全局namespace中分配的值，在不同namespace中进程的PID不同，而p-&gt;pid保存的是全局的namespace中所分配的PID */
+291     p-&gt;pid = pid_nr(pid);
+292     if (clone_flags &amp; CLONE_THREAD) {
+293         /* 创建的是线程 */
+294         p-&gt;exit_signal = -1;
+295         /* 线程组的所有线程的group_leader都一致 */
+296         p-&gt;group_leader = current-&gt;group_leader;
+297         /* 线程组的所有线程的tgid都一致，使用getpid返回的就是tgid */
+298         p-&gt;tgid = current-&gt;tgid;
+299     } else {
+300         /* 创建的是子进程 */
+301         if (clone_flags &amp; CLONE_PARENT)
+302             p-&gt;exit_signal = current-&gt;group_leader-&gt;exit_signal;
+303         else
+304             p-&gt;exit_signal = (clone_flags &amp; CSIGNAL);
+305         p-&gt;group_leader = p;
+306         /* tgid与pid一致，所以当创建子线程时，tgid与主线程的一致 */
+307         p-&gt;tgid = p-&gt;pid;
+308     }
+309 
+310     /* 初始化页框中脏页数量为0 */
+311     p-&gt;nr_dirtied = 0;
+312     /* 初始化脏页数量临界值，当脏页数量到达临界值时，会调用balance_dirty_pages()将脏页写入磁盘 */
+313     p-&gt;nr_dirtied_pause = 128 &gt;&gt; (PAGE_SHIFT - 10);
+314     /* 将脏页写入磁盘的开始时间 */
+315     p-&gt;dirty_paused_when = 0;
+316 
+317     p-&gt;pdeath_signal = 0;
+318     /* 初始化线程组链表为空 */
+319     INIT_LIST_HEAD(&amp;p-&gt;thread_group);
+320     p-&gt;task_works = NULL;
+321 
+322 
+323     /* 到此系统中已经存在此进程(线程)，但是它还不能够执行，需要等待父进程对其处理，这里会上锁 */
+324     write_lock_irq(&amp;tasklist_lock);
+325 
+326     if (clone_flags &amp; (CLONE_PARENT|CLONE_THREAD)) {
+327         /* 创建的是兄弟进程或者相同线程组线程 */
+328         /* 其父进程为父进程的父进程 */
+329         p-&gt;real_parent = current-&gt;real_parent;
+330         /* 其父进程执行域为父进程的父进程执行域 */
+331         p-&gt;parent_exec_id = current-&gt;parent_exec_id;
+332     } else {
+333         /* 创建的是子进程 */
+334         /* 父进程为父进程 */
+335         p-&gt;real_parent = current;
+336         /* 父进程的执行域为父进程的执行域 */
+337         p-&gt;parent_exec_id = current-&gt;self_exec_id;
+338     }
+339 
+340     /* 当前进程信号处理上锁，这里应该是禁止了信号处理 */
+341     spin_lock(¤t-&gt;sighand-&gt;siglock);
+342 
+343     /*
+344      * seccomp与系统安全有关，具体见 <span style="text-decoration:underline;">http://note.sdo.com/u/634687868481358385/NoteContent/M5cEN</span>~kkf9BFnM4og00239
+345      */
+346     copy_seccomp(p);
+347 
+348     /*
+349      * 在fork之前，进程组和会话信号都需要送到父亲结点，而在fork之后，这些信号需要送到父亲和孩子结点。
+350      * 如果我们在将新进程添加到进程组的过程中出现一个信号，而这个挂起信号会导致当前进程退出(current)，我们的子进程就不能够被kill或者退出了
+351      * 所以这里要检测父进程有没有信号被挂起。
+352      */
+353     recalc_sigpending();
+354     if (signal_pending(current)) {
+355         /* 包含有挂起进程，错误 */
+356         spin_unlock(¤t-&gt;sighand-&gt;siglock);
+357         write_unlock_irq(&amp;tasklist_lock);
+358         retval = -ERESTARTNOINTR;
+359         goto bad_fork_free_pid;
+360     }
+361 
+362     if (likely(p-&gt;pid)) {
+363         /* 如果子进程需要跟踪，就将 current-&gt;parent 赋值给 tsk-&gt;parent ，并将子进程插入调试程序的跟踪链表中 */
+364         ptrace_init_task(p, (clone_flags &amp; CLONE_PTRACE) || trace);
+365 
+366         /* p-&gt;pids[PIDTYPE_PID].pid = pid; */
+367         init_task_pid(p, PIDTYPE_PID, pid);
+368 
+369         /* 如果是子进程(其实就是判断 p-&gt;exit_signal 是否大于等于0，创建的是线程的话，exit_signal的值为-1) */
+370         if (thread_group_leader(p)) {
+371             /* p-&gt;pids[PIDTYPE_PGID].pid = current-&gt;group_leader-&gt;pids[PIDTYPE_PGID].pid; PGID为进程组ID，所以直接复制父进程的pgid */
+372             init_task_pid(p, PIDTYPE_PGID, task_pgrp(current));
+373             /* p-&gt;pids[PIDTYPE_SID].pid = current-&gt;group_leader-&gt;pids[PIDTYPE_SID].pid; SID为会话组ID，当没有使用setsid()时，子进程的sid与父进程一致 */
+374             init_task_pid(p, PIDTYPE_SID, task_session(current));
+375 
+376             /* return pid-&gt;numbers[pid-&gt;level].nr == 1; 判断新进程是否处于一个新创建的namespace中(新进程所在的新namespace中的pid会为1，以此判断) */
+377             if (is_child_reaper(pid)) {
+378                 /* 将当前namespace的init进程设置为此新进程 */
+379                 ns_of_pid(pid)-&gt;child_reaper = p;
+380                 p-&gt;signal-&gt;flags |= SIGNAL_UNKILLABLE;
+381             }
+382 
+383             p-&gt;signal-&gt;leader_pid = pid;
+384             p-&gt;signal-&gt;tty = tty_kref_get(current-&gt;signal-&gt;tty);
+385 
+386             /* 将此进程添加到父进程的子进程链表 */
+387             list_add_tail(&amp;p-&gt;sibling, &amp;p-&gt;real_parent-&gt;children);
+388             /* 将此进程task_struct加入到task链表中 */
+389             list_add_tail_rcu(&amp;p-&gt;tasks, &amp;init_task.tasks);
+390             /* 将新进程描述符的pgid结构插入pgid_hash */
+391             attach_pid(p, PIDTYPE_PGID);
+392             /* 将新进程描述符的sid结构插入sid_hash */
+393             attach_pid(p, PIDTYPE_SID);
+394             /* 当前cpu进程数量加1 */
+395             __this_cpu_inc(process_counts);
+396         } else {
+397             /* 创建的是线程，这里的处理导致了线程会共享信号 */
+398             current-&gt;signal-&gt;nr_threads++;
+399             atomic_inc(¤t-&gt;signal-&gt;live);
+400             atomic_inc(¤t-&gt;signal-&gt;sigcnt);
+401             /* 将新线程的thread_group结点加入到线程组的领头线程的thread_group链表中 */
+402             list_add_tail_rcu(&amp;p-&gt;thread_group,
+403                       &amp;p-&gt;group_leader-&gt;thread_group);
+404             /* 将新线程的thread_node结点加入的新线程的signal-&gt;thread_head中 */
+405             list_add_tail_rcu(&amp;p-&gt;thread_node,
+406                       &amp;p-&gt;signal-&gt;thread_head);
+407         }
+408         /* 将新进程描述符的pid结构插入pid_hash */
+409         attach_pid(p, PIDTYPE_PID);
+410         /* 当前系统进程数加1 */
+411         nr_threads++;
+412     }
+413 
+414     /* 已创建的进程数量加1 */
+415     total_forks++;
+416     /* 释放当前进程信号处理锁 */
+417     spin_unlock(¤t-&gt;sighand-&gt;siglock);
+418     syscall_tracepoint_update(p);
+419     /* 释放tasklist_lock锁 */
+420     write_unlock_irq(&amp;tasklist_lock);
+421 
+422     /* 将新进程与proc文件系统进行关联 */
+423     proc_fork_connector(p);
+424     cgroup_post_fork(p);
+425     /* 如果创建的是线程，释放此锁 */
+426     if (clone_flags &amp; CLONE_THREAD)
+427         threadgroup_change_end(current);
+428     perf_event_fork(p);
+429 
+430     trace_task_newtask(p, clone_flags);
+431     uprobe_copy_process(p, clone_flags);
+432 
+433     /* 返回新进程的task_struct结构 */
+434     return p;
+435 
+436     /* 以下为执行期间的错误处理 */
+437 bad_fork_free_pid:
+438     if (pid != &amp;init_struct_pid)
+439         free_pid(pid);
+440 bad_fork_cleanup_io:
+441     if (p-&gt;io_context)
+442         exit_io_context(p);
+443 bad_fork_cleanup_namespaces:
+444     exit_task_namespaces(p);
+445 bad_fork_cleanup_mm:
+446     if (p-&gt;mm)
+447         mmput(p-&gt;mm);
+448 bad_fork_cleanup_signal:
+449     if (!(clone_flags &amp; CLONE_THREAD))
+450         free_signal_struct(p-&gt;signal);
+451 bad_fork_cleanup_sighand:
+452     __cleanup_sighand(p-&gt;sighand);
+453 bad_fork_cleanup_fs:
+454     exit_fs(p); /* blocking */
+455 bad_fork_cleanup_files:
+456     exit_files(p); /* blocking */
+457 bad_fork_cleanup_semundo:
+458     exit_sem(p);
+459 bad_fork_cleanup_audit:
+460     audit_free(p);
+461 bad_fork_cleanup_perf:
+462     perf_event_free_task(p);
+463 bad_fork_cleanup_policy:
+464 #ifdef CONFIG_NUMA
+465     mpol_put(p-&gt;mempolicy);
+466 bad_fork_cleanup_threadgroup_lock:
+467 #endif
+468     if (clone_flags &amp; CLONE_THREAD)
+469         threadgroup_change_end(current);
+470     delayacct_tsk_free(p);
+471     module_put(task_thread_info(p)-&gt;exec_domain-&gt;module);
+472 bad_fork_cleanup_count:
+473     atomic_dec(&amp;p-&gt;cred-&gt;user-&gt;processes);
+474     exit_creds(p);
+475 bad_fork_free:
+476     free_task(p);
+477 fork_out:
+478     return ERR_PTR(retval);
+479 }</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br><img src="https://common.cnblogs.com/images/copycode.gif" alt="" style="border:none;"></p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"> <br> 流程图</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img src="https://images0.cnblogs.com/blog/687284/201502/041618121095457.jpg" alt="" style="border:none;"></p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"><br></h2> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"> <br> 小结</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">　　copy_process作为do_fork的主心骨，其流程并不复杂，只是每一步调用的初始化函数都非常精妙，涉及到大量的内知识和代码，这里为了篇幅着想就不继续往细节分析了，会在之后的文章中慢慢补全其中的知识和自己的理解。整篇文章读下来，其实copy_process的核心就是初始化task_struct结构体供新进程(线程)使用，并为其分配独有的pid，最后将其加入到运行队列中。而至于为什么应用层调用fork()会进行两次返回，原理就是在内核栈中，在copy_thread函数中父进程将其内核栈复制到子进程中，把子进程被调度后执行的第一条语句设置为do_fork()返回，并把保存返回值的寄存器值(一般返回值保存在eax(ARM是r0)，而这些通用寄存器值保存在内核栈中，当调用后会进行进程切换，会把这些保存于内核栈的寄存器值还原到寄存器中)置为0，所以子进程的返回值为0，而父进程会继续执行copy_thread函数之后的初始化，最后返回子进程的pid(实际上是tgid)。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p><font color="#666666"><span style="font-size:14px;"><br></span></font></p> 
+   <p><font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/8080607.html，如需转载请自行联系原作者</span></font></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

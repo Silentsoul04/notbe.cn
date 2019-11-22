@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Spark Streaming 原理剖析 « NotBeCN</title>
+  <meta name="description" content="             通过源码呈现 Spark Streaming 的底层机制。    　　1. 初始化与接收数据 Spark Streaming 通过分布在各个节点上的接收器缓存接收到的流数据并将流数 据 包 装 成 Spark 能 够 处 理 的 RDD的格式 输入到Spark Streaming 之 后...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/13/weixin_34377065_90130525.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Spark Streaming 原理剖析</h1>
+    <p class="post-meta">Nov 13, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><strong><span style="font-size:18pt;">通过源码呈现 Spark Streaming 的底层机制。</span></strong></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　<strong><span style="color:rgb(0,0,255);">　1. 初始化与接收数据</span></strong><br> Spark Streaming 通过分布在各个节点上的<span><strong>接收器</strong></span>缓存接收到的<span>流数据</span>并将流数 据 包 装 成 Spark 能 够 处 理 的 RDD的格式 输入到Spark Streaming 之 后由Spark &nbsp;Streaming将作业提交到Spark集群进行执行如图1所示。<br><br><img src="http://images2015.cnblogs.com/blog/855959/201608/855959-20160801122946793-906213378.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　　　　　　　　　　　　图 1 &nbsp;Spark Streaming 执行模型</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　　<span style="color:rgb(255,0,0);">初始化的过程主要可以概括为两点</span><br> 1调度器的初始化。<br> 调度器调度 Spark Streaming 的运行用户可以通过配置相关参数进行调优。<br> 2将输入流的接收器转化为 RDD 在集群进行分布式分配然后启动接收器集合中的每个接收器。<br><span style="color:rgb(255,0,0);"><strong>针对不同的数据源 Spark Streaming 提供了不同的数据接收器</strong></span>分布在各个节点上的每个接收器可以认为是一个特定的进程接收一部分流数据作为输入。<br> 用户也可以针对自身生产环境状况自定义开发相应的数据接收器。<br> 如图 2 所示接收器分布在各个节点上。通过下面代码创建并行的、在不同Worker 节点分布的 receiver 集合。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre> val tempRDD =
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span><span style="font-size:12px;line-height:1.5;"> (hasLocationPreferences) {
+val receiversWithPreferences </span>= receivers.map(r =&gt;<span style="font-size:12px;line-height:1.5;"> (r,
+Seq(r.preferredLocation.</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">get</span><span style="font-size:12px;line-height:1.5;">)))
+ssc.sc.makeRDD[Receiver[_]](receiversWithPreferences)
+} </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">else</span><span style="font-size:12px;line-height:1.5;"> {
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 在这里创造 RDD 相当于进入 SparkContext.makeRDD
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 此处将 receivers 的集合作为一个 RDD 进行分区 RDD[Receiver]
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 即使是只有一个输入流按照这个分布式也是流的输入端在 worker 而不再 Master</span>
+<span style="font-size:12px;line-height:1.5;">…
+
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 将 receivers 的集合打散然后启动它们</span>
+<span style="font-size:12px;line-height:1.5;">…
+ssc.sparkContext.runJob(tempRDD, startReceiver)
+…
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="http://images2015.cnblogs.com/blog/855959/201608/855959-20160801123013293-1806864419.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　　　　　　　　　　　　　　　　　　　　　　　　　　　　图 &nbsp;2 Spark Streaming 接收器</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　<strong><span style="color:rgb(0,0,255);">　</span></strong></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><strong><span style="color:rgb(0,0,255);">2. 数据接收与转化</span></strong><br> 在上面的“初始化与接收数据”部分中已经介绍过 receiver 集合转换为 RDD在集群上分布式地接收数据流。那么每个 receiver 是怎样接收并处理数据流的呢读者可以通过图 3对输入流的处理有一个全面的了解。图 3为 Spark Streaming 数据接收与转化的示意图。<br> 图 3 的主要流程如下。<br> 1数据缓冲在 receiver 的 receive 函数中接收流数据将接收到的数据源源不断地放入到 BlockGenerator.currentBuffer。<br> 2缓冲数据转化为数据块在 BlockGenerator 中有一个定时器RecurringTimer将 当 前 缓 冲 区 中 的 数 据 以 用 户 定 义 的 时 间 间 隔 封 装 为 一 个 数 据 块 Block 放 入 到<br> BlockGenerator 的 blocksForPush 队列中这个队列。<br> 3数据块转化为 Spark 数据块在 BlockGenerator 中有一个 BlockPushingThread线程不断地将 blocksForPush 队列中的块传递给 BlockManager让 BlockManager 将<br> 数据存储为块。 BlockManager 负责 Spark 中的块管理。<br> 4元数据存储在 pushArrayBuffer 方法中还会将已经由 BlockManager 存储的元数据信息例如 Block 的 id 号传递给 ReceiverTracker ReceiverTracker 会将存储的<br> blockId 放到对应 StreamId 的队列中。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="http://images2015.cnblogs.com/blog/855959/201608/855959-20160801123131747-1831187160.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　　　　　　　　　　　　　　　　　　图 3 Spark Streaming 数据接收与转化</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　　图中部分组件的作用如下<br> 　　<span style="color:rgb(255,0,0);">KeepPushingBlocks</span>调用此方法持续写入和保持数据块。<br> 　　<span style="color:rgb(255,0,0);">pushArrayBuffer</span>调用 pushArrayBuffer 方法将数据块存储到 BlockManager 中。<br> 　　<span style="color:rgb(255,0,0);">reportPushedBlock</span>存储完成后汇报数据块信息到主节点。<br> 　　<span style="color:rgb(255,0,0);">receivedBlockInfo Meta Data</span>已经接收到的数据块元数据记录。<br> 　<span style="color:rgb(255,0,0);">　streamId</span>数据流 Id。<br> 　　<span style="color:rgb(255,0,0);">BlockInfo</span>数据块元数据信息。<br> 　　<span style="color:rgb(255,0,0);">BlockManager.put</span>数据块存储器写入备份数据块到其他节点。<br> 　　<span style="color:rgb(255,0,0);">Receiver&nbsp;</span>数据块接收器接收数据块。<br> 　　<span style="color:rgb(255,0,0);">BlockGenerator</span>数据块生成器将数据缓存生成 Spark 能处理的数据块。<br> 　<span style="color:rgb(255,0,0);">　BlockGenerator.currentBuffer</span>&nbsp;缓存网络接收的数据记录等待之后转换为 Spark的数据块。<br> 　<span style="color:rgb(255,0,0);">　BlockGenerator.blocksForPushing</span>&nbsp;将一块连续数据记录暂存为数据块待后续转换为 Spark 能够处理的 BlockManager 中的数据块A Block As a BlockManager’s&nbsp;Block)。<br> 　　<span style="color:rgb(255,0,0);">BlockGenerator.blockPushingThread</span>守护线程负责将数据块转换为 BlockManager中数据块。<br> 　　<span style="color:rgb(255,0,0);">ReceiveTracker</span>输入数据块的元数据管理器负责管理和记录数据块。<br> 　<span style="color:rgb(255,0,0);">　BlockManager</span> Spark 数据块管理器负责数据块在内存或磁盘的管理。<br> 　　<span style="color:rgb(255,0,0);">&nbsp;RecurringTimer</span>时间触发器每隔一定时间进行缓存数据的转换。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　　上面的过程中涉及最多的类就是 BlockGenerator在数据转化的过程中其扮演者不可或缺的角色。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span>[streaming] <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">class</span><span style="font-size:12px;line-height:1.5;"> BlockGenerator(
+listener: BlockGeneratorListener,
+receiverId: Int,
+conf: SparkConf
+) extends Logging</span></pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br><br></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><strong><span style="color:rgb(0,0,255);">3. 生成 RDD 与提交 Spark Job</span></strong><br> Spark Streaming 根据时间段将数据切分为 RDD然后触发 RDD 的 Action 提交 Job Job 被 提 交 到 Job Manager 中 的 Job Queue 中 由 Job Scheduler 调 度 之 后Job Scheduler 将 Job 提交到 Spark 的 Job 调度器然后将 Job 转换为大量的任务分发给 Spark 集群执行如图 4 所示。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="http://images2015.cnblogs.com/blog/855959/201608/855959-20160801123155465-688776049.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　　　　　　　　　　　　　　　　图&nbsp;4 &nbsp; &nbsp;Spark Streaming 调度模型</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;　　Job generator 中通过下面的方法生成 Job 进行调度和执行。<br> 从下面的代码可以看出 job 是从 outputStream 中生成的然后再触发反向回溯执行<br> 整个 DStream DAG类似 RDD 的机制。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span><span style="font-size:12px;line-height:1.5;"> def generateJobs(time: Time) {
+SparkEnv.</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">set</span><span style="font-size:12px;line-height:1.5;">(ssc.env)
+Try(graph.generateJobs(time)) match {
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">case</span> Success(jobs) =&gt;
+<span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 获取输入数据块的元数据信息</span>
+val receivedBlockInfo = graph.getReceiverInputStreams.map { stream =&gt;<span style="font-size:12px;line-height:1.5;">
+. . .
+}.toMap
+jobScheduler.submitJobSet(JobSet(time, jobs, receivedBlockInfo))
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">case</span> Failure(e) =&gt;<span style="font-size:12px;line-height:1.5;">
+jobScheduler.reportError(</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">Error generating jobs for time </span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span> +<span style="font-size:12px;line-height:1.5;"> time, e)
+}
+eventActor </span>!<span style="font-size:12px;line-height:1.5;">DoCheckpoint(time)
+}
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 下 面 进 入 JobScheduler 的 submitJobSet 方 法 一 探 究 竟 JobScheduler 是 整 个 Spark</span>
+<span style="font-size:12px;line-height:1.5;">Streaming 调度的核心组件
+def submitJobSet(jobSet: JobSet) {
+. . .
+jobSets.put(jobSet.time, jobSet)
+jobSet.jobs.</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">foreach</span>(job =&gt; jobExecutor.execute(<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> JobHandler(job)))
+. . .
+}
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 进入 Graph 生成 job 的方法 Graph 本质是 DStreamGraph 类生成的对象</span>
+final <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span>[streaming] <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">class</span><span style="font-size:12px;line-height:1.5;"> DStreamGraph extends Serializable with
+
+Logging {
+def generateJobs(time: Time): Seq[Job] </span>=<span style="font-size:12px;line-height:1.5;"> {
+. . .
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span> val inputStreams = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> ArrayBuffer[InputDStream[_]]()
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span> val outputStreams = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> ArrayBuffer[DStream[_]]()
+. . .
+val jobs </span>= <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">this</span><span style="font-size:12px;line-height:1.5;">.synchronized {
+outputStreams.flatMap(outputStream </span>=&gt;<span style="font-size:12px;line-height:1.5;"> outputStream.generateJob(time))
+. . .
+}
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> outputStreams 中的对象是 DStream下面进入 DStream 的 generateJob 一探究竟</span>
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span>[streaming] def generateJob(time: Time): Option[Job] =<span style="font-size:12px;line-height:1.5;"> {
+getOrCompute(time) match {
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">case</span> Some(rdd) =&gt;<span style="font-size:12px;line-height:1.5;"> {
+val jobFunc </span>= () =&gt;<span style="font-size:12px;line-height:1.5;"> {
+val emptyFunc </span>= { (iterator: Iterator[T]) =&gt;<span style="font-size:12px;line-height:1.5;"> {} }
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 此处相当于针对每个时间段生成的一个 RDD会调用 SparkContext 的方法 runJob 提交 Spark 的一</span>
+<span style="font-size:12px;line-height:1.5;">个 Job
+context.sparkContext.runJob(rdd, emptyFunc)
+}
+Some(</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> Job(time, jobFunc))
+}
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">case</span> None =&gt;<span style="font-size:12px;line-height:1.5;"> None
+}
+}
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> 在 DStream 算是父类一些具体的 DStream 例如 SocketInputStream 等的类的父类可以通过</span>
+<span style="font-size:12px;line-height:1.5;">SocketInputDStream 看是如何通过上面的 getOrCompute 生成 RDD 的
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span>[streaming] def getOrCompute(time: Time): Option[RDD[T]] =<span style="font-size:12px;line-height:1.5;"> {
+generatedRDDs.</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">get</span><span style="font-size:12px;line-height:1.5;">(time) match {
+. . .
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">case</span> None =&gt;<span style="font-size:12px;line-height:1.5;"> {
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span><span style="font-size:12px;line-height:1.5;"> (isTimeValid(time)) {
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> Dstream 是个父类这里代表的是子类的 compute 方法 DStream 通过 compute 调用用户自定</span>
+<span style="font-size:12px;line-height:1.5;">义函数。当任务执行时同一个 stage 中的 DStream 函数会串联依次执行
+compute(time) match {
+. . .
+generatedRDDs.put(time, newRDD)
+. . .
+}
+在 SocketInputDStream 的 compute 方法中生成了对应时间片的 RDD
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">override</span> def compute(validTime: Time): Option[RDD[T]] =<span style="font-size:12px;line-height:1.5;"> {
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span> (validTime &gt;=<span style="font-size:12px;line-height:1.5;"> graph.startTime) {
+val blockInfo </span>=<span style="font-size:12px;line-height:1.5;"> ssc.scheduler.receiverTracker.getReceivedBlockInfo(id)
+
+receivedBlockInfo(validTime) </span>=<span style="font-size:12px;line-height:1.5;"> blockInfo
+val blockIds </span>=<span style="font-size:12px;line-height:1.5;"> blockInfo.map(_.blockId.asInstanceOf[BlockId])
+Some(</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> BlockRDD[T](ssc.sc, blockIds))
+} </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">else</span><span style="font-size:12px;line-height:1.5;"> {
+Some(</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> BlockRDD[T](ssc.sc, Array[BlockId]()))
+}
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">　　Spark Streaming 在保证实时处理的要求下还能够保证高吞吐与容错性。用户的数据分析中很多情况下也存在需要分析图数据运行图算法通过 GraphX 可以简便地开发分布式图分析算法。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p><font><span style="font-size:14px;">本文转自大数据躺过的坑博客园博客原文链接http://www.cnblogs.com/zlslch/p/5725374.html如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

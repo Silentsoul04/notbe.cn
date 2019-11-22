@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>SQL Server-聚焦深入理解死锁以及避免死锁建议（三十三） « NotBeCN</title>
+  <meta name="description" content="             前言    终于进入死锁系列，前面也提到过我一直对隔离级别和死锁以及如何避免死锁等问题模棱两可，所以才鼓起了重新学习SQL Server系列的勇气，本节我们来讲讲SQL Server中的死锁，看到许多文章都只简述不能这样做，这样做会导致死锁，但是未理解其基本原理，下次遇到类似情况依然会犯...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/13/weixin_34326179_90133184.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">SQL Server-聚焦深入理解死锁以及避免死锁建议（三十三）</h1>
+    <p class="post-meta">Nov 13, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:'Helvetica Neue', Arial;">前言</h1> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">终于进入死锁系列，前面也提到过我一直对隔离级别和死锁以及如何避免死锁等问题模棱两可，所以才鼓起了重新学习SQL Server系列的勇气，本节我们来讲讲SQL Server中的死锁，看到许多文章都只简述不能这样做，这样做会导致死锁，但是未理解其基本原理，下次遇到类似情况依然会犯错，所以基于了解死锁原理并且得到治疗死锁良方，博主不惜花费多天时间来学习死锁最终总结出本文，若有叙述不当之处请在评论中指出。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">死锁定义</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">死锁是两个或多个进程互相阻塞的情况。两个进程死锁的例子是，进程A阻塞进程B且进程B阻塞进程B。涉及多个进程死锁的例子是，进程A阻塞进程B，进程B阻塞进程C且进程C阻塞进程A。在任何一种情况下，SQL Server检测到死锁，都会通过终止其中的一个事务尽心干预。如果SQL Server不干预，涉及的进程永远陷于死锁状态。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">除外另外指定，SQL Server选择终止工作最少的事务，因为它便于回滚该事务的工作。但是，SQL Server允许用户设置一个叫做DEADLOCK_PRIORITY的会话选项，可以是范围在-10~10之间的21个值中的任意值，死锁优先级最低的进程将被作为牺牲对象，而不管其做了多少工作。我们可以举一个生活中常见和死锁类似的例子，当在车道上行驶时，快到十字路口的红灯时，此时所有的小车都已经就绪等待红灯，当变绿灯时，此时有驾驶员发现走错了车道，于是开始变换车道，但是别的车道都拥堵在一块根本插不进去，驾驶员只有等待有空隙时再插进去，同时驾驶员车道上后面的小车又在等待驾驶员开到别的车道。这种情况虽然不恰当，但是在一定程度上很好的表现了死锁的情况，所以在开车时尽量别吵吵，否则谁都走不了，keep silence。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201702/589642-20170218212317941-2073347103.jpg" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">下面我们来演示常见的一种死锁情况，然后我们再来讨论如何减少系统中死锁的发生。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">读写死锁</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">在SQL Server数据库中我们打开两个连接并确保都已连接到数据库，在会话一中我们试图去更新Production.Products表中产品2的行。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">SET TRAN ISOLATION LEVEL READ COMMITTED 
+
+BEGIN TRAN;
+
+UPDATE Production.Products
+SET unitprice </span>+= <span style="color:rgb(128,0,128);line-height:1.5;">1.00</span><span style="line-height:1.5;">
+WHERE productid </span>= <span style="color:rgb(128,0,128);line-height:1.5;">2</span>;</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">在会话2中再来打开一个事务，更新Sales.OrderDetails表中产品2的行，并使事务保持打开状态</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">SET TRAN ISOLATION LEVEL READ COMMITTED
+ 
+BEGIN TRAN
+
+UPDATE Sales.OrderDetails
+SET unitprice </span>+= <span style="color:rgb(128,0,128);line-height:1.5;">1.00</span><span style="line-height:1.5;">
+WHERE productid </span>= <span style="color:rgb(128,0,128);line-height:1.5;">2</span>;</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时上述会话一和会话二都用其会话的排他锁且都能更新成功，下面我们再来在会话一中进行查询Sale.OrderDetails表中产品2的行并提交事务。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">SET TRAN ISOLATION LEVEL READ COMMITTED
+ 
+BEGIN TRAN;
+
+SELECT orderid, productid, unitprice
+FROM Sales.OrderDetails
+WHERE productid </span>= <span style="color:rgb(128,0,128);line-height:1.5;">2</span><span style="line-height:1.5;">;
+
+COMMIT TRAN;</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201702/589642-20170219223620988-1007431961.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">因为需要查询Sales.OrderDetails表中产品2的行，但是在之前我们更新产品2的行同时并未提交事务，因为查询的共享锁和排它锁不兼容，最终导致查询会阻塞，接下来我们在会话二中再来查询Producution.Products表中产品为2的行。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">SET TRAN ISOLATION LEVEL READ COMMITTED
+
+BEGIN TRAN
+
+SELECT productid, unitprice
+FROM Production.Products
+WHERE productid </span>= <span style="color:rgb(128,0,128);line-height:1.5;">2</span><span style="line-height:1.5;">;
+
+COMMIT TRAN;</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201702/589642-20170219223933988-1605160401.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们看到在会话二中能成功查询到Production.Products表中产品2的行，同时我们再来看看会话一中查询情况。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201702/589642-20170219224056394-1783813822.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述死锁算是最常见的死锁情况，在会话一（A进程）中去更新Production.Products表中产品2的行，在会话二（B进程）去更新Sales.OrderDetails表中产品2的行，但是接下来在会话一中去查询Sales.OrderDetails表中产品2的行，此时B进程要等待A进程中未提交的事务进行提交，所以导致A进程将阻塞B进程，接着在会话二中去查询Production.Products表中产品2的行，此时A进程要等待B进程中未提交的事务进行提交，所以导致B进程阻塞A进程，最终结果将是死锁。所以到了这里我们能够很清楚地知道在两个或多个事务中注意事务之间不能交叉进行。要是面试时忘记了肿么办，告诉你一个简单的方法，当军训或者上体育课正步走时只有1、2、1，没有1、2、2就行。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">写写死锁</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">想必大家大部分只知道上述情况的死锁，上述情况是什么情况，我们抽象一下则是不同表之间导致的死锁，下面我们来看看同一表中如何产生死锁，这种情况大家更加需要注意了。我们首先创建死锁测试表并对表中列Id,Name创建唯一聚集索引，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE tempdb
+GO
+CREATE TABLE DeadlocksExample
+(Id INT, Name CHAR(</span><span style="color:rgb(128,0,128);line-height:1.5;">20</span>), Company CHAR(<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">));
+GO
+CREATE UNIQUE CLUSTERED INDEX deadlock_idx ON DeadlocksExample (Id, Name)
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">接下来在会话一中插入一条测试数据开启事务但是并未提交，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">BEGIN TRAN
+INSERT INTO dbo.DeadlocksExample
+VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Jeffcky</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">KS</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">接下来再来打开一个会话二插入一条数据开启事务但是并未提交，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">BEGIN TRAN
+INSERT INTO DeadlocksExample
+VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">10</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">KS</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Jeffcky</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">再来在会话一中插入一条数据。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">INSERT INTO DeadlocksExample
+VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">10</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">KS</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Jeffcky</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时此次插入将会阻塞，如下：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170302222649220-1596796703.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">最后再来在会话二中插入一条数据</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">INSERT INTO DeadlocksExample
+VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Jeffcky</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">KS</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时此次插入能进行但是会显示死锁信息，如下：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170302222424891-413075780.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">想必大多数情况下看到的是通过不同表更新行产生的死锁，在这里我们演示了在相同表通过插入行也会导致死锁，死锁真是无处不在。上述发生死锁的主要原因在于第二次在会话一中去插入相同数据行时此时由于我们创建了Id和Name的唯一聚集索引所以SQL Server内部会尝试去读取行导致插入阻塞，在会话一中去插入行同理，最终造成彼此等待而死锁。为了更深入死锁知识，我们来看看如何从底层来探测死锁，上述发生死锁后，我们通过运行如下语句来查询死锁图：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>SELECT XEvent.query(<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">(event/data/value/deadlock)[1]</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">) AS DeadlockGraph 
+FROM ( SELECT XEvent.query(</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">.</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">) AS XEvent 
+       FROM ( SELECT CAST(target_data AS XML) AS TargetData 
+              FROM sys.dm_xe_session_targets st 
+                   JOIN sys.dm_xe_sessions s 
+                   ON s.address </span>=<span style="line-height:1.5;"> st.event_session_address 
+              WHERE s.name </span>= <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">system_health</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> 
+                    AND st.target_name </span>= <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">ring_buffer</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> 
+              ) AS Data 
+              CROSS APPLY 
+                 TargetData.nodes 
+                    (</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">RingBufferTarget/event[@name="xml_deadlock_report"]</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">)
+              AS XEventData ( XEvent ) 
+      ) AS src;</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时你将发现会出现如下xml的数据：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170304215925782-1754680991.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们点看死锁图来分析分析：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>&lt;deadlock&gt;
+  &lt;victim-list&gt;
+    &lt;victimProcess id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">process17602d868</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> /&gt;
+  &lt;/victim-list&gt;
+  &lt;process-list&gt;
+    &lt;process id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">process17602d868</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> taskpriority=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> logused=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">300</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> waitresource=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">KEY: 2:2089670228247904256 (4e0d37de3c51)</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> waittime=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">4222</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> ownerId=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">49122</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> transactionname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">user_transaction</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lasttranstarted=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2017-03-04T21:56:15.447</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> XDES=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0x16db8c3a8</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lockMode=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">X</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> schedulerid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">4</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> kpid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">8296</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> status=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">suspended</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> spid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">59</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> sbid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> ecid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> priority=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> trancount=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lastbatchstarted=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2017-03-04T21:56:47.080</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lastbatchcompleted=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2017-03-04T21:56:15.450</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lastattention=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1900-01-01T00:00:00.450</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> clientapp=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">Microsoft SQL Server Management Studio - 查询</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> hostname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">WANGPENG</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> hostpid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1640</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> loginname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">wangpeng\JeffckyWang</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> isolationlevel=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">read committed (2)</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> xactid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">49122</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> currentdb=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lockTimeout=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">4294967295</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> clientoption1=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">671090784</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> clientoption2=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">390200</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>&gt;
+      &lt;executionStack&gt;
+        &lt;frame procname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">adhoc</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> line=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> stmtstart=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">84</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> sqlhandle=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0x02000000ea13d9115e8a4d429bc3d549e9053a3a784358020000000000000000000000000000000000000000</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>&gt;<span style="line-height:1.5;">
+INSERT INTO [DeadlocksExample] values(@</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>,@<span style="color:rgb(128,0,128);line-height:1.5;">2</span>,@<span style="color:rgb(128,0,128);line-height:1.5;">3</span>)    &lt;/frame&gt;
+        &lt;frame procname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">adhoc</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> line=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> sqlhandle=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0x020000009882c20809f279b6638fea1ef34b7986efb6b60a0000000000000000000000000000000000000000</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>&gt;<span style="line-height:1.5;">
+INSERT INTO DeadlocksExample
+VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Jeffcky</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">KS</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)    &lt;/frame&gt;
+      &lt;/executionStack&gt;
+      &lt;inputbuf&gt;<span style="line-height:1.5;">
+INSERT INTO DeadlocksExample
+VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Jeffcky</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">KS</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)   &lt;/inputbuf&gt;
+    &lt;/process&gt;
+    &lt;process id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">process17602dc38</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> taskpriority=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> logused=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">300</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> waitresource=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">KEY: 2:2089670228247904256 (381c351990d5)</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> waittime=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">20467</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> ownerId=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">49022</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> transactionname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">user_transaction</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lasttranstarted=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2017-03-04T21:56:06.070</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> XDES=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0x16db8d6a8</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lockMode=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">X</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> schedulerid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">4</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> kpid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2684</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> status=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">suspended</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> spid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">54</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> sbid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> ecid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> priority=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> trancount=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lastbatchstarted=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2017-03-04T21:56:30.837</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lastbatchcompleted=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2017-03-04T21:56:06.070</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lastattention=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1900-01-01T00:00:00.070</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> clientapp=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">Microsoft SQL Server Management Studio - 查询</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> hostname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">WANGPENG</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> hostpid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1640</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> loginname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">wangpeng\JeffckyWang</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> isolationlevel=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">read committed (2)</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> xactid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">49022</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> currentdb=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> lockTimeout=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">4294967295</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> clientoption1=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">671090784</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> clientoption2=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">390200</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>&gt;
+      &lt;executionStack&gt;
+        &lt;frame procname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">adhoc</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> line=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> stmtstart=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">84</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> sqlhandle=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0x02000000ea13d9115e8a4d429bc3d549e9053a3a784358020000000000000000000000000000000000000000</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>&gt;<span style="line-height:1.5;">
+INSERT INTO [DeadlocksExample] values(@</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>,@<span style="color:rgb(128,0,128);line-height:1.5;">2</span>,@<span style="color:rgb(128,0,128);line-height:1.5;">3</span>)    &lt;/frame&gt;
+        &lt;frame procname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">adhoc</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> line=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> sqlhandle=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0x02000000579d610429b0df7caee58044a9e5b493ea0d8e450000000000000000000000000000000000000000</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>&gt;<span style="line-height:1.5;">
+INSERT INTO DeadlocksExample
+VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">10</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">KS</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Jeffcky</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)    &lt;/frame&gt;
+      &lt;/executionStack&gt;
+      &lt;inputbuf&gt;<span style="line-height:1.5;">
+INSERT INTO DeadlocksExample
+VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">10</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">KS</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Jeffcky</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)   &lt;/inputbuf&gt;
+    &lt;/process&gt;
+  &lt;/process-list&gt;
+  &lt;resource-list&gt;
+    &lt;keylock hobtid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2089670228247904256</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> dbid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> objectname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tempdb.dbo.DeadlocksExample</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> indexname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">lock172b46e80</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> mode=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">X</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> associatedObjectId=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2089670228247904256</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>&gt;
+      &lt;owner-list&gt;
+        &lt;owner id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">process17602dc38</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> mode=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">X</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> /&gt;
+      &lt;/owner-list&gt;
+      &lt;waiter-list&gt;
+        &lt;waiter id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">process17602d868</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> mode=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">X</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> requestType=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">wait</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> /&gt;
+      &lt;/waiter-list&gt;
+    &lt;/keylock&gt;
+    &lt;keylock hobtid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2089670228247904256</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> dbid=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> objectname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tempdb.dbo.DeadlocksExample</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> indexname=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">lock172b48b00</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> mode=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">X</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> associatedObjectId=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">2089670228247904256</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>&gt;
+      &lt;owner-list&gt;
+        &lt;owner id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">process17602d868</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> mode=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">X</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> /&gt;
+      &lt;/owner-list&gt;
+      &lt;waiter-list&gt;
+        &lt;waiter id=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">process17602dc38</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> mode=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">X</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> requestType=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">wait</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> /&gt;
+      &lt;/waiter-list&gt;
+    &lt;/keylock&gt;
+  &lt;/resource-list&gt;
+&lt;/deadlock&gt;</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">东西貌似比较多哈，别着急我也是菜鸟，我们慢慢看，我们将其折叠，重点是分为如下两块：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170304220311407-1930406781.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">死锁最重要的两个节点则是如上process和resource，我们再来一块一块分析，首先看process-list</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170304220634298-1911135953.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">&nbsp;如上我们能够很清晰的看到关于死锁的所有细节，我们查询的SQL语句、隔离级别以及事务开始和结束的时间等更多详细介绍，我们再来看看resource-list</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170304221103673-773398960.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">而resource-list则列举出了关于锁的所有资源，如上列举出了每个进程获取到的锁以及请求的锁。我们从上看出通过&nbsp;<span class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">objectname</span>&nbsp;来标识数据库关于死锁的表，我们可以通过&nbsp;<span class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">associatedObjectId</span>&nbsp;关联对象Id来得到表明和索引，运行如下查询：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">SELECT OBJECT_NAME(p.object_id) AS TableName , 
+       i.name AS IndexName 
+FROM sys.partitions AS p 
+     INNER JOIN sys.indexes AS i ON p.object_id </span>=<span style="line-height:1.5;"> i.object_id 
+                                    AND p.index_id </span>=<span style="line-height:1.5;"> i.index_id 
+WHERE partition_id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">2089670228247904256</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170304222604391-1195423504.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述resource-list节点下有两个重要的子节点：owner-list和waiter-list，owner-list从字面意思理解则是拥有锁的进程，同理waiter-list则是请求锁并且等待这个拥有锁的进程释放的进程。我们能够看到上述涉及到的都是排它锁。resource-list中的过程大概如下：</p> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">（1）进程dc38获取在表&nbsp;<span class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">DeadlocksExample</span>&nbsp;上键中的排它锁。</h3> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">（2）进程d868获取在表&nbsp;<span class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">DeadlocksExample</span>&nbsp;上键中的排它锁。</h3> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">（3）进程d868请求在表&nbsp;<span class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">DeadlocksExample</span>&nbsp;上键中的排它锁。</h3> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">（4）进程dc38请求在表&nbsp;<span class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">DeadlocksExample</span>&nbsp;上键中的排它锁。</h3> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">所以为何一般不推荐使用联合主键，若使用联合主键则该情况如上述所述，此时两个列默认创建则是唯一聚集索引，当有并发情况产生时会就有可能导致在同一表中插入相同的值此时将导致死锁情况发生，想必大部分使用联合主键的情景应该是在关联表中，将两个Id标识为联合主键，此时我们应该重新设置一个主键无论是INT或者GUID也好都比联合主键要强很多。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">实战拓展&nbsp;</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述我们大概了解了下死锁图以及相关节点解释，接下来我们来演示几种常见的死锁并逐步分析。我们来看看。</p> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">避免逻辑死锁</h3> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们创建如下测试表并默认插入数据：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">CREATE TABLE Table1
+(
+    Column1 INT,
+    Column2 INT
+)
+GO
+INSERT INTO Table1 VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>, <span style="color:rgb(128,0,128);line-height:1.5;">1</span>), (<span style="color:rgb(128,0,128);line-height:1.5;">2</span>, <span style="color:rgb(128,0,128);line-height:1.5;">2</span>),(<span style="color:rgb(128,0,128);line-height:1.5;">3</span>, <span style="color:rgb(128,0,128);line-height:1.5;">3</span>),(<span style="color:rgb(128,0,128);line-height:1.5;">4</span>, <span style="color:rgb(128,0,128);line-height:1.5;">4</span><span style="line-height:1.5;">)
+GO
+
+
+CREATE TABLE Table2
+(
+    Column1 INT,
+    Column2 INT
+)
+GO
+INSERT INTO Table2 VALUES (</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>, <span style="color:rgb(128,0,128);line-height:1.5;">1</span>), (<span style="color:rgb(128,0,128);line-height:1.5;">2</span>, <span style="color:rgb(128,0,128);line-height:1.5;">2</span>),(<span style="color:rgb(128,0,128);line-height:1.5;">3</span>, <span style="color:rgb(128,0,128);line-height:1.5;">3</span>),(<span style="color:rgb(128,0,128);line-height:1.5;">4</span>, <span style="color:rgb(128,0,128);line-height:1.5;">4</span><span style="line-height:1.5;">)
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们进行数据更新对Column2，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>UPDATE Table1 SET Column1 = <span style="color:rgb(128,0,128);line-height:1.5;">3</span> WHERE Column2 = <span style="color:rgb(128,0,128);line-height:1.5;">1</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170305233748673-2037543760.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时由于我们对列Column2没有创建索引，所以会造成SQL Server引擎会进行全表扫描去堆栈中找到我们需要更新的数据，同时呢SQL Server会对该行更新的数据获取一个排它锁，当我们进行如下查询时</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">SELECT Column1 FROM Table1
+WHERE Column2 </span>= <span style="color:rgb(128,0,128);line-height:1.5;">4</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时将获取共享锁，即使上述更新和此查询语句在不同的会话中都不会造成阻塞，虽然排它锁和共享锁不兼容，因为上述更新数据的内部事务已经提交，所以排它锁已经释放。下面我们来看看死锁情况，我们打开两个会话并确保会话处于连接状态。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">在会话一中我们对表一上的Column1列进行更新通过筛选条件Column2同时开启事务并未提交，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">BEGIN TRANSACTION
+ 
+UPDATE Table1 SET Column1 </span>= <span style="color:rgb(128,0,128);line-height:1.5;">3</span> WHERE Column2 = <span style="color:rgb(128,0,128);line-height:1.5;">1</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">会话二同理</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">BEGIN TRANSACTION
+ 
+UPDATE Table2 SET Column1 </span>= <span style="color:rgb(128,0,128);line-height:1.5;">5</span> WHERE Column2 = <span style="color:rgb(128,0,128);line-height:1.5;">2</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">同时去更新两个会话中的数据。接下来再在会话一中更新表二中的数据行，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">BEGIN TRANSACTION
+ 
+SELECT Column1 FROM Table2
+WHERE Column2 </span>= <span style="color:rgb(128,0,128);line-height:1.5;">3</span><span style="line-height:1.5;">
+ 
+ROLLBACK TRANSACTION</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">在读写死锁中我们已经演示此时查询会造成堵塞，就不再贴图片了。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">同理在会话一中更新表一中的数据行。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">BEGIN TRANSACTION
+ 
+SELECT Column1 FROM Table1
+WHERE Column2 </span>= <span style="color:rgb(128,0,128);line-height:1.5;">4</span><span style="line-height:1.5;">
+ 
+ROLLBACK TRANSACTION
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时运行会话二中的语句，将得到如下死锁信息，当然二者必然有一个死锁牺牲品，至于是哪个会话，那就看SQL Server内部处理机制。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170305235030376-434895636.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述关于表一和表二死锁的情况，大概如下图所示</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170305235226079-1338777362.png" alt="" style="border:0px;">&nbsp;</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述由于没有建立索引导致全表扫描所以对于每行记录都会获取一个共享锁，但是呢，更新数据进程又为提交事务最终会导致死锁，其实我们可以通过建立索引来找到匹配的行同时会绕过在叶子节点上被锁定的行，那么应该创建什么索引呢，对筛选条件创建过滤索引？显然是不行的，因为查询出的列还是到基表中去全表扫描，所以我们常见覆盖索引，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">CREATE NONCLUSTERED INDEX idx_Column2 ON Table1(Column2) INCLUDE(column1)
+CREATE NONCLUSTERED INDEX idx_Column2 ON Table2(Column2) INCLUDE(column1)</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">当我们再次重新进行如上动作时，你会发现在会话一中进行查询时此时将不会导致阻塞，直接能查询出数据，如下：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201703/589642-20170306000720782-81276885.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">所以通过上述表述我们知道好的索引设计能够减少逻辑冲突上的死锁。&nbsp;</p> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">避免范围扫描和SERIALIZABLE死锁</h3> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">比如我们要进行如下查询。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>SELECT CustomerIDFROM Customers WHERE CustomerName = @p1</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">一旦有并发则有可能造成幻影读取即刚开始数据为空行，但是第二次读取时则存在数据，所以此时我们设置更高的隔离级别，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">通过设置该隔离级别即使刚开始数据为空行，它能保证再次读取时返回的数据一定为空行，通过锁住&nbsp;<span class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">WHERE CustomerName = @p1</span>&nbsp;并且它会锁住值等于@p1的所有记录，我们经常有这样的需求，当数据存在时则更新，不存在时则插入，如果你没有想到并发情况的发生，估计到时投诉将落在你身上，所以为了解决两次读取一致的情况我们设置最高隔离级别，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+ 
+BEGIN TRANSACTION
+IF EXISTS ( SELECT  </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">
+            FROM    [dbo].[Customers] WITH ( ROWLOCK )
+            WHERE   CustomerName </span>=<span style="line-height:1.5;"> @p1 )
+    UPDATE  dbo.Customers
+    SET     LatestOrderStatus </span>=<span style="line-height:1.5;"> NULL ,
+            OrderLimit </span>= <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">
+    WHERE   CustomerName </span>=<span style="line-height:1.5;"> @p1;
+ELSE
+    INSERT  INTO dbo.Customers
+            ( CustomerName ,
+              RegionID ,
+              OrderLimit ,
+              LatestOrderStatus
+            )
+    VALUES  ( @p1 ,
+              </span><span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> ,
+              </span><span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> ,
+              NULL
+            );
+COMMIT TRANSACTION</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述假设我们对CustomerName建立了唯一索引并加了行锁来锁住单行数据，看起来so good，实际上有没有问题呢。如果当CustomerName = 'Jeffcky'在该行上面的CustomerName = 'Jeffcky1'，在其下方的CustomerName = 'Jeffcky2'，此时通过设置最高隔离级别将锁住这三行来阻止任何数据的插入，我们可以将其叫做范围共享锁，如果在不同会话中在该范围内插入不同行，此时极有可能造成死锁，你以为设置最高隔离级别就万事大吉了吗。那么该如何解决这个麻烦呢，我们可以通过Merge来避免该死锁，因为Merge操作为单原子操作，我们不在需要最高隔离级别，但是貌似有潜在的bug发生未验证过，同时该Merge我也未用过。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">这个问题是在博问中看到dudu老大提出插入重复数据而想到（博问地址：<a title="SQL Server数据库插入重复记录的问题" href="https://q.cnblogs.com/q/90745/" rel="nofollow" style="text-decoration:none;color:rgb(45,161,45);">https://q.cnblogs.com/q/90745/</a>），dudu老大所给语句为如下SQL语句：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>IF NOT EXISTS(SELECT <span style="color:rgb(128,0,128);line-height:1.5;">1</span> FROM [Relations] WHERE [UserId]=@UserId AND [RelativeUserId]=@RelativeUserId AND IsActive=<span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">)
+BEGIN
+    BEGIN TRANSACTION
+    INSERT INTO [Relations]([UserId], [RelativeUserId]) 
+    VALUES (@UserId,@RelativeUserId)
+    UPDATE [Users] SET FollowingCount</span>=FollowingCount+<span style="color:rgb(128,0,128);line-height:1.5;">1</span> WHERE UserID=<span style="line-height:1.5;">@UserId
+    UPDATE [Users] SET FollowerCount</span>=FollowerCount+<span style="color:rgb(128,0,128);line-height:1.5;">1</span> WHERE UserID=<span style="line-height:1.5;">@RelativeUserId
+    COMMIT TRANSACTION
+END</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">当时我所给出的答案为如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>INERT INTO.....SELECT ...FROM WHERE NOT EXSITS(SELECT <span style="color:rgb(128,0,128);line-height:1.5;">1</span> FROM...)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">对应上述情况我们将上述隔离级别去掉利用两个语句来操作，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">UPDATE  dbo.Customers
+SET     LatestOrderStatus </span>=<span style="line-height:1.5;"> NULL ,
+        OrderLimit </span>= <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">
+WHERE   CustomerName </span>=<span style="line-height:1.5;"> @p1;
+ 
+INSERT  INTO dbo.Customers
+        ( CustomerName ,
+          RegionID ,
+          OrderLimit ,
+          LatestOrderStatus
+        )
+        SELECT  @p1</span>~<span style="line-height:1.5;"> ,
+                </span><span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> ,
+                </span><span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> ,
+                NULL
+        WHERE   NOT EXISTS ( SELECT </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">
+                             FROM   dbo.Customers AS c
+                             WHERE  CustomerName </span>= @p1 )</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时没有事务，上述虽然看起来很好不会引起死锁但是对于插入操作会导致阻塞。我看到上述dudu老大提出的问题有如下答案：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">BEGIN TRANSACTION
+IF NOT EXISTS(SELECT </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span> FROM [Relations] WITH(XLOCK,ROWLOCK) WHERE [UserId]=@UserId AND [RelativeUserId]=@RelativeUserId AND IsActive=<span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">)
+BEGIN
+    INSERT INTO [Relations]([UserId], [RelativeUserId]) 
+    VALUES (@UserId,@RelativeUserId)
+    UPDATE [Users] SET FollowingCount</span>=FollowingCount+<span style="color:rgb(128,0,128);line-height:1.5;">1</span> WHERE UserID=<span style="line-height:1.5;">@UserId
+    UPDATE [Users] SET FollowerCount</span>=FollowerCount+<span style="color:rgb(128,0,128);line-height:1.5;">1</span> WHERE UserID=<span style="line-height:1.5;">@RelativeUserId
+END
+COMMIT TRANSACTION</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">经查资料显示对于XLOCK，SQL Server优化引擎极有可能忽略XLOCK提示，而导致无法解决问题，具体未经过验证。在这里我觉得应该使用UPDLOCK更新锁。通过UPDLOCK与其他更新锁不兼容，通过UPDLOCK来序列化整个过程，当运行第二个进程时，由于第一个进程占用锁导致阻塞，所以直到第一个进程完成整个过程第二个进程都将处于阻塞状态，所以对于dudu老大提出的问题是否最终改造成如下操作呢。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(255,0,0);line-height:1.5;">BEGIN TRANSACTION<br>
+IF NOT EXISTS(SELECT 1 FROM [Relations] WITH (ROWLOCK, UPDLOCK) WHERE [UserId]=@UserId AND [RelativeUserId]=@RelativeUserId AND IsActive=1)
+     UPDATE [Users] SET FollowingCount=FollowingCount+1 WHERE UserID=@UserId;
+     UPDATE [Users] SET FollowerCount=FollowerCount+1 WHERE UserID=@RelativeUserId;
+ELSE
+    INSERT INTO [Relations]
+        　　　　( [UserId], 
+          　　　　[RelativeUserId]
+             　) 
+    VALUES     ( @UserId,
+         　　　　 @RelativeUserId
+            　　); <br>
+COMMIT TRANSACTION</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">总结&nbsp;</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">本节我们比较详细讲解了SQL Server中的死锁以及避免死锁的简单介绍，对于如何避免死锁我们可以从以下来看。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(0,128,0);">（1）锁保持的时间越长，增加了死锁的可能性，尽量缩短事务的时间即尽量使事务简短。</span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(0,128,0);">（2）事务不要交叉进行，按照顺序执行。</span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(0,128,0);">（3）对于有些逻辑可能不可避免需要交叉进行事务，此时我们可能通过良好的索引设计来规避死锁发生。</span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(0,128,0);">（4）我们也可以通过try..catch，捕获事务出错并retry。</span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(0,128,0);">（5）最后则是通过设置隔离级别来减少死锁频率发生。</span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">好了本文到此结束，内容貌似有点冗长，没办法，太多需要学习，对于SQL Server基础系列可能还剩下最后一节内容，那就是各种锁的探讨，我们下节再会，see u。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p><font color="#111111"><span style="font-size:13px;line-height:23.4px;">本文转自Jeffcky博客园博客，原文链接：http://www.cnblogs.com/CreateMyself/p/6362904.html，如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

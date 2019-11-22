@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>在 docker 容器中捕获信号 « NotBeCN</title>
+  <meta name="description" content="             我们可能都使用过 docker stop 命令来停止正在运行的容器，有时可能会使用 docker kill 命令强行关闭容器或者把某个信号传递给容器中的进程。这些操作的本质都是通过从主机向容器发送信号实现主机与容器中程序的交互。比如我们可以向容器中的应用发送一个重新加载信号，容器中的应用...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/17/weixin_34260991_90129128.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">在 docker 容器中捕获信号</h1>
+    <p class="post-meta">Oct 17, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">我们可能都使用过 docker stop 命令来停止正在运行的容器，有时可能会使用 docker kill 命令强行关闭容器或者把某个信号传递给容器中的进程。这些操作的本质都是通过从主机向容器发送信号实现主机与容器中程序的交互。比如我们可以向容器中的应用发送一个重新加载信号，容器中的应用程序在接到信号后执行相应的处理程序完成重新加载配置文件的任务。本文将介绍在 docker 容器中捕获信号的基本知识。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">信号(linux)</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">信号是一种进程间通信的形式。一个信号就是内核发送给进程的一个消息，告诉进程发生了某种事件。当一个信号被发送给一个进程后，进程会立即中断当前的执行流并开始执行信号的处理程序。如果没有为这个信号指定处理程序，就执行默认的处理程序。</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">进程需要为自己感兴趣的信号注册处理程序，比如为了能让程序优雅的退出(接到退出的请求后能够对资源进行清理)一般程序都会处理 SIGTERM 信号。与 SIGTERM 信号不同，SIGKILL 信号会粗暴的结束一个进程。因此我们的应用应该实现这样的目录：捕获并处理 SIGTERM 信号，从而优雅的退出程序。如果我们失败了，用户就只能通过 SIGKILL 信号这一终极手段了。除了 SIGTERM 和 SIGKILL ，还有像 SIGUSR1 这样的专门支持用户自定义行为的信号。下面的代码简单的说明在 nodejs 中如何为一个信号注册处理程序：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>process.on('SIGTERM', <span style="color:rgb(0,0,255);line-height:1.5;">function</span><span style="line-height:1.5;">() {
+  console.log(</span>'shutting down...'<span style="line-height:1.5;">);
+});</span></pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">关于信号的更多信息，笔者在《<a href="http://www.cnblogs.com/sparkdev/p/6659629.html" rel="nofollow" style="color:#000000;">linux kill 命令</a>》一文中有所提及，这里不再赘述。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">容器中的信号</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">Docker 的 stop 和 kill 命令都是用来向容器发送信号的。注意，只有容器中的 1 号进程能够收到信号，这一点非常关键！</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">stop 命令会首先发送 SIGTERM 信号，并等待应用优雅的结束。如果发现应用没有结束(用户可以指定等待的时间)，就再发送一个 SIGKILL 信号强行结束程序。</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">kill 命令默认发送的是 SIGKILL 信号，当然你可以通过 -s 选项指定任何信号。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">下面我们通过一个 nodejs 应用演示信号在容器中的工作过程。创建 app.js 文件，内容如下：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>'use strict'<span style="line-height:1.5;">;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> http = require('http'<span style="line-height:1.5;">);
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> server = http.createServer(<span style="color:rgb(0,0,255);line-height:1.5;">function</span><span style="line-height:1.5;"> (req, res) {
+  res.writeHead(</span>200, {'Content-Type': 'text/plain'<span style="line-height:1.5;">});
+  res.end(</span>'Hello World\n'<span style="line-height:1.5;">);
+}).listen(</span>3000, '0.0.0.0'<span style="line-height:1.5;">);
+
+console.log(</span>'server started'<span style="line-height:1.5;">);
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> signals =<span style="line-height:1.5;"> {
+  </span>'SIGINT': 2<span style="line-height:1.5;">,
+  </span>'SIGTERM': 15<span style="line-height:1.5;">
+};
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">function</span><span style="line-height:1.5;"> shutdown(signal, value) {
+  server.close(</span><span style="color:rgb(0,0,255);line-height:1.5;">function</span><span style="line-height:1.5;"> () {
+    console.log(</span>'server stopped by ' +<span style="line-height:1.5;"> signal);
+    process.exit(</span>128 +<span style="line-height:1.5;"> value);
+  });
+}
+
+Object.keys(signals).forEach(</span><span style="color:rgb(0,0,255);line-height:1.5;">function</span><span style="line-height:1.5;"> (signal) {
+  process.on(signal, </span><span style="color:rgb(0,0,255);line-height:1.5;">function</span><span style="line-height:1.5;"> () {
+    shutdown(signal, signals[signal]);
+  });
+});</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">这个应用是一个 http 服务器，监听端口 3000，为 SIGINT 和 SIGTERM 信号注册了处理程序。接下来我们将介绍以不同的方式在容器中运行程序时信号的处理情况。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">应用程序作为容器中的 1 号进程</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">创建 Dockerfile 文件，把上面的应用打包到镜像中：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">FROM iojs:onbuild
+COPY .</span>/app.js ./<span style="line-height:1.5;">app.js
+COPY .</span>/package.json ./<span style="line-height:1.5;">package.json
+EXPOSE </span><span style="color:rgb(128,0,128);line-height:1.5;">3000</span><span style="line-height:1.5;">
+ENTRYPOINT [</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">node</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">app</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>]</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">请注意 ENTRYPOINT 指令的写法，这种写法会让 node 在容器中以 1 号进程的身份运行。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">接下来创建镜像：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker build --no-cache -t signal-app -f Dockerfile .</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">然后启动容器运行应用程序：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker run -it --<span style="color:rgb(0,0,255);line-height:1.5;">rm</span> -p <span style="color:rgb(128,0,128);line-height:1.5;">3000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">3000</span> --name=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">my-app</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> signal-app</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">此时 node 应用在容器中的进程号为 1：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><img src="https://images2017.cnblogs.com/blog/952033/201709/952033-20170926194718887-1789392292.png" alt="" style="border:0px;"></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">现在我们让程序退出，执行命令：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker container <span style="color:rgb(0,0,255);line-height:1.5;">kill</span> --signal=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">SIGTERM</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> my-app</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">此时应用会以我们期望的方式退出：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><img src="https://images2017.cnblogs.com/blog/952033/201709/952033-20170926194728528-767382755.png" alt="" style="border:0px;"></span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;"><span>应用程序不是容器中的 1 号进程</span></span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">创建一个启动应用程序的脚本文件 app1.sh，内容如下：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>#!/usr/bin/<span style="color:rgb(0,0,255);line-height:1.5;">env</span><span style="line-height:1.5;"> bash
+node app </span></pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">然后创建 Dockerfile1 文件，内容如下：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">FROM iojs:onbuild
+COPY .</span>/app.js ./<span style="line-height:1.5;">app.js
+COPY .</span>/app1.<span style="color:rgb(0,0,255);line-height:1.5;">sh</span> ./app1.<span style="color:rgb(0,0,255);line-height:1.5;">sh</span><span style="line-height:1.5;">
+COPY .</span>/package.json ./<span style="line-height:1.5;">package.json
+RUN </span><span style="color:rgb(0,0,255);line-height:1.5;">chmod</span> +x ./app1.<span style="color:rgb(0,0,255);line-height:1.5;">sh</span><span style="line-height:1.5;">
+EXPOSE </span><span style="color:rgb(128,0,128);line-height:1.5;">3000</span><span style="line-height:1.5;">
+ENTRYPOINT [</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">./app1.sh</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>]</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">接下来创建镜像：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker build --no-cache -t signal-app1 -f Dockerfile1 .</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">然后启动容器运行应用程序：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker run -it --<span style="color:rgb(0,0,255);line-height:1.5;">rm</span> -p <span style="color:rgb(128,0,128);line-height:1.5;">3000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">3000</span> --name=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">my-app1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> signal-app1</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">此时 node 应用在容器中的进程号不再是 1：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><img src="https://images2017.cnblogs.com/blog/952033/201709/952033-20170926194833153-1647085355.png" alt="" style="border:0px;"></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">现在给 my-app1 发送 SIGTERM 信号试试，已经无法退出程序了！在这个场景中，应用程序由 bash 脚本启动，bash 作为容器中的 1 号进程收到了 SIGTERM&nbsp; 信号，但是它没有做出任何的响应动作。</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">我们可以通过：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker container stop my-<span style="line-height:1.5;">app1
+# or
+$ docker container </span><span style="color:rgb(0,0,255);line-height:1.5;">kill</span> --signal=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">SIGKILL</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> my-app1</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">退出应用，它们最终都是向容器中的 1 号进程发送了 SIGKILL 信号。很显然这不是我们期望的，我们希望程序能够收到 SIGTERM&nbsp; 信号优雅的退出。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">在脚本中捕获信号</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">创建另外一个启动应用程序的脚本文件 app2.sh，内容如下：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>#!/usr/bin/<span style="color:rgb(0,0,255);line-height:1.5;">env</span><span style="line-height:1.5;"> bash
+set </span>-<span style="line-height:1.5;">x
+
+pid</span>=<span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">
+
+# SIGUSR1</span>-<span style="line-height:1.5;">handler
+my_handler() {
+  </span><span style="color:rgb(0,0,255);line-height:1.5;">echo</span> <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">my_handler</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+}
+
+# SIGTERM</span>-<span style="line-height:1.5;">handler
+term_handler() {
+  </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> [ $pid -ne <span style="color:rgb(128,0,128);line-height:1.5;">0</span> ]; <span style="color:rgb(0,0,255);line-height:1.5;">then</span>
+    <span style="color:rgb(0,0,255);line-height:1.5;">kill</span> -SIGTERM <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$pid</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>
+    <span style="color:rgb(0,0,255);line-height:1.5;">wait</span> <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$pid</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>
+  <span style="color:rgb(0,0,255);line-height:1.5;">fi</span><span style="line-height:1.5;">
+  exit </span><span style="color:rgb(128,0,128);line-height:1.5;">143</span>; # <span style="color:rgb(128,0,128);line-height:1.5;">128</span> + <span style="color:rgb(128,0,128);line-height:1.5;">15</span> --<span style="line-height:1.5;"> SIGTERM
+}
+# setup handlers
+# on callback, </span><span style="color:rgb(0,0,255);line-height:1.5;">kill</span> the <span style="color:rgb(0,0,255);line-height:1.5;">last</span> background process, <span style="color:rgb(0,0,255);line-height:1.5;">which</span> is `<span style="color:rgb(0,0,255);line-height:1.5;">tail</span> -f /dev/<span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">` and execute the specified handler
+trap </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">kill ${!}; my_handler</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> SIGUSR1
+trap </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">kill ${!}; term_handler</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> SIGTERM
+
+# run application
+node app </span>&amp;<span style="line-height:1.5;">
+pid</span>=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$!</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+
+# </span><span style="color:rgb(0,0,255);line-height:1.5;">wait</span><span style="line-height:1.5;"> forever
+</span><span style="color:rgb(0,0,255);line-height:1.5;">while</span> <span style="color:rgb(0,0,255);line-height:1.5;">true</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">do</span>
+  <span style="color:rgb(0,0,255);line-height:1.5;">tail</span> -f /dev/<span style="color:rgb(0,0,255);line-height:1.5;">null</span> &amp; <span style="color:rgb(0,0,255);line-height:1.5;">wait</span> ${!<span style="line-height:1.5;">}
+</span><span style="color:rgb(0,0,255);line-height:1.5;">done</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">这个脚本文件在启动应用程序的同时可以捕获发送给它的 SIGTERM 和 SIGUSR1 信号，并为它们添加了处理程序。其中 SIGTERM 信号的处理程序就是向我们的 node 应用程序发送 SIGTERM 信号。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">然后创建 Dockerfile2 文件，内容如下：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">FROM iojs:onbuild
+COPY .</span>/app.js ./<span style="line-height:1.5;">app.js
+COPY .</span>/app2.<span style="color:rgb(0,0,255);line-height:1.5;">sh</span> ./app2.<span style="color:rgb(0,0,255);line-height:1.5;">sh</span><span style="line-height:1.5;">
+COPY .</span>/package.json ./<span style="line-height:1.5;">package.json
+RUN </span><span style="color:rgb(0,0,255);line-height:1.5;">chmod</span> +x ./app2.<span style="color:rgb(0,0,255);line-height:1.5;">sh</span><span style="line-height:1.5;">
+EXPOSE </span><span style="color:rgb(128,0,128);line-height:1.5;">3000</span><span style="line-height:1.5;">
+ENTRYPOINT [</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">./app2.sh</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>]</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">接下来创建镜像：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker build --no-cache -t signal-app2 -f Dockerfile2 .</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">然后启动容器运行应用程序：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker run -it --<span style="color:rgb(0,0,255);line-height:1.5;">rm</span> -p <span style="color:rgb(128,0,128);line-height:1.5;">3000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">3000</span> --name=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">my-app2</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> signal-app2</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">此时 node 应用在容器中的进程号也不是 1，但是它却可以接收到 SIGTERM 信号并优雅的退出了：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><img src="https://images2017.cnblogs.com/blog/952033/201709/952033-20170926194956747-106428789.png" alt="" style="border:0px;"></span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">结论</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">容器中的 1 号进程是非常重要的，如果它不能正确的处理相关的信号，那么应用程序退出的方式几乎总是被强制杀死而不是优雅的退出。究竟谁是 1 号进程则主要由 EntryPoint, CMD, RUN 等指令的写法决定，所以这些指令的使用是很有讲究的。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><br></p> 
+   <p><font><span style="font-size:14px;line-height:21px;">本文转自sparkdev博客园博客，原文链接：http://www.cnblogs.com/sparkdev/p/7598590.html</span></font><span style="font-size:14px;line-height:21px;font-family:Verdana, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>SQL Server-聚焦计算列持久化（二十一） « NotBeCN</title>
+  <meta name="description" content="             前言    上一节我们结束了Hash Match Aggregate和Stream Aggregate的讲解，本系列我们来讲讲关于SQL Server中的计算列问题，简短的内容，深入的理解，Always to review the basics。    初探计算列持久化（Compued ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/20/weixin_33895695_90122151.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">SQL Server-聚焦计算列持久化（二十一）</h1>
+    <p class="post-meta">Nov 20, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:'Helvetica Neue', Arial;">前言</h1> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上一节我们结束了Hash Match Aggregate和Stream Aggregate的讲解，本系列我们来讲讲关于SQL Server中的计算列问题，简短的内容，深入的理解，Always to review the basics。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">初探计算列持久化（Compued Column Persisted）</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">在SQL Server 2005就引入了计算列，我们首先稍微看下在msdn关于计算列的定义：计算列由可以使用同一表中的其他列的表达式计算得来。表达式可以是非计算列的列名、常量、函数，也可以是用一个或多个运算符连接的上述元素的任意组合。表达式不能为子查询。实际上就是为了定义一个列来对其他列来进行计算可以是列名、函数等，那么它的使用场景是什么呢？下面我们首先来举个例子。当需要导出一些值时，此时这些值需要通过计算才能被导出，同时呢，有一些列还依赖于另外的一列或者更多列，如果一个列进行了更新则其依赖的列必须同步进行更新，上述场景通过对一个列或者多个列进行计算，此时我们需要定义一个将一个列或者多个列进行计算得到的值的列，这就是计算列。我们来看一个典型的例子，在一个公司上班的所有员工，在公司内部系统中会存其所有员工的信息，比如员工编号、出生日期等，如果此时我们需要导出员工的退休日期呢，假设在中国现在男性退休时间为60年后，此时我们需要通过出生日期算出60年后的日期，也就说在表中还需要定义一个退休日期列。下面我们创建表来看看计算列。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+CREATE TABLE Employee
+(
+    employeeNumber INT NOT NULL, <span style="color:rgb(128,128,0);line-height:1.5;">--员工编号</span>
+    employeeBirth DATETIME NOT NULL,<span style="color:rgb(128,128,0);line-height:1.5;"> --出生日期</span>
+    employeeRetirement AS (DATEADD(YEAR, </span><span style="color:rgb(128,0,128);line-height:1.5;">60</span>, (employeeBirth)-(<span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">))) PERSISTED <span style="color:rgb(128,128,0);line-height:1.5;">--退休日期</span>
+)</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们看到表中关于退休日期的设计，显示其已经是持久化了的</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161215145610433-1853214161.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">接下来我们插入测试数据看看</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+INSERT INTO dbo.Employee( employeeNumber, employeeBirth )
+SELECT </span><span style="color:rgb(128,0,128);line-height:1.5;">305423</span> ,<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">1985-12-13</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> UNION ALL
+SELECT </span><span style="color:rgb(128,0,128);line-height:1.5;">587650</span> ,<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">1989-11-18</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> UNION ALL
+SELECT </span><span style="color:rgb(128,0,128);line-height:1.5;">221836</span> ,<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">1990-01-19</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> UNION ALL
+SELECT </span><span style="color:rgb(128,0,128);line-height:1.5;">746104</span> ,<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">1993-06-13</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> UNION ALL
+SELECT </span><span style="color:rgb(128,0,128);line-height:1.5;">139024</span> ,<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">1995-07-23</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">然后我们来查询表</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT </span>*<span style="line-height:1.5;">
+FROM dbo.Employee</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161215145748948-2031351604.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们通过查询雇员表得到其每个雇员的退休日期，到这里是没什么问题的，既然我们设置它是持久化的，也就说当其他列发生改变时计算列也会对应发生改变，突然有一天编号为305423的雇员和录入信息的同事交流，他其实是1986年出生的，上面的1985年是身份证上的，身份证搞错了，此时我们需要更新其出生日期到1986年，如下</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>UPDATE dbo.Employee SET employeeBirth = <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">1986-12-13</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> WHERE employeeNumber = <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">305423</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">接下来我们再来查询数据看看。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161215150402604-261223696.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们发现当出生日期发生修改时，其对应的计算列也进行了同步由原来的2045更新到了2046，上述我们添加在计算列中添加了Persisted关键字，是不是因为添加这个关键字导致持久化从而当一个列进行更新时，计算列也就同步更新了呢，难道这就是Persisted持久化的作用吗，实际情况不是这样的，当你去掉Persisted关键字此时也会进行同步更新（不信你可以试试），那么Persisted关键字的作用是什么呢？事实情况是这样的，当我们在列上创建了计算列时，此时计算出来的数据并没有存在列中（至于存在哪里我也不知道），计算的数据是在运行时计算出来的，当用Persisted关键字标识计算列之后，这个时候才是将计算结果存在表中计算列上。继续往下看数据存储空间使用情况就可以得到验证。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">通过计算列持久化进一步探讨数据存储空间</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">下面我们来看看当未添加计算列、添加计算列、计算列持久化时表数据存储空间情况。下面我们来创建测试表</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+CREATE TABLE [dbo].[ComputeColumn] 
+(
+ID INT,
+FirstName VARCHAR(</span><span style="color:rgb(128,0,128);line-height:1.5;">100</span><span style="line-height:1.5;">),
+LastName VARCHAR(</span><span style="color:rgb(128,0,128);line-height:1.5;">100</span><span style="line-height:1.5;">)
+)
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">在表中插入10万条数据</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">INSERT INTO [ComputeColumn] (ID,FirstName,LastName)
+SELECT TOP </span><span style="color:rgb(128,0,128);line-height:1.5;">100000</span><span style="line-height:1.5;"> ROW_NUMBER() OVER (ORDER BY a.name) RowID,
+</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Bob</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">,
+CASE WHEN ROW_NUMBER() OVER (ORDER BY a.name)</span>%<span style="color:rgb(128,0,128);line-height:1.5;">2</span> = <span style="color:rgb(128,0,128);line-height:1.5;">1</span> THEN <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Smith</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">
+ELSE </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Brown</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> END
+FROM sys.all_objects a
+CROSS JOIN sys.all_objects b
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们来看看有关表存储空间使用情况</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+sp_spaceused </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">[ComputeColumn]</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">
+GO</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161215155243714-514736670.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述我们得知存储数据为2680KB，下面我们再来创建计算列看看。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">ALTER TABLE dbo.[ComputeColumn] ADD
+FullName AS (FirstName</span>+<span style="color:rgb(128,0,0);line-height:1.5;">'</span> <span style="color:rgb(128,0,0);line-height:1.5;">'</span>+<span style="line-height:1.5;">LastName)
+GO</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161215155436495-1820580688.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">从这里我们可以得出当创建计算列时其数据根本没有存在列上，我们再来看看添加持久化关键字时情况又是怎样的呢</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">ALTER TABLE dbo.[ComputeColumn] ADD
+FullName_P AS (FirstName</span>+<span style="color:rgb(128,0,0);line-height:1.5;">'</span> <span style="color:rgb(128,0,0);line-height:1.5;">'</span>+<span style="line-height:1.5;">LastName) PERSISTED
+GO</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161215155604323-1489295336.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">当添加持久化关键字时此时表存储数据空间变为了4784KB，到此验证了当未添加Persisted关键字时，在计算列上的数据根本没有存在列上而是在运行时进行了计算，当用Persisted关键字标识计算列时此时数据才存在列上。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">通过计算列持久化深入探讨数据存储空间</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们知道如果对列创建索引的话肯定需要一定空间来存储索引，上述我们对列进行了持久化，此时会增加表存储空间，要是我们创建索引是不是会增加表数据存储空间大小呢？我们在未创建计算列前先创建索引看看其表中各种数据空间存储大小，即在创建的列FullName上创建索引。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+CREATE NONCLUSTERED INDEX idx_comCol_FullName
+ON dbo.ComputeColumn (FullName)</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161215161654120-1977734135.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">因为创建了索引，所以只是导致索引空间变大了，下面我们再创建计算列持久化并看看其表空间使用情况</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+ALTER TABLE dbo.ComputeColumn ADD
+FullName_P AS (FirstName</span>+<span style="color:rgb(128,0,0);line-height:1.5;">'</span> <span style="color:rgb(128,0,0);line-height:1.5;">'</span>+LastName) PERSISTED</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161215161959167-1491110689.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">从上我们可以看到增加索引未导致表数据大小的增加，而创建计算列持久化则需要额外的空间。分析到这里为止，我们来给出一个基本结论：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(128,128,0);">计算列分析结论：计算列的用途主要用于多个计算并且比较复杂的计算，如果对计算列进行持久化虽然能够大大减少计算开销但是它会额外增加磁盘空间。</span></p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">总结</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">本节我们学习了计算列以及将其持久化的基础内容，下一节我们讲讲关于计算列以及计算列持久化的性能问题，简短的内容，深入的理解，我们下节再会。&nbsp;</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p><font color="#111111"><span style="font-size:13px;line-height:23.4px;">本文转自Jeffcky博客园博客，原文链接：http://www.cnblogs.com/CreateMyself/p/6183179.html，如需转载请自行联系原作者</span></font></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

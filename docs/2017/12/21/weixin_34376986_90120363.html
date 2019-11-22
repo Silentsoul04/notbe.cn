@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux进程的创建函数fork()及其fork内核实现解析【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/zengyiwen/p/5755193.html        进程的创建之fork()                 Linux系统下，进程可以调用fork函数来创建新的进程。调用进程为父进程，被创建的进程为子进程。        ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/21/weixin_34376986_90120363.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux进程的创建函数fork()及其fork内核实现解析【转】</h1>
+    <p class="post-meta">Dec 21, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://www.cnblogs.com/zengyiwen/p/5755193.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.cnblogs.com/zengyiwen/p/5755193.html</a></p> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    进程的创建之fork()
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div>
+     Linux系统下，进程可以调用fork函数来创建新的进程。调用进程为父进程，被创建的进程为子进程。
+    </div> 
+    <div>
+     fork函数的接口定义如下：
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;unistd.h&gt;</span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="typ" style="color:#008080;">pid_t<span class="pln" style="color:rgb(72,72,76);">&nbsp;fork<span class="pun" style="color:rgb(147,161,161);">(<span class="kwd" style="color:rgb(30,52,123);">void<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></code></li> 
+     </ol>
+    </div> 
+    <div> 
+     <div>
+      与普通函数不同，fork函数会返回两次。一般说来，创建两个完全相同的进程并没有太多的价值。大部分情况下，父子进程会执行不同的代码分支。fork函数的返回值就成了区分父子进程的关键。fork函数向子进程返回0，并将子进程的进程ID返给父进程。当然了，如果fork失败，该函数则返回-1，并设置errno。
+     </div> 
+     <div>
+      &nbsp;
+     </div> 
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    从2.6.24起，Linux采用完全公平调度（Completely Fair Scheduler，CFS）。用户创建的普通进程，都采用CFS调度策略。对于CFS调度策略，procfs提供了如下控制选项：
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">/<span class="pln" style="color:rgb(72,72,76);">proc<span class="pun" style="color:rgb(147,161,161);">/<span class="pln" style="color:rgb(72,72,76);">sys<span class="pun" style="color:rgb(147,161,161);">/<span class="pln" style="color:rgb(72,72,76);">kernel<span class="pun" style="color:rgb(147,161,161);">/<span class="pln" style="color:rgb(72,72,76);">sched_child_runs_first</span></span></span></span></span></span></span></span></code></li>
+     </ol>
+    </div> 
+    <div>
+     该值默认是0，表示父进程优先获得调度。如果将该值改成1，那么子进程会优先获得调度。
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    &nbsp;
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div>
+     f
+     <span style="line-height:1.6;">ork之后父子进程的内存关系</span> 
+    </div> 
+    <div>
+     fork之后的子进程完全拷贝了父进程的地址空间，包括栈、堆、代码段等。通过下面的示例代码，我们一起来查看父子进程的内存关系：
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;stdio.h&gt;</span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;stdlib.h&gt;</span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;unistd.h&gt;</span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;string.h&gt;</span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;errno.h&gt;</span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;sys/types.h&gt;</span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;wait.h&gt;</span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;g_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1<span class="pun" style="color:rgb(147,161,161);">;//数据段的全局变量</span></span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;main<span class="pun" style="color:rgb(147,161,161);">()</span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">{</span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;local_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1<span class="pun" style="color:rgb(147,161,161);">;//栈上的局部变量</span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">malloc_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;malloc<span class="pun" style="color:rgb(147,161,161);">(<span class="kwd" style="color:rgb(30,52,123);">sizeof<span class="pun" style="color:rgb(147,161,161);">(<span class="typ" style="color:#008080;">int<span class="pun" style="color:rgb(147,161,161);">));//通过malloc动态分配在堆上的变量</span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">malloc_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">pid_t<span class="pln" style="color:rgb(72,72,76);">&nbsp;pid&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;fork<span class="pun" style="color:rgb(147,161,161);">();</span></span></span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">pid&nbsp;<span class="pun" style="color:rgb(147,161,161);">==<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="com" style="color:rgb(147,161,161);">/*子进程*/</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">{</span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">local_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">g_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">malloc_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">fprintf<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">stderr<span class="pun" style="color:rgb(147,161,161);">,<span class="str" style="color:rgb(221,17,68);">"[CHILD ] child change local global malloc value to 0\n"<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">free<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">malloc_int<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">sleep<span class="pun" style="color:rgb(147,161,161);">(<span class="lit" style="color:rgb(25,95,145);">10<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">fprintf<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">stderr<span class="pun" style="color:rgb(147,161,161);">,<span class="str" style="color:rgb(221,17,68);">"[CHILD ] child exit\n"<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">exit<span class="pun" style="color:rgb(147,161,161);">(<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}</span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">else<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">if<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">pid&nbsp;<span class="pun" style="color:rgb(147,161,161);">&lt;<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">)</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">{</span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">printf<span class="pun" style="color:rgb(147,161,161);">(<span class="str" style="color:rgb(221,17,68);">"fork failed (%s)"<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">strerror<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">errno<span class="pun" style="color:rgb(147,161,161);">));</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">return<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}</span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">fprintf<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">stderr<span class="pun" style="color:rgb(147,161,161);">,<span class="str" style="color:rgb(221,17,68);">"[PARENT] wait child exit\n"<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">waitpid<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">pid<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">NULL<span class="pun" style="color:rgb(147,161,161);">,<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">fprintf<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">stderr<span class="pun" style="color:rgb(147,161,161);">,<span class="str" style="color:rgb(221,17,68);">"[PARENT] child have exit\n"<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">printf<span class="pun" style="color:rgb(147,161,161);">(<span class="str" style="color:rgb(221,17,68);">"[PARENT] g_int = %d\n"<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">g_int<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">printf<span class="pun" style="color:rgb(147,161,161);">(<span class="str" style="color:rgb(221,17,68);">"[PARENT] local_int = %d\n"<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">local_int<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">printf<span class="pun" style="color:rgb(147,161,161);">(<span class="str" style="color:rgb(221,17,68);">"[PARENT] malloc_int = %d\n"<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">local_int<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">free<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">malloc_int<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">return<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">}</span></code></li> 
+     </ol>
+    </div> 
+    <div> 
+     <div>
+      这里刻意定义了三个变量，一个是位于数据段的全局变量，一个是位于栈上的局部变量，还有一个是通过malloc动态分配位于堆上的变量，三者的初始值都是1。然后调用fork创建子进程，子进程将三个变量的值都改成了0。
+     </div> 
+     <div>
+      按照fork的语义，子进程完全拷贝了父进程的数据段、栈和堆上的内存，如果父子进程对相应的数据进行修改，那么两个进程是并行不悖、互不影响的。因此，在上面示例代码中，尽管子进程将三个变量的值都改成了0，对父进程而言这三个值都没有变化，仍然是1，代码的输出也证实了这一点。
+     </div> 
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">PARENT<span class="pun" style="color:rgb(147,161,161);">]<span class="pln" style="color:rgb(72,72,76);">&nbsp;wait child exit</span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">CHILD&nbsp;<span class="pun" style="color:rgb(147,161,161);">]<span class="pln" style="color:rgb(72,72,76);">&nbsp;child change local global malloc value to&nbsp;<span class="lit" style="color:rgb(25,95,145);">0</span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">CHILD&nbsp;<span class="pun" style="color:rgb(147,161,161);">]<span class="pln" style="color:rgb(72,72,76);">&nbsp;child exit</span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">PARENT<span class="pun" style="color:rgb(147,161,161);">]<span class="pln" style="color:rgb(72,72,76);">&nbsp;child have exit</span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">PARENT<span class="pun" style="color:rgb(147,161,161);">]<span class="pln" style="color:rgb(72,72,76);">&nbsp;g_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1</span></span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">PARENT<span class="pun" style="color:rgb(147,161,161);">]<span class="pln" style="color:rgb(72,72,76);">&nbsp;local_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1</span></span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">PARENT<span class="pun" style="color:rgb(147,161,161);">]<span class="pln" style="color:rgb(72,72,76);">&nbsp;malloc_int&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1</span></span></span></span></span></span></span></code></li> 
+     </ol>
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div>
+     前文提到过，子进程和父进程执行一模一样的代码的情形比较少见。Linux提供了execve系统调用，构建在该系统调用之上，glibc提供了exec系列函数。这个系列函数会丢弃现存的程序代码段，并构建新的数据段、栈及堆。调用fork之后，子进程几乎总是通过调用exec系列函数，来执行新的程序。
+    </div> 
+    <div>
+     在这种背景下，fork时子进程完全拷贝父进程的数据段、栈和堆的做法是不明智的，因为接下来的exec系列函数会毫不留情地抛弃刚刚辛苦拷贝的内存。为了解决这个问题，Linux引入了写时拷贝（copy-on-write）的技术。
+    </div> 
+    <div>
+     写时拷贝是指子进程的页表项指向与父进程相同的物理内存页，这样只拷贝父进程的页表项就可以了，当然要把这些页面标记成只读（如图4-4所示）。如果父子进程都不修改内存的内容，大家便相安无事，共用一份物理内存页。但是一旦父子进程中有任何一方尝试修改，就会引发缺页异常（page fault）。此时，内核会尝试为该页面创建一个新的物理页面，并将内容真正地复制到新的物理页面中，让父子进程真正地各自拥有自己的物理内存页，然后将页表中相应的表项标记为可写。
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    <img src="https://images2015.cnblogs.com/blog/836125/201608/836125-20160810004058668-863297006.png" alt="" style="border:none;">
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div>
+     从上面的描述可以看出，对于没有修改的页面，内核并没有真正地复制物理内存页，仅仅是复制了父进程的页表。这种机制的引入提升了fork的性能，从而使内核可以快速地创建一个新的进程。
+    </div> 
+    <div>
+     查看下copy_one_pte函数中有如下代码：
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">/*如果是写时拷贝, 那么无论是初始页表, 还是拷贝的页表, 都设置了写保护</span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">*后面无论父子进程, 修改页表对应位置的内存时, 都会触发page fault</span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">*/</span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">is_cow_mapping<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">vm_flags<span class="pun" style="color:rgb(147,161,161);">))<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">ptep_set_wrprotect<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">src_mm<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;addr<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;src_pte<span class="pun" style="color:rgb(147,161,161);">);//设置为写保护</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">pte&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;pte_wrprotect<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">pte<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}</span></span></code></li> 
+     </ol>
+    </div> 
+    <div> 
+     <div>
+      该代码将页表设置成写保护，父子进程中任意一个进程尝试修改写保护的页面时，都会引发缺页中断，内核会走向do_wp_page函数，该函数会负责创建副本，即真正的拷贝。
+     </div> 
+     <div>
+      写时拷贝技术极大地提升了fork的性能，在一定程度上让vfork成为了鸡肋。
+     </div> 
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    &nbsp;
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    &nbsp;
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    父子进程共用了一套文件偏移量
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div>
+     文件描述符还有一个文件描述符标志（file descriptor flag）。目前只定义了一个标志位：FD_CLOSEXEC，这是close_on_exec标志位。细心阅读open函数手册也会发现，open函数也有一个类似的标志位，即O_CLOSEXEC，该标志位也是用于设置文件描述符标志的。
+    </div> 
+    <div>
+     那么这个标志位到底有什么作用呢？如果文件描述符中将这个标志位置位，那么调用exec时会自动关闭对应的文件。
+    </div> 
+    <div>
+     可是为什么需要这个标志位呢？主要是出于安全的考虑。
+    </div> 
+    <div>
+     对于fork之后子进程执行exec这种场景，如果子进程可以操作父进程打开的文件，就会带来严重的安全隐患。一般来讲，调用exec的子进程时，因为它.会另起炉灶，因此父进程打开的文件描述符也应该一并关闭，但事实上内核并没有主动这样做。试想如下场景，Webserver首先以root权限启动，打开只有拥有root权限才能打开的端口和日志等文件，再降到普通用户，fork出一些worker进程，在进程中进行解析脚本、写日志、输出结果等操作。由于子进程完全可以操作父进程打开的文件，因此子进程中的脚本只要继续操作这些文件描述符，就能越权操作root用户才能操作的文件。
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    为了解决这个问题，Linux引入了close on exec机制。设置了FD_CLOSEXEC标志位的文件，在子进程调用exec家族函数时会将相应的文件关闭。而设置该标志位的方法有两种：
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    ·open时，带上O_CLOSEXEC标志位。
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    ·open时如果未设置，那就在后面调用fcntl函数的F_SETFD操作来设置。
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    建议使用第一种方法。原因是第二种方法在某些时序条件下并不那么绝对的安全。考虑图4-7的场景：Thread 1还没来得及将FD_CLOSEXEC置位，由于Thread 2已经执行过fork，这时候fork出来的子进程就不会关闭相应的文件。尽管Thread1后来调用了fcntl的F_SETFD操作，但是为时已晚，文件已经泄露了。
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    <img src="https://images2015.cnblogs.com/blog/836125/201608/836125-20160810004100027-900620660.png" alt="" style="border:none;">
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div>
+     注意　图4-7中，多线程程序执行了fork，仅仅是为了示意，实际中并不鼓励这种做法。正相反，这种做法是十分危险的。多线程程序不应该调用fork来创建子进程，第8章会分析具体原因。
+    </div> 
+    <div>
+     前面提到，执行fork时，子进程会获取父进程所有文件描述符的副本，但是测试结果表明，父子进程共享了文件的很多属性。这到底是怎么回事？让我们深入内核一探究竟。
+    </div> 
+    <div>
+     &nbsp;在内核的进程描述符task_struct结构体中，与打开文件相关的变量如下所示：
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;task_struct&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">...<span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;files_struct&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">files<span class="pun" style="color:rgb(147,161,161);">;...</span></span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">}</span></code></li> 
+     </ol>
+    </div> 
+    <div>
+     调用fork时，内核会在copy_files函数中处理拷贝父进程打开的文件的相关事宜：
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="kwd" style="color:rgb(30,52,123);">static<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;copy_files<span class="pun" style="color:rgb(147,161,161);">(<span class="kwd" style="color:rgb(30,52,123);">unsigned<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">long<span class="pln" style="color:rgb(72,72,76);">&nbsp;clone_flags<span class="pun" style="color:rgb(147,161,161);">,</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;task_struct&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">tsk<span class="pun" style="color:rgb(147,161,161);">)</span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">{</span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;files_struct&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;error&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">oldf&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;current<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">files<span class="pun" style="color:rgb(147,161,161);">;//获取父进程的文件结构体</span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(!<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">)</span></span></span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">goto<span class="pln" style="color:rgb(72,72,76);">&nbsp;out<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="com" style="color:rgb(147,161,161);">/*创建线程和vfork, 都不用复制父进程的文件描述符, 增加引用计数即可*/</span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">clone_flags&nbsp;<span class="pun" style="color:rgb(147,161,161);">&amp;<span class="pln" style="color:rgb(72,72,76);">&nbsp;CLONE_FILES<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">atomic_inc<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">count<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">goto<span class="pln" style="color:rgb(72,72,76);">&nbsp;out<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}</span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="com" style="color:rgb(147,161,161);">/*对于fork而言, 需要复制父进程的文件描述符*/</span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">newf&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;dup_fd<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">&amp;<span class="pln" style="color:rgb(72,72,76);">error<span class="pun" style="color:rgb(147,161,161);">); //复制一份文件描述符</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(!<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">)</span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">goto<span class="pln" style="color:rgb(72,72,76);">&nbsp;out<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">tsk<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">files&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;newf<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">error&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">out<span class="pun" style="color:rgb(147,161,161);">:</span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">return<span class="pln" style="color:rgb(72,72,76);">&nbsp;error<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">}</span></code></li> 
+     </ol>
+    </div> 
+    <div>
+     CLONE_FILES标志位用来控制是否共享父进程的文件描述符。如果该标志位置位，则表示不必费劲复制一份父进程的文件描述符了，增加引用计数，直接共用一份就可以了。对于vfork函数和创建线程的pthread_create函数来说都是如此。但是fork函数却不同，调用fork函数时，该标志位为0，表示需要为子进程拷贝一份父进程的文件描述符。文件描述符的拷贝是通过内核的dup_fd函数来完成的。
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;files_struct&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">dup_fd<span class="pun" style="color:rgb(147,161,161);">(<span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;files_struct&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">,</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">errorp<span class="pun" style="color:rgb(147,161,161);">)</span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">{</span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;files_struct&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;file&nbsp;<span class="pun" style="color:rgb(147,161,161);">**<span class="pln" style="color:rgb(72,72,76);">old_fds<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">**<span class="pln" style="color:rgb(72,72,76);">new_fds<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;open_files<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;size<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;i<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;fdtable&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">old_fdt<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">errorp&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">-<span class="pln" style="color:rgb(72,72,76);">ENOMEM<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">newf&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;kmem_cache_alloc<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">files_cachep<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;GFP_KERNEL<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(!<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">)</span></span></span></span></span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">goto<span class="pln" style="color:rgb(72,72,76);">&nbsp;out<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+     </ol>
+    </div> 
+    <div>
+     dup_fd函数首先会给子进程分配一个file_struct结构体，然后做一些赋值操作。这个结构体是进程描述符中与打开文件相关的数据结构，每一个打开的文件都会记录在该结构体中。其定义代码如下：
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;files_struct&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">atomic_t<span class="pln" style="color:rgb(72,72,76);">&nbsp;count<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;fdtable __rcu&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">fdt<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;fdtable fdtab<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">spinlock_t<span class="pln" style="color:rgb(72,72,76);">&nbsp;file_lock ____cacheline_aligned_in_smp<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;next_fd<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;embedded_fd_set close_on_exec_init<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;embedded_fd_set open_fds_init<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;file __rcu&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">&nbsp;fd_array<span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">NR_OPEN_DEFAULT<span class="pun" style="color:rgb(147,161,161);">];</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">};</span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;fdtable //文件描述符表</span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">{</span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">unsigned<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;max_fds<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;file __rcu&nbsp;<span class="pun" style="color:rgb(147,161,161);">**<span class="pln" style="color:rgb(72,72,76);">fd<span class="pun" style="color:rgb(147,161,161);">;<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="com" style="color:rgb(147,161,161);">/* current fd array */</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">fd_set&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">close_on_exec<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">fd_set&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">open_fds<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;rcu_head rcu<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;fdtable&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">next<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">};</span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;embedded_fd_set&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">unsigned<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">long<span class="pln" style="color:rgb(72,72,76);">&nbsp;fds_bits<span class="pun" style="color:rgb(147,161,161);">[<span class="lit" style="color:rgb(25,95,145);">1<span class="pun" style="color:rgb(147,161,161);">];</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">};</span></code></li> 
+     </ol>
+    </div> 
+    <div>
+     <span style="line-height:1.6;">初看之下struct fdtable的内容与struct files_struct的内容有颇多重复之处，包括close_on_exec文件描述符位图、打开文件描述符位图及file指针数组等，但事实上并非如此。struct files_struct中的成员是相应数据结构的实例，而struct fdtable中的成员是相应的指针。<br></span>
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div>
+     Linux系统假设大多数的进程打开的文件不会太多。于是Linux选择了一个long类型的位数（32位系统下为32位，64位系统下为64位）作为经验值。
+    </div> 
+    <div>
+     以64位系统为例，file_struct结构体自带了可以容纳64个struct file类型指针的数组fd_array，也自带了两个大小为64的位图，其中open_fds_init位图用于记录文件的打开情况，close_on_exec_init位图用于记录文件描述符的FD_CLOSEXCE标志位是否置位。只要进程打开的文件个数小于64，file_struct结构体自带的指针数组和两个位图就足以满足需要。因此在分配了file_struct结构体后，内核会初始化file_struct自带的fdtable，代码如下所示：
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">atomic_set<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">count<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">spin_lock_init<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">file_lock<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">next_fd&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">new_fdt&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">&amp;<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fdtab<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">max_fds&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;NR_OPEN_DEFAULT<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">close_on_exec&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">fd_set&nbsp;<span class="pun" style="color:rgb(147,161,161);">*)&amp;<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">close_on_exec_init<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">open_fds&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">fd_set&nbsp;<span class="pun" style="color:rgb(147,161,161);">*)&amp;<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">open_fds_init<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fd&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">&amp;<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fd_array<span class="pun" style="color:rgb(147,161,161);">[<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">];</span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">next&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;NULL<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"></code></li> 
+     </ol>
+    </div> 
+    <div>
+     初始化之后，子进程的file_struct的情况如图4-8所示。注意，此时file_struct结构体中的fdt指针并未指向file_struct自带的struct fdtable类型的fdtab变量。原因很简单，因为此时内核还没有检查父进程打开文件的个数，因此并不确定自带的结构体能否满足需要。
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    <img src="https://images2015.cnblogs.com/blog/836125/201608/836125-20160810004103621-784690655.png" alt="" style="border:none;">
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    接下来，内核会检查父进程打开文件的个数。如果父进程打开的文件超过了64个，struct files_struct中自带的数组和位图就不能满足需要了。这种情况下内核会分配一个新的struct fdtable，代妈如下：
+    <br>
+    <div>
+     &nbsp;
+    </div> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">spin_lock<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">file_lock<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">old_fdt&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;files_fdtable<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">open_files&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;count_open_files<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">old_fdt<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="com" style="color:rgb(147,161,161);">/*如果父进程打开文件的个数超过NR_OPEN_DEFAULT*/</span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">while<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">unlikely<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">open_files&nbsp;<span class="pun" style="color:rgb(147,161,161);">&gt;<span class="pln" style="color:rgb(72,72,76);">&nbsp;new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">max_fds<span class="pun" style="color:rgb(147,161,161);">))<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">spin_unlock<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">file_lock<span class="pun" style="color:rgb(147,161,161);">);<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="com" style="color:rgb(147,161,161);">/* 如果不是自带的fdtable而是曾经分配的fdtable, 则需要先释放*/</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt&nbsp;<span class="pun" style="color:rgb(147,161,161);">!=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">&amp;<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fdtab<span class="pun" style="color:rgb(147,161,161);">)</span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">__free_fdtable<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="com" style="color:rgb(147,161,161);">/*创建新的fdtable*/</span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">new_fdt&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;alloc_fdtable<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">open_files&nbsp;<span class="pun" style="color:rgb(147,161,161);">-<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">1<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(!<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">errorp&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">-<span class="pln" style="color:rgb(72,72,76);">ENOMEM<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">goto<span class="pln" style="color:rgb(72,72,76);">&nbsp;out_release<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}</span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="com" style="color:rgb(147,161,161);">/*如果超出了系统限制, 则返回EMFILE*/</span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">unlikely<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">max_fds&nbsp;<span class="pun" style="color:rgb(147,161,161);">&lt;<span class="pln" style="color:rgb(72,72,76);">&nbsp;open_files<span class="pun" style="color:rgb(147,161,161);">))<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">__free_fdtable<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">errorp&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">-<span class="pln" style="color:rgb(72,72,76);">EMFILE<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">goto<span class="pln" style="color:rgb(72,72,76);">&nbsp;out_release<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}</span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">spin_lock<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">file_lock<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">old_fdt&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;files_fdtable<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">open_files&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;count_open_files<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">old_fdt<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}</span></span></code></li> 
+     </ol>
+    </div> 
+    <div>
+     alloc_fdtable所做的事情，不过是分配fdtable结构体本身，以及分配一个指针数组和两个位图。分配之前会根据父进程打开文件的数目，计算出一个合理的值nr，以确保分配的数组和位图能够满足需要。
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    无论是使用file_struct结构体自带的fdtable，还是使用alloc_fdtable分配的fdtable，接下来要做的事情都一样，即将父进程的两个位图信息和打开文件的struct file类型指针拷贝到子进程的对应数据结构中，代码如下：
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"> <code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">old_fds&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;old_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fd<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></code><span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="com" style="color:rgb(147,161,161);">/*父进程的struct file 指针数组*/</span></span> </li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">new_fds&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fd<span class="pun" style="color:rgb(147,161,161);">;<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="com" style="color:rgb(147,161,161);">/*子进程的struct file 指针数组*/</span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="com" style="color:rgb(147,161,161);">/* 拷贝打开文件位图 */</span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">memcpy<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">open_fds<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fds_bits<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">old_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">open_fds<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fds_bits<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;open_files<span class="pun" style="color:rgb(147,161,161);">/<span class="lit" style="color:rgb(25,95,145);">8<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="com" style="color:rgb(147,161,161);">/* 拷贝 close_on_exec位图 */</span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">memcpy<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">close_on_exec<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fds_bits<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">old_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">close_on_exec<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fds_bits<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;open_files<span class="pun" style="color:rgb(147,161,161);">/<span class="lit" style="color:rgb(25,95,145);">8<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="kwd" style="color:rgb(30,52,123);">for<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">i&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;open_files<span class="pun" style="color:rgb(147,161,161);">;<span class="pln" style="color:rgb(72,72,76);">&nbsp;i&nbsp;<span class="pun" style="color:rgb(147,161,161);">!=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;<span class="pln" style="color:rgb(72,72,76);">&nbsp;i<span class="pun" style="color:rgb(147,161,161);">--)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;file&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">f&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">old_fds<span class="pun" style="color:rgb(147,161,161);">++;</span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">f<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pln">get_file<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">f<span class="pun" style="color:rgb(147,161,161);">);<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="com" style="color:rgb(147,161,161);">/* f对应的文件的引用计数加1 */</span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">}<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">else<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">FD_CLR<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">open_files&nbsp;<span class="pun" style="color:rgb(147,161,161);">-<span class="pln" style="color:rgb(72,72,76);">&nbsp;i<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">open_fds<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}</span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="com" style="color:rgb(147,161,161);">/* 子进程的struct file类型指针, *指向和父进程相同的struct file 结构体*/</span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">rcu_assign_pointer<span class="pun" style="color:rgb(147,161,161);">(*<span class="pln" style="color:rgb(72,72,76);">new_fds<span class="pun" style="color:rgb(147,161,161);">++,<span class="pln" style="color:rgb(72,72,76);">&nbsp;f<span class="pun" style="color:rgb(147,161,161);">);<span class="pln" style="color:rgb(72,72,76);">&nbsp;&nbsp;</span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pun" style="color:rgb(147,161,161);">}</span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">spin_unlock<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">oldf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">file_lock<span class="pun" style="color:rgb(147,161,161);">);<span class="com">/* compute the remainder to be cleared */</span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">size&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">max_fds&nbsp;<span class="pun" style="color:rgb(147,161,161);">-<span class="pln" style="color:rgb(72,72,76);">&nbsp;open_files<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">sizeof<span class="pun" style="color:rgb(147,161,161);">(<span class="kwd" style="color:rgb(30,52,123);">struct<span class="pln" style="color:rgb(72,72,76);">&nbsp;file&nbsp;<span class="pun" style="color:rgb(147,161,161);">*);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="com" style="color:rgb(147,161,161);">/*将尚未分配到的struct file结构的指针清零*/</span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);">&nbsp;&nbsp;&nbsp;&nbsp;memset<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fds<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;size<span class="pun" style="color:rgb(147,161,161);">);<span class="com">/*将尚未分配到的位图区域清零*/</span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="kwd" style="color:rgb(30,52,123);">&nbsp;&nbsp;&nbsp;&nbsp;if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">max_fds&nbsp;<span class="pun" style="color:rgb(147,161,161);">&gt;<span class="pln" style="color:rgb(72,72,76);">&nbsp;open_files<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;left&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">max_fds<span class="pun" style="color:rgb(147,161,161);">-<span class="pln" style="color:rgb(72,72,76);">open_files<span class="pun" style="color:rgb(147,161,161);">)/<span class="lit" style="color:rgb(25,95,145);">8<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;start&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;open_files&nbsp;<span class="pun" style="color:rgb(147,161,161);">/<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="lit" style="color:rgb(25,95,145);">8<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">*<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">sizeof<span class="pun" style="color:rgb(147,161,161);">(<span class="kwd" style="color:rgb(30,52,123);">unsigned<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">long<span class="pun" style="color:rgb(147,161,161);">));</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">memset<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">open_fds<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fds_bits<span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">start<span class="pun" style="color:rgb(147,161,161);">],<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;left<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">memset<span class="pun" style="color:rgb(147,161,161);">(&amp;<span class="pln" style="color:rgb(72,72,76);">new_fdt<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">close_on_exec<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fds_bits<span class="pun" style="color:rgb(147,161,161);">[<span class="pln" style="color:rgb(72,72,76);">start<span class="pun" style="color:rgb(147,161,161);">],<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;left<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">}</span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">&nbsp;&nbsp;&nbsp;&nbsp;rcu_assign_pointer<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">newf<span class="pun" style="color:rgb(147,161,161);">-&gt;<span class="pln" style="color:rgb(72,72,76);">fdt<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;new_fdt<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="kwd" style="color:rgb(30,52,123);">&nbsp;&nbsp;&nbsp;&nbsp;return<span class="pln" style="color:rgb(72,72,76);">&nbsp;newf<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">out_release<span class="pun" style="color:rgb(147,161,161);">:</span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">&nbsp;&nbsp;&nbsp;&nbsp;kmem_cache_free<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">files_cachep<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;newf<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">out<span class="pun" style="color:rgb(147,161,161);">:</span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="kwd" style="color:rgb(30,52,123);">&nbsp;&nbsp;&nbsp;&nbsp;return<span class="pln" style="color:rgb(72,72,76);">&nbsp;NULL<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">}</span></code></li> 
+     </ol>
+    </div> 
+    <div>
+     通过对上述流程的梳理，不难看出，父子进程之间拷贝的是struct file的指针，而不是struct file的实例，父子进程的struct file类型指针，都指向同一个struct file实例。fork之后，父子进程的文件描述符关系如图4-10所示。
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    <img src="https://images2015.cnblogs.com/blog/836125/201608/836125-20160810004106402-1313751330.png" alt="" style="border:none;">
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div>
+     进程的创建之vfork（）
+    </div> 
+    <div>
+     在早期的实现中，fork没有实现写时拷贝机制，而是直接对父进程的数据段、堆和栈进行完全拷贝，效率十分低下。很多程序在fork一个子进程后，会紧接着执行exec家族函数，这更是一种浪费。所以BSD引入了vfork。既然fork之后会执行exec函数，拷贝父进程的内存数据就变成了一种无意义的行为，所以引入的vfork压根就不会拷贝父进程的内存数据，而是直接共享。再后来Linux引入了写时拷贝的机制，其效率提高了很多，这样一来，vfork其实就可以退出历史舞台了。除了一些需要将性能优化到极致的场景，大部分情况下不需要再使用vfork函数了。
+    </div> 
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    vfork会创建一个子进程，该子进程会共享父进程的内存数据，而且系统将保证子进程先于父进程获得调度。子进程也会共享父进程的地址空间，而父进程将被一直挂起，直到子进程退出或执行exec。
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;">
+    注意，vfork之后，子进程如果返回，则不要调用return，而应该使用_exit函数。如果使用return，就会出现诡异的错误。请看下面的示例代码：
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:20.8696px;"> 
+    <div> 
+     <ol style="color:rgb(30,52,123);">
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="str" style="color:rgb(221,17,68);">&lt;stdio.h&gt;</span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;stdlib.h&gt;</span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="com" style="color:rgb(147,161,161);">#include<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="str" style="color:rgb(221,17,68);">&lt;unistd.h&gt;</span></span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;glob&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">88<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;main<span class="pun" style="color:rgb(147,161,161);">(<span class="kwd" style="color:rgb(30,52,123);">void<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">int<span class="pln" style="color:rgb(72,72,76);">&nbsp;var<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">var&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">88<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="typ" style="color:#008080;">pid_t<span class="pln" style="color:rgb(72,72,76);">&nbsp;pid<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></code></li> 
+      <li class="L8" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">((<span class="pln" style="color:rgb(72,72,76);">pid&nbsp;<span class="pun" style="color:rgb(147,161,161);">=<span class="pln" style="color:rgb(72,72,76);">&nbsp;vfork<span class="pun" style="color:rgb(147,161,161);">())<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">&lt;<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L9" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">printf<span class="pun" style="color:rgb(147,161,161);">(<span class="str" style="color:rgb(221,17,68);">"vfork error"<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></code></li> 
+      <li class="L0" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">exit<span class="pun" style="color:rgb(147,161,161);">(-<span class="lit" style="color:rgb(25,95,145);">1<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></code></li> 
+      <li class="L1" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">else<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="kwd" style="color:rgb(30,52,123);">if<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">(<span class="pln" style="color:rgb(72,72,76);">pid&nbsp;<span class="pun" style="color:rgb(147,161,161);">==<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">)<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="pun" style="color:rgb(147,161,161);">{<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="com" style="color:rgb(147,161,161);">/* 子进程 */</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L2" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">var<span class="pun" style="color:rgb(147,161,161);">++;</span></span></code></li> 
+      <li class="L3" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);">glob<span class="pun" style="color:rgb(147,161,161);">++;</span></span></code></li> 
+      <li class="L4" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">return<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></code></li> 
+      <li class="L5" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="pun" style="color:rgb(147,161,161);">}<span class="pln" style="color:rgb(72,72,76);">printf<span class="pun" style="color:rgb(147,161,161);">(<span class="str" style="color:rgb(221,17,68);">"pid=%d, glob=%d, var=%d\n"<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">getpid<span class="pun" style="color:rgb(147,161,161);">(),<span class="pln" style="color:rgb(72,72,76);">&nbsp;glob<span class="pun" style="color:rgb(147,161,161);">,<span class="pln" style="color:rgb(72,72,76);">&nbsp;var<span class="pun" style="color:rgb(147,161,161);">);</span></span></span></span></span></span></span></span></span></span></span></span></code></li> 
+      <li class="L6" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pln" style="color:rgb(72,72,76);"><span class="kwd" style="color:rgb(30,52,123);">return<span class="pln" style="color:rgb(72,72,76);">&nbsp;<span class="lit" style="color:rgb(25,95,145);">0<span class="pun" style="color:rgb(147,161,161);">;</span></span></span></span></span></code></li> 
+      <li class="L7" style="list-style-type:decimal;color:rgb(190,190,197);line-height:18px;"><code class="language-cpp" style="font-family:Consolas, 'Liberation Mono', Menlo, Courier, monospace;"><span class="pun" style="color:rgb(147,161,161);">}</span></code></li> 
+     </ol>
+    </div> 
+    <div>
+     调用子进程，如果使用return返回，就意味着main函数返回了，因为栈是父子进程共享的，所以程序的函数栈发生了变化。main函数return之后，通常会调用exit系的函数，父进程收到子进程的exit之后，就会开始从vfork返回，但是这时整个main函数的栈都已经不复存在了，所以父进程压根无法执行。于是会返回一个诡异的栈地址，对于在某些内核版本中，进程会直接报栈错误然后退出，但是在某些内核版本中，有可能就会再次进出main，于是进入一个无限循环，直到vfork返回错误。笔者的Ubuntu版本就是后者。返回。一般来说，vfork创建的子进程会执行exec，执行完exec后应该调用_exit,注意是_exit而不是exit。因为exit会导致父进程stdio缓冲区的冲刷和关闭。我们会在后面讲述exit和_exit的区别。
+    </div> 
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br><br></p> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <a title="来自为知笔记(Wiz)" href="http://www.wiz.cn/i/d3ba75eb" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">来自为知笔记(Wiz)</a>
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <br>
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <br>
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <br>
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <br>
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <br>
+   </div> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <br>
+   </div> 
+   <div> 
+    <div>
+     <font color="#666666"><span style="font-size:14px;"><br></span></font>
+    </div> 
+    <div>
+     <font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/8073949.html，如需转载请自行联系原作者</span></font>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

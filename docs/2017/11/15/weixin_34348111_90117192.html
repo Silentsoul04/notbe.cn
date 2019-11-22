@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>细说websocket - php篇 « NotBeCN</title>
+  <meta name="description" content="             下面我画了一个图演示 client 和 server 之间建立 websocket 连接时握手部分，这个部分在 node 中可以十分轻松的完成，因为 node 提供的 net 模块已经对 socket 套接字做了封装处理，开发者使用的时候只需要考虑数据的交互而不用处理连接的建立。而 ph...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_34348111_90117192.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">细说websocket - php篇</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">下面我画了一个图演示 client 和 server 之间建立 websocket 连接时握手部分，这个部分在 node 中可以十分轻松的完成，因为 node 提供的 net 模块已经对 socket 套接字做了封装处理，开发者使用的时候只需要考虑数据的交互而不用处理连接的建立。而 php 没有，从 socket 的连接、建立、绑定、监听等，这些都需要我们自己去操作，所以有必要拿出来再说一说。</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>    +--------+    1.发送Sec-WebSocket-Key        +---------+
+    |        | --------------------------------&gt; |        |
+    |        |    2.加密返回Sec-WebSocket-Accept  |        |
+    | client | &lt;-------------------------------- | server |
+    |        |    3.本地校验                      |        |
+    |        | --------------------------------&gt; |        |
+    +--------+                                   +--------+</pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">看了我写的<a href="http://www.cnblogs.com/hustskyking/p/websocket-with-node.html" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);border-bottom-width:1px;border-bottom-style:dashed;">上一篇文章</a>的同学应该是对上图有了比较全面的理解。① 和 ② 实际上就是一个 HTTP 的请求和响应，只不过我们在处理的过程中我们拿到的是没有经过解析的字符串。如：</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>GET /chat HTTP/1.1<span style="line-height:1.5;background:none;">
+Host: server.example.com
+Origin: http:</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">example.com</span></pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">我们往常看到的请求是这个样子，当这东西到了服务器端，我们可以通过一些代码库直接拿到这些信息。</p> 
+   <h3 style="font-size:22px;line-height:1.5;color:rgb(255,255,255);text-indent:10px;font-family:Georgia, 'Times New Roman', Times, sans-serif;background:rgb(128,128,128);">一、php 中处理 websocket</h3> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">WebSocket 连接是由客户端主动发起的，所以一切要从客户端出发。第一步是要解析拿到客户端发过来的 Sec-WebSocket-Key 字符串。</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>GET /chat HTTP/1.1<span style="line-height:1.5;background:none;">
+Host: server.example.com
+Upgrade: websocket
+Connection: Upgrade
+<span style="color:rgb(255,0,0);line-height:1.5;background:none;">Sec</span></span><span style="color:rgb(255,0,0);line-height:1.5;background:none;">-WebSocket-Key</span>: dGhlIHNhbXBsZSBub25jZQ==<span style="line-height:1.5;background:none;">
+Origin: http:</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">example.com</span>
+Sec-WebSocket-<span style="line-height:1.5;background:none;">Protocol: chat, superchat
+Sec</span>-WebSocket-Version: 13</pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;"><a href="http://www.cnblogs.com/hustskyking/p/websocket-with-node.html" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);border-bottom-width:1px;border-bottom-style:dashed;">前文</a>中也提到了 client 请求的格式（如上），首先 php 建立一个 socket 连接，监听端口的信息。</p> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">1. socket 连接的建立</h4> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">关于 socket 套接字的建立，相信很多大学修过计算机网络的人都知道了，下面是一张连接建立的过程：</p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;"><img src="https://images0.cnblogs.com/blog/387325/201312/25124523-33fc2253152447d4a16bac3b6704d832.jpg" alt="" width="467" height="620" style="border:1px solid rgb(204,204,204);"></p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;"> 建立一个 socket 套接字</span>
+<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$master</span> = socket_create(AF_INET, SOCK_STREAM,<span style="line-height:1.5;background:none;"> SOL_TCP);
+socket_set_option(</span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$master</span>, SOL_SOCKET, SO_REUSEADDR, 1<span style="line-height:1.5;background:none;">);
+socket_bind(</span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$master</span>, <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$address</span>, <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$port</span><span style="line-height:1.5;background:none;">);
+socket_listen(</span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$master</span>);</pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">相比 node，这个地方的处理实在是太麻烦了，上面几行代码并未建立连接，只不过这些代码是建立一个 socket 套接字必须要写的东西。由于处理过程稍微有复杂，所以我把各种处理写进了一个类中，方便管理和调用。</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <img class="code_img_closed" src="https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif" alt="" style="border:1px solid rgb(204,204,204);vertical-align:middle;">&nbsp;
+    <span class="cnblogs_code_collapse" style="border:1px solid #808080;line-height:1.5;background:none;">demo.php 握手连接测试代码</span> 
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">上面这段代码是经过我调试了的，没太大的问题，如果想测试的话，可以在 cmd 命令行中键入<code style="border:none;font-family:Courier;line-height:14px;background:rgb(245,245,245);">php /path/to/demo.php</code>;当然，上面只是一个类，如果要测试的话，还得新建一个实例。</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$ws</span> = <span style="color:rgb(0,0,255);line-height:1.5;background:none;">new</span> WS('localhost', 4000);</pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">客户端代码可以稍微简单点：</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;background:none;">var</span> ws = <span style="color:rgb(0,0,255);line-height:1.5;background:none;">new</span> WebSocket("ws://localhost:4000"<span style="line-height:1.5;background:none;">);
+ws.onopen </span>= <span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span><span style="line-height:1.5;background:none;">(){
+    console.log(</span>"握手成功"<span style="line-height:1.5;background:none;">);
+};
+ws.onerror </span>= <span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span><span style="line-height:1.5;background:none;">(){
+    console.log(</span>"error"<span style="line-height:1.5;background:none;">);
+};</span></pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">运行服务器代码，当客户端连接的时候，我们可以看到：</p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;"><img src="https://images0.cnblogs.com/blog/387325/201312/25124555-64ad002702334156a80bedef37fbf361.jpg" alt="" style="border:1px solid rgb(204,204,204);"></p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">通过上面的代码可以清晰的看到整个交流的过程。首先是建立连接，node 中这一步已经封装到了 net 和 http 模块，然后判断是否握手，如果没有的话，就 shakeHands。这里的握手我直接就 echo 了一个单词，表示进行了这个东西，<a href="http://www.cnblogs.com/hustskyking/p/websocket-with-node.html" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);border-bottom-width:1px;border-bottom-style:dashed;">前文</a>我们提到过握手算法，这里就直接写了。</p> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">2. 提取 Sec-WebSocket-Key 信息</h4> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span> getKey(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$req</span><span style="line-height:1.5;background:none;">) {
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key</span> = <span style="color:rgb(0,0,255);line-height:1.5;background:none;">null</span><span style="line-height:1.5;background:none;">;
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">if</span> (<span style="color:rgb(0,128,128);line-height:1.5;background:none;">preg_match</span>("/Sec-WebSocket-Key: (.*)\r\n/", <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$req</span>, <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$match</span><span style="line-height:1.5;background:none;">)) { 
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key</span> = <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$match</span>[1<span style="line-height:1.5;background:none;">]; 
+    }
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">return</span> <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key</span><span style="line-height:1.5;background:none;">;
+}</span></pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">这里比较简单，直接正则匹配，websocket 信息头一定包含 Sec-WebSocket-Key，所以我们匹配起来也比较快捷~</p> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">3. 加密 Sec-WebSocket-Key</h4> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span> encry(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$req</span><span style="line-height:1.5;background:none;">){
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key</span> = <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$this</span>-&gt;getKey(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$req</span><span style="line-height:1.5;background:none;">);
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$mask</span> = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"<span style="line-height:1.5;background:none;">;
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">return</span> <span style="color:rgb(0,128,128);line-height:1.5;background:none;">base64_encode</span>(<span style="color:rgb(0,128,128);line-height:1.5;background:none;">sha1</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key</span> . '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', <span style="color:rgb(0,0,255);line-height:1.5;background:none;">true</span><span style="line-height:1.5;background:none;">));
+}</span></pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">将 SHA-1 加密后的字符串再进行一次 base64 加密。如果加密算法错误，客户端在进行校检的时候会直接报错：</p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;"><img src="https://images0.cnblogs.com/blog/387325/201312/25124720-0518fd35df2c4f7a91f624e4bbf2ec6c.jpg" alt="" style="border:1px solid rgb(204,204,204);"></p> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">4. 应答 Sec-WebSocket-Accept</h4> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span> dohandshake(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$socket</span>, <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$req</span><span style="line-height:1.5;background:none;">){
+    </span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;"> 获取加密key</span>
+    <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$acceptKey</span> = <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$this</span>-&gt;encry(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$req</span><span style="line-height:1.5;background:none;">);
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$upgrade</span> = "HTTP/1.1 101 Switching Protocols\r\n" .
+               "Upgrade: websocket\r\n" .
+               "Connection: Upgrade\r\n" .
+               "Sec-WebSocket-Accept: " . <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$acceptKey</span> . "\r\n" .
+               "\r\n"<span style="line-height:1.5;background:none;">;
+
+    </span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;"> 写入socket</span>
+    socket_write(socket,<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$upgrade</span>.<span style="color:rgb(0,128,128);line-height:1.5;background:none;">chr</span>(0), <span style="color:rgb(0,128,128);line-height:1.5;background:none;">strlen</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$upgrade</span>.<span style="color:rgb(0,128,128);line-height:1.5;background:none;">chr</span>(0<span style="line-height:1.5;background:none;">)));
+    </span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;"> 标记握手已经成功，下次接受数据采用数据帧格式</span>
+    <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$this</span>-&gt;handshake = <span style="color:rgb(0,0,255);line-height:1.5;background:none;">true</span><span style="line-height:1.5;background:none;">;
+}</span></pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">这里千万要注意，每一个请求和相应的格式，最后有一个空行，也就是&nbsp;<code style="border:none;font-family:Courier;line-height:14px;background:rgb(245,245,245);">\r\n</code>，开始测试的时候把这东西给弄丢了，纠结了半天。</p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;"><img src="https://images0.cnblogs.com/blog/387325/201312/25124605-f1c4f57be53a43b1bcfb20392fe6c18a.jpg" alt="" style="border:1px solid rgb(204,204,204);"></p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">当客户端成功校检key后，会触发 onopen 函数：</p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;"><img src="https://images0.cnblogs.com/blog/387325/201312/25124618-53351ac2263d4ca89be4bd7eaca1968c.jpg" alt="" style="border:1px solid rgb(204,204,204);"></p> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">5. 数据帧处理</h4> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;"> 解析数据帧</span>
+<span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span> decode(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$buffer</span><span style="line-height:1.5;background:none;">)  {
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$len</span> = <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$masks</span> = <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$data</span> = <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$decoded</span> = <span style="color:rgb(0,0,255);line-height:1.5;background:none;">null</span><span style="line-height:1.5;background:none;">;
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$len</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">ord</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$buffer</span>[1]) &amp; 127<span style="line-height:1.5;background:none;">;
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">if</span> (<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$len</span> === 126<span style="line-height:1.5;background:none;">)  {
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$masks</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">substr</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$buffer</span>, 4, 4<span style="line-height:1.5;background:none;">);
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$data</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">substr</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$buffer</span>, 8<span style="line-height:1.5;background:none;">);
+    } </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">else</span> <span style="color:rgb(0,0,255);line-height:1.5;background:none;">if</span> (<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$len</span> === 127<span style="line-height:1.5;background:none;">)  {
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$masks</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">substr</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$buffer</span>, 10, 4<span style="line-height:1.5;background:none;">);
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$data</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">substr</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$buffer</span>, 14<span style="line-height:1.5;background:none;">);
+    } </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">else</span><span style="line-height:1.5;background:none;">  {
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$masks</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">substr</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$buffer</span>, 2, 4<span style="line-height:1.5;background:none;">);
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$data</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">substr</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$buffer</span>, 6<span style="line-height:1.5;background:none;">);
+    }
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">for</span> (<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$index</span> = 0; <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$index</span> &lt; <span style="color:rgb(0,128,128);line-height:1.5;background:none;">strlen</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$data</span>); <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$index</span>++<span style="line-height:1.5;background:none;">) {
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$decoded</span> .= <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$data</span>[<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$index</span>] ^ <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$masks</span>[<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$index</span> % 4<span style="line-height:1.5;background:none;">];
+    }
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">return</span> <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$decoded</span><span style="line-height:1.5;background:none;">;
+}</span></pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">这里涉及的编码问题在前文中已经提到过了，这里就不赘述，php 对字符处理的函数太多了，也记得不是特别清楚，这里就没有详细的介绍解码程序，直接把客户端发送的数据原样返回，可以算是一个聊天室的模式吧。</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;"> 返回帧信息处理</span>
+<span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span> frame(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$s</span><span style="line-height:1.5;background:none;">) {
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$a</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">str_split</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$s</span>, 125<span style="line-height:1.5;background:none;">);
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">if</span> (<span style="color:rgb(0,128,128);line-height:1.5;background:none;">count</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$a</span>) == 1<span style="line-height:1.5;background:none;">) {
+        </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">return</span> "\x81" . <span style="color:rgb(0,128,128);line-height:1.5;background:none;">chr</span>(<span style="color:rgb(0,128,128);line-height:1.5;background:none;">strlen</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$a</span>[0])) . <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$a</span>[0<span style="line-height:1.5;background:none;">];
+    }
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$ns</span> = ""<span style="line-height:1.5;background:none;">;
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">foreach</span> (<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$a</span> <span style="color:rgb(0,0,255);line-height:1.5;background:none;">as</span> <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$o</span><span style="line-height:1.5;background:none;">) {
+        </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$ns</span> .= "\x81" . <span style="color:rgb(0,128,128);line-height:1.5;background:none;">chr</span>(<span style="color:rgb(0,128,128);line-height:1.5;background:none;">strlen</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$o</span>)) . <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$o</span><span style="line-height:1.5;background:none;">;
+    }
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">return</span> <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$ns</span><span style="line-height:1.5;background:none;">;
+}
+
+</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;"> 返回数据</span>
+<span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span> send(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$client</span>, <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$msg</span><span style="line-height:1.5;background:none;">){
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$msg</span> = <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$this</span>-&gt;frame(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$msg</span><span style="line-height:1.5;background:none;">);
+    socket_write(</span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$client</span>, <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$msg</span>, <span style="color:rgb(0,128,128);line-height:1.5;background:none;">strlen</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$msg</span><span style="line-height:1.5;background:none;">));
+}</span></pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">客户端代码：</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;background:none;">var</span> ws = <span style="color:rgb(0,0,255);line-height:1.5;background:none;">new</span> WebSocket("ws://localhost:4000"<span style="line-height:1.5;background:none;">);
+ws.onopen </span>= <span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span><span style="line-height:1.5;background:none;">(){
+    console.log(</span>"握手成功"<span style="line-height:1.5;background:none;">);
+};
+ws.onmessage </span>= <span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span><span style="line-height:1.5;background:none;">(e){
+    console.log(</span>"message:" +<span style="line-height:1.5;background:none;"> e.data);
+};
+ws.onerror </span>= <span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span><span style="line-height:1.5;background:none;">(){
+    console.log(</span>"error"<span style="line-height:1.5;background:none;">);
+};
+ws.send(</span>"李靖");</pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">在连通之后发送数据，服务器原样返回：</p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;"><img src="https://images0.cnblogs.com/blog/387325/201312/25124629-a1d032dbd01a4a958cae055a99c964eb.jpg" alt="" style="border:1px solid rgb(204,204,204);"></p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">&nbsp;</p> 
+   <h3 style="font-size:22px;line-height:1.5;color:rgb(255,255,255);text-indent:10px;font-family:Georgia, 'Times New Roman', Times, sans-serif;background:rgb(128,128,128);">二、注意问题</h3> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">1. websocket 版本问题</h4> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">客户端在握手时的请求中有<code style="border:none;font-family:Courier;line-height:14px;background:rgb(245,245,245);">Sec-WebSocket-Version: 13</code>，这样的版本标识，这个是一个升级版本，现在的浏览器都是使用的这个版本。而以前的版本在数据加密的部分更加麻烦，它会发送两个key：</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>GET /chat HTTP/1.1<span style="line-height:1.5;background:none;">
+Host</span>: server.example.<span style="line-height:1.5;background:none;">com
+Upgrade</span>:<span style="line-height:1.5;background:none;"> websocket
+Connection</span>:<span style="line-height:1.5;background:none;"> Upgrade
+Origin</span>: http:<span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">example.com</span>
+Sec-WebSocket-Protocol: chat,<span style="line-height:1.5;background:none;"> superchat
+<span style="color:rgb(255,0,0);line-height:1.5;background:none;">Sec</span></span><span style="color:rgb(255,0,0);line-height:1.5;background:none;">-WebSocket-Key1</span>:<span style="line-height:1.5;background:none;"> xxxx
+<span style="color:rgb(255,0,0);line-height:1.5;background:none;">Sec</span></span><span style="color:rgb(255,0,0);line-height:1.5;background:none;">-WebSocket-Key2</span>: xxxx</pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">如果是这种版本（比较老，已经没在使用了），需要通过下面的方式获取</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span> encry(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1</span>,<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2</span>,<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$l8b</span>){ <span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">Get the numbers preg_match_all('/([\d]+)/', $key1, $key1_num); preg_match_all('/([\d]+)/', $key2, $key2_num);</span>
+
+    <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1_num</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">implode</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1_num</span>[0<span style="line-height:1.5;background:none;">]);
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2_num</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">implode</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2_num</span>[0<span style="line-height:1.5;background:none;">]);
+    </span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">Count spaces</span>
+    <span style="color:rgb(0,128,128);line-height:1.5;background:none;">preg_match_all</span>('/([ ]+)/', <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1</span>, <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1_spc</span><span style="line-height:1.5;background:none;">);
+    </span><span style="color:rgb(0,128,128);line-height:1.5;background:none;">preg_match_all</span>('/([ ]+)/', <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2</span>, <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2_spc</span><span style="line-height:1.5;background:none;">);
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">if</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1_spc</span>==0|<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2_spc</span>==0){ <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$this</span>-&gt;<span style="color:rgb(0,128,128);line-height:1.5;background:none;">log</span>("Invalid key");<span style="color:rgb(0,0,255);line-height:1.5;background:none;">return</span><span style="line-height:1.5;background:none;">; }
+    </span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">Some math</span>
+    <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1_sec</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">pack</span>("N",<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1_num</span> / <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1_spc</span><span style="line-height:1.5;background:none;">);
+    </span><span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2_sec</span> = <span style="color:rgb(0,128,128);line-height:1.5;background:none;">pack</span>("N",<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2_num</span> / <span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2_spc</span><span style="line-height:1.5;background:none;">);
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">return</span> <span style="color:rgb(0,128,128);line-height:1.5;background:none;">md5</span>(<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key1_sec</span>.<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$key2_sec</span>.<span style="color:rgb(128,0,128);line-height:1.5;background:none;">$l8b</span>,1<span style="line-height:1.5;background:none;">);
+}</span></pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">只能无限吐槽这种验证方式！相比 nodeJs 的 websocket 操作方式：</p> 
+   <div class="cnblogs_code" style="border:1px dashed rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">服务器程序</span>
+<span style="color:rgb(0,0,255);line-height:1.5;background:none;">var</span> crypto = require('crypto'<span style="line-height:1.5;background:none;">);
+</span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">var</span> WS = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'<span style="line-height:1.5;background:none;">;
+require(</span>'net').createServer(<span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span><span style="line-height:1.5;background:none;">(o){
+    </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">var</span><span style="line-height:1.5;background:none;"> key;
+    o.on(</span>'data',<span style="color:rgb(0,0,255);line-height:1.5;background:none;">function</span><span style="line-height:1.5;background:none;">(e){
+        </span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">if</span>(!<span style="line-height:1.5;background:none;">key){
+            </span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">//</span><span style="color:rgb(0,128,0);line-height:1.5;background:none;">握手</span>
+            key = e.toString().match(/Sec-WebSocket-Key: (.+)/)[1<span style="line-height:1.5;background:none;">];
+            key </span>= crypto.createHash('sha1').update(key + WS).digest('base64'<span style="line-height:1.5;background:none;">);
+            o.write(</span>'HTTP/1.1 101 Switching Protocols\r\n'<span style="line-height:1.5;background:none;">);
+            o.write(</span>'Upgrade: websocket\r\n'<span style="line-height:1.5;background:none;">);
+            o.write(</span>'Connection: Upgrade\r\n'<span style="line-height:1.5;background:none;">);
+            o.write(</span>'Sec-WebSocket-Accept: ' + key + '\r\n'<span style="line-height:1.5;background:none;">);
+            o.write(</span>'\r\n'<span style="line-height:1.5;background:none;">);
+        }</span><span style="color:rgb(0,0,255);line-height:1.5;background:none;">else</span><span style="line-height:1.5;background:none;">{
+            console.log(e);
+        };
+    });
+}).listen(</span>8000);</pre>
+   </div> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">多么简洁，多么方便！有谁还愿意使用 php 呢。。。。</p> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">2. 数据帧解析代码</h4> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">本文没有给出 decodeFrame 这样数据帧解析代码，前文中给出了数据帧的格式，解析纯属体力活。</p> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">3. 代码下载</h4> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">对这部分感兴趣的同学，可以再去深究。提供了<a href="http://files.cnblogs.com/hustskyking/ws.zip" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);border-bottom-width:1px;border-bottom-style:dashed;">参考代码下载</a>。</p> 
+   <h4 style="font-size:14px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;line-height:25.2px;">4. 相关开源库参考</h4> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;"><a href="http://socketo.me/" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);border-bottom-width:1px;border-bottom-style:dashed;">http://socketo.me</a>&nbsp;Ratchet 为 php 封装的一个 WebSockets 库。 ]</p> 
+   <p style="line-height:25.2px;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;">Google 上搜索&nbsp;<a href="https://www.google.com.hk/search?q=php+websocket+class" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);border-bottom-width:1px;border-bottom-style:dashed;">php+websoket+class</a>，也能找到不少相关的资料。</p> 
+   <h3 style="font-size:22px;line-height:1.5;color:rgb(255,255,255);text-indent:10px;font-family:Georgia, 'Times New Roman', Times, sans-serif;background:rgb(128,128,128);">三、参考资料</h3> 
+   <ul style="list-style:none;color:rgb(51,51,51);font-family:Georgia, 'Times New Roman', Times, sans-serif;font-size:14px;line-height:25.2px;">
+    <li style="list-style-type:disc;background-image:url(&quot;images/icon_miniarrow.gif&quot;);background-position:0px 9px;background-repeat:no-repeat;"> <a href="http://www.php.net/manual/zh/ref.sockets.php" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);">http://www.php.net/manual/zh/ref.sockets.php</a>&nbsp;php manual</li> 
+    <li style="list-style-type:disc;background-image:url(&quot;images/icon_miniarrow.gif&quot;);background-position:0px 9px;background-repeat:no-repeat;"> <a href="http://www.rfc-editor.org/rfc/rfc6455.txt" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);">http://www.rfc-editor.org/rfc/rfc6455.txt</a>&nbsp;&nbsp;[<a href="http://www.rfc-editor.org/rfc/rfc6455.txt" rel="nofollow" style="text-decoration:none;color:rgb(61,129,238);">RFC6455</a>] WebSocket</li> 
+   </ul>
+   <div>
+    <font color="#333333"><span style="font-size:14px;line-height:25.2px;"><br></span></font>
+   </div> 
+   <div>
+    <font color="#333333"><span style="font-size:14px;line-height:25.2px;"><br></span></font>
+   </div> 
+   <div>
+    <font color="#333333"><span style="font-size:14px;line-height:25.2px;"><br></span></font>
+   </div> 
+   <div>
+    <font color="#333333"><span style="font-size:14px;line-height:25.2px;"><br></span></font>
+   </div> 
+   <div>
+    <font color="#333333"><span style="font-size:14px;line-height:25.2px;"><br></span></font>
+   </div> 
+   <div>
+    <font color="#333333"><span style="font-size:14px;line-height:25.2px;"><br></span></font>
+   </div> 
+   <div>
+    <font color="#333333"><span style="font-size:14px;line-height:25.2px;">本文转自Barret Lee博客园博客，原文链接：http://www.cnblogs.com/hustskyking/p/websocket-with-php.html，如需转载请自行联系原作者</span><br></font>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux下共享内存mmap和DMA(直接访问内存)的使用 【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/uid-7374279-id-4413316.html    介绍Linux内存管理和内存映射的奥秘。同时讲述设备驱动程序是如何使用“直接内存访问”（DMA）的。尽管你可能反对，认为DMA更属于硬件处理而不是软件接口，但我觉得与硬...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/14/weixin_33716154_90126760.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux下共享内存mmap和DMA(直接访问内存)的使用 【转】</h1>
+    <p class="post-meta">Nov 14, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://blog.chinaunix.net/uid-7374279-id-4413316.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://blog.chinaunix.net/uid-7374279-id-4413316.html</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">介绍Linux内存管理和内存映射的奥秘。同时讲述设备驱动程序是如何使用“直接内存访问”（DMA）的。尽管你可能反对，认为DMA更属于硬件处理而不是软件接口，但我觉得与硬件控制比起来，它与内存管理更相关。这一章比较高级；大多数驱动程序的作者并不需要太深入到系统内部。不过理解内存如何工作可以帮助你在设计驱动程序时有效地利用系统的能力。<br> &nbsp; &nbsp; &nbsp; &nbsp;共 享内存可以说是最有用的进程间通信方式，也是最快的IPC形式。两个不同进程A、B共享内存的意思是，同一块物理内存被映射到进程A、B各自的进程地址空 间。进程A可以即时看到进程B对共享内存中数据的更新，反之亦然。由于多个进程共享同一块内存区域，必然需要某种同步机制，互斥锁和信号量都可以。<br> 采用共享内存通信的一个显而易 见的好处是效率高，因为进程可以直接读写内存，而不需要任何数据的拷贝。对于像管道和消息队列等通信方式，则需要在内核和用户空间进行四次的数据拷贝，而 共享内存则只拷贝两次数据[1]：一次从输入文件到共享内存区，另一次从共享内存区到输出文件。实际上，进程之间在共享内存时，并不总是读写少量数据后就 解除映射，有新的通信时，再重新建立共享内存区域。而是保持共享区域，直到通信完毕为止，这样，数据内容一直保存在共享内存中，并没有写回文件。共享内存 中的内容往往是在解除映射时才写回文件的。因此，采用共享内存的通信方式效率是非常高的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">Linux的2.2.x内核支持多 种共享内存方式，如mmap()系统调用，Posix共享内存，以及系统V共享内存。linux发行版本如Redhat 8.0支持mmap()系统调用及系统V共享内存，但还没实现Posix共享内存，本文将主要介绍mmap()系统调用及系统V共享内存API的原理及应 用。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">一、内核怎样保证各个进程寻址到同一个共享内存区域的内存页面</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">1、 page cache及swap cache中页面的区分：一个被访问文件的物理页面都驻留在page cache或swap cache中，一个页面的所有信息由struct page来描述。struct page中有一个域为指针mapping ，它指向一个struct address_space类型结构。page cache或swap cache中的所有页面就是根据address_space结构以及一个偏移量来区分的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">2、文件与 address_space结构的对应：一个具体的文件在打开后，内核会在内存中为之建立一个struct inode结构，其中的i_mapping域指向一个address_space结构。这样，一个文件就对应一个address_space结构，一个 address_space与一个偏移量能够确定一个page cache 或swap cache中的一个页面。因此，当要寻址某个数据时，很容易根据给定的文件及数据在文件内的偏移量而找到相应的页面。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">3、进程调用mmap()时，只是在进程空间内新增了一块相应大小的缓冲区，并设置了相应的访问标识，但并没有建立进程空间到物理页面的映射。因此，第一次访问该空间时，会引发一个缺页异常。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">4、 对于共享内存映射情况，缺页异常处理程序首先在swap cache中寻找目标页（符合address_space以及偏移量的物理页），如果找到，则直接返回地址；如果没有找到，则判断该页是否在交换区 (swap area)，如果在，则执行一个换入操作；如果上述两种情况都不满足，处理程序将分配新的物理页面，并把它插入到page cache中。进程最终将更新进程页表。&nbsp;<br> 注：对于映射普通文件情况（非共享映射），缺页异常处理程序首先会在page cache中根据address_space以及数据偏移量寻找相应的页面。如果没有找到，则说明文件数据还没有读入内存，处理程序会从磁盘读入相应的页 面，并返回相应地址，同时，进程页表也会更新。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">5、所有进程在映射同一个共享内存区域时，情况都一样，在建立线性地址与物理地址之间的映射之后，不论进程各自的返回地址如何，实际访问的必然是同一个共享内存区域对应的物理页面。&nbsp;<br> 注：一个共享内存区域可以看作是特殊文件系统shm中的一个文件，shm的安装点在交换区上。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">上面涉及到了一些数据结构，围绕数据结构理解问题会容易一些。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br><br> 回页首<br> 二、mmap()及其相关系统调用</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">mmap()系统调用使得进程之间通过映射同一个普通文件实现共享内存。普通文件被映射到进程地址空间后，进程可以向访问普通内存一样对文件进行访问，不必再调用read()，write（）等操作。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">注：实际上，mmap()系统调用并不是完全为了用于共享内存而设计的。它本身提供了不同于一般对普通文件的访问方式，进程可以像读写内存一样对普通文件的操作。而Posix或系统V的共享内存IPC则纯粹用于共享目的，当然mmap()实现共享内存也是其主要应用之一。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">1、mmap()系统调用形式如下：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> void* mmap ( void * addr , size_t len , int prot , int flags , int fd , off_t offset )&nbsp;<br> 参 数fd为即将映射到进程空间的文件描述字，一般由open()返回，同时，fd可以指定为-1，此时须指定flags参数中的MAP_ANON，表明进 行的是匿名映射（不涉及具体的文件名，避免了文件的创建及打开，很显然只能用于具有亲缘关系的进程间通信）。len是映射到调用进程地址空间的字节数，它 从被映射文件开头offset个字节开始算起。prot 参数指定共享内存的访问权限。可取如下几个值的或：PROT_READ（可读） , PROT_WRITE （可写）, PROT_EXEC （可执行）, PROT_NONE（不可访问）。flags由以下几个常值指定：MAP_SHARED , MAP_PRIVATE , MAP_FIXED，其中，MAP_SHARED , MAP_PRIVATE必选其一，而MAP_FIXED则不推荐使用。offset参数一般设为0，表示从文件头开始映射。参数addr指定文件应被映射 到进程空间的起始地址，一般被指定一个空指针，此时选择起始地址的任务留给内核来完成。函数的返回值为最后文件映射到进程空间的地址，进程可直接操作起始 地址为该值的有效地址。这里不再详细介绍mmap()的参数，读者可参考mmap()手册页获得进一步的信息。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">2、系统调用mmap()用于共享内存的两种方式：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> （1）使用普通文件提供的内存映射：适用于任何进程之间； 此时，需要打开或创建一个文件，然后再调用mmap()；典型调用代码如下：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">fd=open(name, flag, mode);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">if(fd&lt;0)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">...</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">ptr=mmap(NULL, len , PROT_READ|PROT_WRITE, MAP_SHARED , fd , 0); 通过mmap()实现共享内存的通信方式有许多特点和要注意的地方，我们将在范例中进行具体说明。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">（2） 使用特殊文件提供匿名内存映射：适用于具有亲缘关系的进程之间； 由于父子进程特殊的亲缘关系，在父进程中先调用mmap()，然后调用fork()。那么在调用fork()之后，子进程继承父进程匿名映射后的地址空 间，同样也继承mmap()返回的地址，这样，父子进程就可以通过映射区域进行通信了。注意，这里不是一般的继承关系。一般来说，子进程单独维护从父进程 继承下来的一些变量。而mmap()返回的地址，却由父子进程共同维护。&nbsp;<br> 对于具有亲缘关系的进程实现共享内存最好的方式应该是采用匿名内存映射的方式。此时，不必指定具体的文件，只要设置相应的标志即可，参见范例2。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">3、系统调用munmap()</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> int munmap( void * addr, size_t len )&nbsp;<br> 该调用在进程地址空间中解除一个映射关系，addr是调用mmap()时返回的地址，len是映射区的大小。当映射关系解除后，对原来映射地址的访问将导致段错误发生。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">4、系统调用msync()</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> int msync ( void * addr , size_t len, int flags)&nbsp;<br> 一般说来，进程在映射空间的对共享内容的改变并不直接写回到磁盘文件中，往往在调用munmap（）后才执行该操作。可以通过调用msync()实现磁盘上文件内容与共享内存区的内容一致。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br><br> 回页首<br> 三、mmap()范例</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">下 面将给出使用mmap()的两个范例：范例1给出两个进程通过映射普通文件实现共享内存通信；范例2给出父子进程通过匿名映射实现共享内存。系统调用 mmap()有许多有趣的地方，下面是通过mmap（）映射普通文件实现进程间的通信的范例，我们通过该范例来说明mmap()实现共享内存的特点及注意 事项。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">范例1：两个进程通过映射普通文件实现共享内存通信</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">范 例1包含两个子程序：map_normalfile1.c及map_normalfile2.c。编译两个程序，可执行文件分别为 map_normalfile1及map_normalfile2。两个程序通过命令行参数指定同一个文件来实现共享内存方式的进程间通信。 map_normalfile2试图打开命令行参数指定的一个普通文件，把该文件映射到进程的地址空间，并对映射后的地址空间进行写操作。 map_normalfile1把命令行参数指定的文件映射到进程地址空间，然后对映射后的地址空间执行读操作。这样，两个进程通过命令行参数指定同一个 文件来实现共享内存方式的进程间通信。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">下面是两个程序代码：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">/*-------------map_normalfile1.c-----------*/</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">typedef struct{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">char name[4];</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int age;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}people;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">main(int argc, char** argv) // map a normal file as shared mem:</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int fd,i;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">people *p_map;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">char temp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">fd=open(argv[1],O_CREAT|O_RDWR|O_TRUNC,00777);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">lseek(fd,sizeof(people)*5-1,SEEK_SET);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">write(fd,"",1);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">p_map = (people*) mmap( NULL,sizeof(people)*10,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0 );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">close( fd );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">temp = 'a';</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">for(i=0; i&lt;10; i++)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">temp += 1;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">memcpy( ( *(p_map+i) ).name, &amp;temp,2 );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">( *(p_map+i) ).age = 20+i;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf(" initialize over /n ")；</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">sleep(10);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">munmap( p_map, sizeof(people)*10 );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf( "umap ok /n" );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">/*-------------map_normalfile2.c-----------*/</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">typedef struct{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">char name[4];</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int age;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}people;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">main(int argc, char** argv) // map a normal file as shared mem:</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int fd,i;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">people *p_map;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">fd=open( argv[1],O_CREAT|O_RDWR,00777 );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">p_map = (people*)mmap(NULL,sizeof(people)*10,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">for(i = 0;i&lt;10;i++)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf( "name: %s age %d;/n",(*(p_map+i)).name, (*(p_map+i)).age );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">munmap( p_map,sizeof(people)*10 );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> map_normalfile1.c首先定义了一个 people数据结构，（在这里采用数据结构的方式是因为，共享内存区的数据往往是有固定格式的，这由通信的各个进程决定，采用结构的方式有普遍代表 性）。map_normfile1首先打开或创建一个文件，并把文件的长度设置为5个people结构大小。然后从mmap()的返回地址开始，设置了 10个people结构。然后，进程睡眠10秒钟，等待其他进程映射同一个文件，最后解除映射。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">map_normfile2.c只是简单的映射一个文件，并以people数据结构的格式从mmap()返回的地址处读取10个people结构，并输出读取的值，然后解除映射。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">分别把两个程序编译成可执行文件map_normalfile1和map_normalfile2后，在一个终端上先运行./map_normalfile2 /tmp/test_shm，程序输出结果如下：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">initialize over</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">umap ok</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 在map_normalfile1输出initialize over 之后，输出umap ok之前，在另一个终端上运行map_normalfile2 /tmp/test_shm，将会产生如下输出(为了节省空间，输出结果为稍作整理后的结果)：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">name: b age 20; name: c age 21; name: d age 22; name: e age 23; name: f age 24;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">name: g age 25; name: h age 26; name: I age 27; name: j age 28; name: k age 29;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 在map_normalfile1 输出umap ok后，运行map_normalfile2则输出如下结果：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">name: b age 20; name: c age 21; name: d age 22; name: e age 23; name: f age 24;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">name: age 0; name: age 0; name: age 0; name: age 0; name: age 0;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 从程序的运行结果中可以得出的结论</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">1、 最终被映射文件的内容的长度不会超过文件本身的初始大小，即映射不能改变文件的大小；</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">2、 可以用于进程通信的有效地址空间大小大体上受限于被映射文件的大小，但不完全受限于文件大小。打开文件被截短为5个people结构大小，而在 map_normalfile1中初始化了10个people数据结构，在恰当时候（map_normalfile1输出initialize over 之后，输出umap ok之前）调用map_normalfile2会发现map_normalfile2将输出全部10个people结构的值，后面将给出详细讨论。&nbsp;<br> 注： 在linux中，内存的保护是以页为基本单位的，即使被映射文件只有一个字节大小，内核也会为映射分配一个页面大小的内存。当被映射文件小于一个页面 大小时，进程可以对从mmap()返回地址开始的一个页面大小进行访问，而不会出错；但是，如果对一个页面以外的地址空间进行访问，则导致错误发生，后面 将进一步描述。因此，可用于进程间通信的有效地址空间大小不会超过文件大小及一个页面大小的和。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">3、 文件一旦被映射后，调用mmap()的进程对返回地址的访问是对某一内存区域的访问，暂时脱离了磁盘上文件的影响。所有对mmap()返回地址空间的操作 只在内存中有意义，只有在调用了munmap()后或者msync()时，才把内存中的相应内容写回磁盘文件，所写内容仍然不能超过文件的大小。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">范例2：父子进程通过匿名映射实现共享内存</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">typedef struct{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">char name[4];</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int age;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}people;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">main(int argc, char** argv)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int i;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">people *p_map;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">char temp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">p_map=(people*)mmap(NULL,sizeof(people)*10,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">if(fork() == 0)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">sleep(2);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">for(i = 0;i&lt;5;i++)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf("child read: the %d people's age is %d/n",i+1,(*(p_map+i)).age);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(*p_map).age = 100;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">munmap(p_map,sizeof(people)*10); //实际上，进程终止时，会自动解除映射。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">exit();</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">temp = 'a';</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">for(i = 0;i&lt;5;i++)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">temp += 1;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">memcpy((*(p_map+i)).name, &amp;temp,2);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(*(p_map+i)).age=20+i;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">sleep(5);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf( "parent read: the first people,s age is %d/n",(*p_map).age );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf("umap/n");</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">munmap( p_map,sizeof(people)*10 );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf( "umap ok/n" );</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 考察程序的输出结果，体会父子进程匿名共享内存：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">child read: the 1 people's age is 20</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">child read: the 2 people's age is 21</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">child read: the 3 people's age is 22</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">child read: the 4 people's age is 23</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">child read: the 5 people's age is 24</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">parent read: the first people,s age is 100</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">umap</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">umap ok</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 四、对mmap()返回地址的访问</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">前 面对范例运行结构的讨论中已经提到，linux采用的是页式管理机制。对于用mmap()映射普通文件来说，进程会在自己的地址空间新增一块空间，空间大 小由mmap()的len参数指定，注意，进程并不一定能够对全部新增空间都能进行有效访问。进程能够访问的有效地址大小取决于文件被映射部分的大小。简 单的说，能够容纳文件被映射部分大小的最少页面个数决定了进程从mmap()返回的地址开始，能够有效访问的地址空间大小。超过这个空间大小，内核会根据 超过的严重程度返回发送不同的信号给进程。可用如下图示说明：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 注意：文件被映射部分而不是整个文件决定了进程能够访问的空间大小，另外，如果指定文件的偏移部分，一定要注意为页面大小的整数倍。下面是对进程映射地址空间的访问范例：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#include</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">typedef struct{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">char name[4];</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int age;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}people;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">main(int argc, char** argv)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int fd,i;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">int pagesize,offset;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">people *p_map;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">pagesize = sysconf(_SC_PAGESIZE);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf("pagesize is %d/n",pagesize);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">fd = open(argv[1],O_CREAT|O_RDWR|O_TRUNC,00777);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">lseek(fd,pagesize*2-100,SEEK_SET);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">write(fd,"",1);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">offset = 0; //此处offset = 0编译成版本1；offset = pagesize编译成版本2</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">p_map = (people*)mmap(NULL,pagesize*3,PROT_READ|PROT_WRITE,MAP_SHARED,fd,offset);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">close(fd);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">for(i = 1; i&lt;10; i++)</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">{</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(*(p_map+pagesize/sizeof(people)*i-2)).age = 100;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf("access page %d over/n",i);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(*(p_map+pagesize/sizeof(people)*i-1)).age = 100;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf("access page %d edge over, now begin to access page %d/n",i, i+1);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(*(p_map+pagesize/sizeof(people)*i)).age = 100;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">printf("access page %d over/n",i+1);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">munmap(p_map,sizeof(people)*10);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">}</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 如程序中所注释的那样，把程序编译成两个版本，两个版 本主要体现在文件被映射部分的大小不同。文件的大小介于一个页面与两个页面之间（大小为：pagesize*2-99），版本1的被映射部分是整个文件， 版本2的文件被映射部分是文件大小减去一个页面后的剩余部分，不到一个页面大小(大小为：pagesize-99)。程序中试图访问每一个页面边界，两个 版本都试图在进程空间中映射pagesize*3的字节数。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">版本1的输出结果如下：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">pagesize is 4096</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">access page 1 over</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">access page 1 edge over, now begin to access page 2</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">access page 2 over</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">access page 2 over</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">access page 2 edge over, now begin to access page 3</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">Bus error //被映射文件在进程空间中覆盖了两个页面，此时，进程试图访问第三个页面</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 版本2的输出结果如下：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">pagesize is 4096</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">access page 1 over</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">access page 1 edge over, now begin to access page 2</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">Bus error //被映射文件在进程空间中覆盖了一个页面，此时，进程试图访问第二个页面</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 结论：采用系统调用mmap()实现进程间通信是很方便的，在应用层上接口非常简洁。内部实现机制区涉及到了linux存储管理以及文件系统等方面的内容，可以参考一下相关重要数据结构来加深理解。在本专题的后面部分，将介绍系统v共享内存的实现。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">参考资料</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">[1] Understanding the Linux Kernel, 2nd Edition, By Daniel P. Bovet, Marco Cesati , 对各主题阐述得重点突出，脉络清晰。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">[2] UNIX网络编程第二卷：进程间通信，作者：W.Richard Stevens，译者：杨继张，清华大学出版社。对mmap()有详细阐述。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">[3] Linux内核源代码情景分析（上），毛德操、胡希明著，浙江大学出版社，给出了mmap()相关的源代码分析。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">[4]mmap()手册</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p><font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/5956721.html</span></font><span style="font-size:14px;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

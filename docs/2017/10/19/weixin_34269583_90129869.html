@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Mysql性能优化三（分表、增量备份、还原） « NotBeCN</title>
+  <meta name="description" content="             接上篇Mysql性能优化二    对表进行水平划分&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;    如果一个表的记录数太多了，比如上千万条，而且需要经常检索，那么我们就有必要化整为零了。如果我拆成100个表，那么每个表...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/19/weixin_34269583_90129869.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Mysql性能优化三（分表、增量备份、还原）</h1>
+    <p class="post-meta">Oct 19, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">接上篇<a id="post_title_link_5380073" href="http://www.cnblogs.com/jiekzou/p/5380073.html" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">Mysql性能优化二</a></p> 
+   <h2 style="color:#FFFFFF;line-height:25px;font-size:17px;background:none repeat scroll 0px 0px;font-family:'微软雅黑', '宋体', '黑体', Arial;">对表进行水平划分&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">如果一个表的记录数太多了，比如上千万条，而且需要经常检索，那么我们就有必要化整为零了。如果我拆成100个表，那么每个表只有10万条记录。当然这需要数据在逻辑上可以划分。一个好的划分依据，有利于程序的简单实现，也可以充分利用水平分表的优势。比如系统界面上只提供按月查询的功能，那么把表按月拆分成12个，每个查询只查询一个表就够了。如果非要按照地域来分，即使把表拆的再小，查询还是要联合所有表来查，还不如不拆了。所以一个好的拆分依据是 最重要的。关键字：UNION&nbsp;<br> 例：</p> 
+   <ul style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+    <li>订单表根据订单产生时间来分表（一年一张）</li> 
+    <li>学生情况表</li> 
+    <li>查询电话费，近三个月的数据放入一张表，一年内的放入到另一张表</li> 
+   </ul>
+   <h2 style="color:#FFFFFF;line-height:25px;font-size:17px;background:none repeat scroll 0px 0px;font-family:'微软雅黑', '宋体', '黑体', Arial;">对表进行垂直划分&nbsp;&nbsp;</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">有些表记录数并不多，可能也就2、3万条，但是字段却很长，表占用空间很大，检索表时需要执行大量I/O，严重降低了性能。这个时候需要把大的字段拆分到另一个表，并且该表与原表是一对一的关系。 (JOIN)&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://images2015.cnblogs.com/blog/413851/201604/413851-20160416194036207-410012935.png" alt="" style="border:0px none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">【试题内容】、【答案信息】两个表，最初是作为几个字段添加到【试题信息】里的，可以看到试题内容和答案这两个字段很长，在表里有3万记录时，表已经占 了1G的空间，在列试题列表时非常慢。经过分析，发现系统很多时候是根据【册】、【单元】、类型、类别、难易程度等查询条件，分页显示试题详细内容。而每 次检索都是这几个表做join，每次要扫描一遍1G的表。我们完全可以把内容和答案拆分成另一个表，只有显示详细内容的时候才读这个大表，由此 就产生了【试题内容】、【答案信息】两个表。</p> 
+   <h2 style="color:#FFFFFF;line-height:25px;font-size:17px;background:none repeat scroll 0px 0px;font-family:'微软雅黑', '宋体', '黑体', Arial;">选择适当的字段类型，特别是主键 &nbsp;&nbsp; &nbsp;&nbsp;</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">选择字段的一般原则是保小不保大，能用占用字节小的字段就不用大字段。比如主键， 建议使用自增类型，这样省空间,空间就是效率!按4个字节和按32个字节定位一条记录，谁快谁慢太明显了。涉及到几个表做join时，效果就更明显了。<br> 建议使用一个不含业务逻辑的id做主角如s1001。例：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="border:medium none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:medium none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">int</span> <span style="color:rgb(128,0,0);font-weight:bold;font-size:12px;line-height:1.5;">4</span>  <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">bigint</span> <span style="color:rgb(128,0,0);font-weight:bold;font-size:12px;line-height:1.5;">8</span> mediumint <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">smallint</span> <span style="color:rgb(128,0,0);font-weight:bold;font-size:12px;line-height:1.5;">2</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">tinyint</span> <span style="color:rgb(128,0,0);font-weight:bold;font-size:12px;line-height:1.5;">1</span><span style="font-size:12px;line-height:1.5;">
+md5  </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">char</span>(<span style="color:rgb(128,0,0);font-weight:bold;font-size:12px;line-height:1.5;">32</span><span style="font-size:12px;line-height:1.5;">)
+id ：整数 </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">tinyint</span> samllint <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">int</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">bigint</span><span style="font-size:12px;line-height:1.5;">
+student表
+id stuno     stuname     adress
+</span><span style="color:rgb(128,0,0);font-weight:bold;font-size:12px;line-height:1.5;">1</span>  s1001    小民            深圳</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="border:medium none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:medium none;"></a></span>
+    </div> 
+   </div> 
+   <h3 style="font-size:16px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">文件、图片等大文件用文件系统存储</h3> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">数据库只存储路径。图片和文件存放在文件系统，甚至单独放在一台服务器(图床 / 视频服务器 ).</p> 
+   <h2 style="color:#FFFFFF;line-height:25px;font-size:17px;background:none repeat scroll 0px 0px;font-family:'微软雅黑', '宋体', '黑体', Arial;">数据库参数配置</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">最重要的参数就是内存，我们主要用的innodb引擎，所以下面两个参数调的很大</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>innodb_additional_mem_pool_size =<span style="font-size:12px;line-height:1.5;"> 64M<br>
+innodb_buffer_pool_size </span>=1G</pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">对于myisam，需要调整key_buffer_size，当然调整参数还是要看状态，用show status语句可以看到当前状态，以决定改调整哪些参数<br> 在my.ini修改端口3306，默认存储引擎和最大连接数</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="font-size:12px;line-height:1.5;">在my.ini中.
+port=3306 [有两个地方修改]
+default-storage-engine=INNODB 
+max_connections=100</span></pre>
+   </div> 
+   <h2 style="color:#FFFFFF;line-height:25px;font-size:17px;background:none repeat scroll 0px 0px;font-family:'微软雅黑', '宋体', '黑体', Arial;">合理的硬件资源和操作系统</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">如果你的机器内存超过4G，那么毋庸置疑应当采用64位操作系统和64位mysql 5.5.19 or mysql5.6<br><strong>读写分离</strong><br> &nbsp;&nbsp; &nbsp;如果数据库压力很大，一台机器支撑不了，那么可以用mysql复制实现多台机器同步，将数据库的压力分散。&nbsp;<br><img src="https://images2015.cnblogs.com/blog/413851/201604/413851-20160416194320660-754761573.png" alt="" style="border:0px none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">Master<br> Slave1<br> Slave2<br> Slave3<br> &nbsp;&nbsp; &nbsp;主库master用来写入，slave1—slave3都用来做select，每个数据库分担的压力小了很多。<br> 要实现这种方式，需要程序特别设计，写都操作master，读都操作slave，给程序开发带来了额外负担。当然目前已经有中间件来实现这个代理，对程 序来读写哪些数据库是透明的。官方有个mysql-proxy，但是还是alpha版本的。新浪有个amobe for mysql，也可达到这个目的，结构如下　<br><img src="https://images2015.cnblogs.com/blog/413851/201604/413851-20160416194413223-884043041.png" alt="" style="border:0px none;"></p> 
+   <h2 style="color:#FFFFFF;line-height:25px;font-size:17px;background:none repeat scroll 0px 0px;font-family:'微软雅黑', '宋体', '黑体', Arial;">定时完成数据库的备份</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">项目实际需求，请完成定时备份某个数据库，或者定时备份数据库的某些表的操作<br> windows 下每隔1小时，备份一次数据newsdb<br> windows 每天晚上2:00&nbsp;&nbsp; 备份 newsdb 下 某一张表&nbsp;<br> cmd&gt; mysqldump –u root –p密码&nbsp; 数据库名 &gt; 把数据库放入到某个目录<br> 案例,备份 mydb 库的所有表<br> 进入mysqldump所在的目录<br> cmd&gt; mysqldump –u root –phsp shop&gt; d:/shop.log&nbsp;&nbsp; [把shop数据库的所有表全部导出]<br> cmd&gt; mysqldump –u root –phsp shop temusers emp &gt; d:/shop2.log [shop数据库的 temusers和emp导出]<br> 如何恢复数据的表<br> 进入的mysql操作界面<br> mysql&gt;source&nbsp; 备份文件的全路径<br> 定时备份:(把命令写入到my.bat 问中)<br> windows 如何定时备份 (每天凌晨2:00)<br> 使用windows自带的计划任务，定时执行批处理命令。</p> 
+   <h2 style="color:#FFFFFF;line-height:25px;font-size:17px;background:none repeat scroll 0px 0px;font-family:'微软雅黑', '宋体', '黑体', Arial;">增量备份和还原</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">定义：mysql数据库会以二进制的形式，自动把用户对mysql数据库的操作，记录到文件，当用户希望恢复的时候，可以使用备份文件进行恢复。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">增量备份会记录dml语句、创建表的语句，不会记录select。记录的东西包括：sql语句本身、操作时间，位置</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><strong>进行增量备份的步骤和恢复</strong></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(255,0,0);">&nbsp;注意：mysql5.0及之前的版本是不支持增量备份的</span><br> 1、配置my.ini文件或者my.conf，启用二进制备份。<br> 打开my.ini文件，查找log-bin，进行配置：log-bin=G:\Database\mysqlbinlog\mylog<br> 在G:\Database目录下面新建目录mysqlbinlog<br> 2、重启mysql服务<br> 这个时候会在mysqlbinlog目录下面看到以下两个文件：<br> mylog.000001：日志备份文件。如果要查看这个日志文件里面的信息，我们可以使用mysqlbinlog程序查看，mysqlbinlog程序存放在mysql的bin目录下面（“C:\Program Files\MySQL\MySQL Server 5.6\bin”）。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">执行sql语句</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">UPDATE</span> emp <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">set</span> ename<span style="color:rgb(128,128,128);font-size:12px;line-height:1.5;">=</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">'</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">zouqj</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">'</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">where</span> empno<span style="color:rgb(128,128,128);font-size:12px;line-height:1.5;">=</span><span style="color:rgb(128,0,0);font-weight:bold;font-size:12px;line-height:1.5;">100003</span>;</pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">开始——运行——cmd，mysqlbinlog 备份文件路径</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>C:\Program <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">Files</span>\MySQL\MySQL Server 5.6\bin&gt;mysqlbinlog G:\Database\mysqlbinlog\mylog.000001</pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://images2015.cnblogs.com/blog/413851/201604/413851-20160417120419957-1019549552.jpg" alt="" style="border:0px none;"><br> mylog.index：日志索引文件，里面记录了所以的日志文件。（G:\Database\mysqlbinlog\mylog.000001）<br> 3、假设现在问题来了，我这条update是误操作，如何进行恢复<br> 在mysql日志中会记录每一次操作的时间和位置，所以我们既可以根据时间来恢复，也可以根据位置来恢复。<br> 那么，我们现在马上可以从上图看出，这条语句产生的时间是"2016-04-17 12:01:36"，位置是614</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><strong>按时间来恢复</strong></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">我们可以选择在语句产生时间的前一秒</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">执行cmd命令：mysqlbinlog --stop-datetime="2016-04-17 12:01:35" G:\Database\mysqlbinlog\mylog.000001 | mysql -uroot -p</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">这个时候我再执行SQL语句查看</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">SELECT</span> <span style="color:rgb(128,128,128);font-size:12px;line-height:1.5;">*</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">from</span> emp <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">where</span> empno<span style="color:rgb(128,128,128);font-size:12px;line-height:1.5;">=</span><span style="color:rgb(128,0,0);font-weight:bold;font-size:12px;line-height:1.5;">100003</span>;</pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">结果变成了</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://images2015.cnblogs.com/blog/413851/201604/413851-20160417122512207-2099399527.jpg" alt="" style="border:0px none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><strong>按位置来恢复</strong></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">执行cmd命令：mysqlbinlog --stop-position="614" G:\Database\mysqlbinlog\mylog.000001 | mysql -uroot -p</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;">这个时候再执行SQL来查看结果，又变回来了。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://images2015.cnblogs.com/blog/413851/201604/413851-20160417122718973-2135930635.jpg" alt="" style="border:0px none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p><font color="#333333"><span style="font-size:15px;">本文转自邹琼俊博客园博客，原文链接：http://www.cnblogs.com/jiekzou/p/5399160.html，如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

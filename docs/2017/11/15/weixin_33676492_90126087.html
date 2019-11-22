@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux signal 那些事儿 （3）【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/uid-24774106-id-4065797.html    这篇博客，想集中在signal 与线程的关系上，顺带介绍内核signal相关的结构。如何组织我其实并没想好，想到哪就写到哪里吧。主题一定会落在signal之内而不跑题...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_33676492_90126087.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux signal 那些事儿 （3）【转】</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://blog.chinaunix.net/uid-24774106-id-4065797.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://blog.chinaunix.net/uid-24774106-id-4065797.html</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;">这篇博客，想集中在signal 与线程的关系上，顺带介绍内核signal相关的结构。如何组织我其实并没想好，想到哪就写到哪里吧。主题一定会落在signal之内而不跑题。<br><span style="line-height:2;">&nbsp; &nbsp; 提到signal与thread的关系，就得先提POSIX标准。POSIX标准决定了Linux为何将signal如此实现：<br><span style="line-height:2;">&nbsp; &nbsp;1 信号处理函数必须在多线程应用的所有线程之间共享，但是，每个线程要有自己的挂起信号掩码和阻塞信号掩码。<br><span style="line-height:2;">&nbsp; &nbsp;2 POSIX 函数kill/sigqueue必须面向所有的多线程应用而不是某个特殊的线程。<br><span style="line-height:2;">&nbsp; &nbsp;3 每个发给多线程应用的信号仅传送给1个线程，这个线程是由内核从不会阻塞该信号的线程中随意选出。<br><span style="line-height:2;">&nbsp; &nbsp;4 如果发送一个致命信号到多线程，那么内核将杀死该应用的所有线程，而不仅仅是接收信号的那个线程。<br><br><span style="line-height:2;">&nbsp; &nbsp; 上面是POSIX标准，也就是提出来的要求，Linux要遵循POSIX标准，那Linux是怎么做到的呢？<br><span style="line-height:2;">&nbsp; &nbsp; 到了此处，我们需要理清一些基本的概念：<br></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);">struct task_struct&nbsp;<span style="color:rgb(0,0,204);">{<br></span></span></li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; pid_t pid<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; pid_t tgid<br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">.<span>.<span>.<span>.<span>.<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct task_struct&nbsp;<span style="color:rgb(0,0,204);">*group_leader<span>;&nbsp;&nbsp;&nbsp;&nbsp;<span>/<span>* threadgroup leader&nbsp;<span>*<span>/<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">.<span>.<span>.<span>.<span>.<span>.<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct list_head thread_group<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">.<span>.<span>.<span>.<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">}</span></li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 从字面意思上看 pid，是process id，其则不然，pid是thread id。从字面意思上看，tgid是thread group id，其则是真正的pid。<br><span style="line-height:2;">&nbsp; &nbsp; 有点绕是不是？对于一个多线程的程序，无论是哪个线程执行getpid，结果都是一样的，最终返回的同一个值 tgid。如果我们实现了gettid（很不幸的是glibc没有这个函数，所以我们要用syscall），我们就会发现，各个线程返回的值不同，此时，返回的值是内核task_struct中的pid。对于多线程应用/proc/pid/task可以看到的，就是线程的thread id，也就是task_struct中的pid。<br><span style="line-height:2;">&nbsp; &nbsp;<img src="http://blog.chinaunix.net/attachment/201401/5/24774106_1388914245BXbM.png" alt="" width="700" height="219" style="border:none;"><br><span style="line-height:2;">&nbsp; &nbsp; 我在我的博文<a href="http://blog.chinaunix.net/uid-24774106-id-3650136.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:2;">Linux线程之线程 线程组 进程 轻量级进程（LWP）</a><span style="line-height:2;">提到了这个问题。我不想多浪费笔墨赘述。<br><span style="line-height:2;">&nbsp; &nbsp; group leader字段，指向线程组的第一个线程。对于我们自己的程序而言，main函数所在的线程，也就是线程组的第一个线程，所以group leader就会他自己。一旦用pthread_create创建了线程，那么main所在的线程，还有创建出来的线程，隶属于同一个线程组，线程的group leader还是main函数所在的线程id。<br><span style="line-height:2;">&nbsp; &nbsp; thread_group，同一线程组的所有线程的队列。对于group_leader,这是一个队列头，对于同一线程组的其他线程，通过这个字段挂入队列。可以根据这个队列，遍历线程组的所有线程。<br><span style="line-height:2;">&nbsp; &nbsp; &nbsp;是时候看看内核代码了,下面的代码属于do_fork函数及copy_process函数的一些代码。&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);">&nbsp;&nbsp;&nbsp;&nbsp;p<span style="color:rgb(0,0,204);">-<span>&gt;pid&nbsp;<span>= pid_nr<span>(pid<span>)<span>;<br></span></span></span></span></span></span></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;p<span style="color:rgb(0,0,204);">-<span>&gt;tgid&nbsp;<span>= p<span>-<span>&gt;pid<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(clone_flags &amp; CLONE_THREAD<span>)//创建线程，tgid等于当前线程的<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;p<span style="color:rgb(0,0,204);">-<span>&gt;tgid&nbsp;<span>= current<span>-<span>&gt;tgid<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;p<span style="color:rgb(0,0,204);">-<span>&gt;group_leader&nbsp;<span>= p<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;INIT_LIST_HEAD<span style="color:rgb(0,0,204);">(<span>&amp;p<span>-<span>&gt;thread_group<span>)<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,255);">&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;<span style="color:rgb(0,0,204);">(clone_flags &amp; CLONE_THREAD<span>) {&nbsp;//线程处理部分，group_leader都是第一个线程。同时挂入队列<br></span></span></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;current<span style="color:rgb(0,0,204);">-<span>&gt;signal<span>-<span>&gt;nr_threads<span>+<span>+<span>;<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;atomic_inc<span style="color:rgb(0,0,204);">(<span>&amp;current<span>-<span>&gt;signal<span>-<span>&gt;live<span>)<span>;<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;atomic_inc<span style="color:rgb(0,0,204);">(<span>&amp;current<span>-<span>&gt;signal<span>-<span>&gt;sigcnt<span>)<span>;<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span>p<span style="color:rgb(0,0,204);">-<span>&gt;<span>group_leader&nbsp;<span>=<span>&nbsp;current<span>-<span>&gt;<span>group_leader<span>;<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;list_add_tail_rcu<span style="color:rgb(0,0,204);">(<span>&amp;p<span>-<span>&gt;thread_group<span>, &amp;p<span>-<span>&gt;group_leader<span>-<span>&gt;thread_group<span>)<span>;<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 代码表明，第一个线程呢，pid和tgid相同，都是分配的那个pid，group_leader也是自己。后面第二个线程，pid是自己的，但是tgid 等于创建者的tgid，group_leader指向第一个线程的task_struct. 后面创建的所有的线程，都会挂入队列，方便遍线程组的所有线程。<br><span style="line-height:2;">&nbsp; &nbsp; 有了线程组的概念，我们就可以进一步解释signal相关的内容了。&nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);"><span style="color:rgb(0,0,204);">&nbsp; &nbsp; /<span>* signal handlers&nbsp;<span>*<span>/<br></span></span></span></span></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct signal_struct&nbsp;<span style="color:rgb(0,0,204);">*signal<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct sighand_struct&nbsp;<span style="color:rgb(0,0,204);">*sighand<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;sigset_t blocked<span style="color:rgb(0,0,204);">, real_blocked<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;sigset_t saved_sigmask<span style="color:rgb(0,0,204);">;&nbsp;&nbsp;&nbsp;&nbsp;<span>/<span>* restored&nbsp;<span style="color:rgb(0,0,255);">if set_restore_sigmask<span style="color:rgb(0,0,204);">(<span>) was used&nbsp;<span>*<span>/<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct sigpending pending<span style="color:rgb(0,0,204);">;</span> </li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp;&nbsp;&nbsp;&nbsp;<img src="http://blog.chinaunix.net/attachment/201401/5/24774106_1388912502Pl1s.png" alt="" width="700" height="452" style="border:none;font-size:14.4px;line-height:22.4px;"><br><span style="line-height:2;">&nbsp; &nbsp; 线程组里面的所有成员共享一个signal_struct类型结构，同一线程组的多线程的task_struct 中的signal指针都是指向同一个signal_struct。sighand成员变量也是如此，统一个线程组的多个线程指向同一个signalhand_struct结构。&nbsp;&nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);">static&nbsp;<span style="color:rgb(255,0,0);">int copy_signal<span style="color:rgb(0,0,204);">(unsigned long clone_flags<span>, struct task_struct&nbsp;<span>*tsk<span>)<br></span></span></span></span></span></span></li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">{<br></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct signal_struct&nbsp;<span style="color:rgb(0,0,204);">*sig<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(clone_flags&nbsp;<span>&amp;&nbsp;<span>CLONE_THREAD<span>) //线程，直接返回，表明同一线程组共享<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return 0<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;sig&nbsp;<span style="color:rgb(0,0,204);">= kmem_cache_zalloc<span>(signal_cachep<span>, GFP_KERNEL<span>)<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;tsk<span style="color:rgb(0,0,204);">-<span>&gt;signal&nbsp;<span>= sig<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(<span>!sig<span>)<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;<span style="color:rgb(0,0,204);">-ENOMEM<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;sig<span style="color:rgb(0,0,204);">-<span>&gt;nr_threads&nbsp;<span>= 1<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;atomic_set<span style="color:rgb(0,0,204);">(<span>&amp;sig<span>-<span>&gt;live<span>, 1<span>)<span>;<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;atomic_set<span style="color:rgb(0,0,204);">(<span>&amp;sig<span>-<span>&gt;sigcnt<span>, 1<span>)<span>;<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;init_waitqueue_head<span style="color:rgb(0,0,204);">(<span>&amp;sig<span>-<span>&gt;wait_chldexit<span>)<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;sig<span style="color:rgb(0,0,204);">-<span>&gt;curr_target&nbsp;<span>= tsk<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;。。。。<br></li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">}<br></span></li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">static&nbsp;<span style="color:rgb(255,0,0);">int copy_sighand<span style="color:rgb(0,0,204);">(unsigned long clone_flags<span>, struct task_struct&nbsp;<span>*tsk<span>)<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">{<br></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct sighand_struct&nbsp;<span style="color:rgb(0,0,204);">*sig<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(clone_flags&nbsp;<span>&amp;&nbsp;<span>CLONE_SIGHAND<span>)&nbsp;<span>{<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;atomic_inc<span style="color:rgb(0,0,204);">(<span>&amp;current<span>-<span>&gt;sighand<span>-<span>&gt;count<span>)<span>; //如果发现是线程，直接讲引用计数++，无需分配sighand_struct结构</span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(92,92,92);line-height:1.3;letter-spacing:.1px;">&nbsp; &nbsp; &nbsp; &nbsp; return 0<span style="line-height:1.3;letter-spacing:.1px;color:rgb(0,0,204);">;</span></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;sig&nbsp;<span style="color:rgb(0,0,204);">= kmem_cache_alloc<span>(sighand_cachep<span>, GFP_KERNEL<span>)<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;rcu_assign_pointer<span style="color:rgb(0,0,204);">(tsk<span>-<span>&gt;sighand<span>, sig<span>)<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(<span>!sig<span>)<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;<span style="color:rgb(0,0,204);">-ENOMEM<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;atomic_set<span style="color:rgb(0,0,204);">(<span>&amp;sig<span>-<span>&gt;count<span>, 1<span>)<span>;<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;memcpy<span style="color:rgb(0,0,204);">(sig<span>-<span>&gt;action<span>, current<span>-<span>&gt;sighand<span>-<span>&gt;action<span>, sizeof<span>(sig<span>-<span>&gt;action<span>)<span>)<span>;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return 0<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">}</span></li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 这就基本实现了多线程应用中，信号处理程序是共享的，因为他们共用一个signalhand_struct。<br><span style="line-height:2;">&nbsp; &nbsp; 上一篇博文提到，signal-&gt;shared_pending 和pending两个挂起信号相关的数据结构，此处我们可以具体讲解了。signal是线程组共享的结构，自然下属的shared_pending也是线程组共享的。就像POSIX提到的，kill/sigqueue发送信号，发送的对象并不是线程组某个特定的线程，而是整个线程组。自然，如果kernel会将信号记录在全线程组共享的signal-&gt;shared_pending,表示，线程组收到信号X一枚。<br><span style="line-height:2;">&nbsp; &nbsp; 有筒子说了，我就要给某个特定的线程发信号，有没有办法，内核怎么办？这是个好问题。&nbsp; &nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);"><span style="color:rgb(0,0,255);">&nbsp; int tkill<span style="color:rgb(0,0,204);">(<span style="color:rgb(0,0,255);">int tid<span style="color:rgb(0,0,204);">,&nbsp;<span style="color:rgb(0,0,255);">int sig<span style="color:rgb(0,0,204);">)<span>;<br></span></span></span></span></span></span></span></span></li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;<span style="color:rgb(0,0,255);">int tgkill<span style="color:rgb(0,0,204);">(<span style="color:rgb(0,0,255);">int tgid<span style="color:rgb(0,0,204);">,&nbsp;<span style="color:rgb(0,0,255);">int tid<span style="color:rgb(0,0,204);">,&nbsp;<span style="color:rgb(0,0,255);">int sig<span style="color:rgb(0,0,204);">)</span></span></span></span></span></span></span></span> </li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 这两个API是给线程组特定线程发信号的，毫不意外，内核会将信号记录在线程自己的结构pending中。<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);">pending&nbsp;<span style="color:rgb(0,0,204);">= group&nbsp;<span>?&nbsp;<span>&amp;t<span>-<span>&gt;signal<span>-<span>&gt;shared_pending&nbsp;<span>:&nbsp;<span>&amp;t<span>-<span>&gt;pending<span>;</span></span></span></span></span></span></span></span></span></span></span></span></span></li>
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 对于kill/sigqueue，__send_signal传进来的是group是true，对于tkill/tgkill传进来的是false。会将信号写入相应的挂起信号位图。<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);">static&nbsp;<span style="color:rgb(255,0,0);">int __send_signal<span style="color:rgb(0,0,204);">(<span style="color:rgb(255,0,0);">int sig<span style="color:rgb(0,0,204);">, struct siginfo&nbsp;<span>*info<span>, struct task_struct&nbsp;<span>*t<span>,<br></span></span></span></span></span></span></span></span></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(255,0,0);">int group<span style="color:rgb(0,0,204);">,&nbsp;<span style="color:rgb(255,0,0);">int from_ancestor_ns<span style="color:rgb(0,0,204);">)<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">{<br></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct sigpending&nbsp;<span style="color:rgb(0,0,204);">*pending<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct sigqueue&nbsp;<span style="color:rgb(0,0,204);">*q<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(255,0,0);">int override_rlimit<span style="color:rgb(0,0,204);">;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(255,0,0);">int ret&nbsp;<span style="color:rgb(0,0,204);">= 0<span>, result<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;assert_spin_locked<span style="color:rgb(0,0,204);">(<span>&amp;t<span>-<span>&gt;sighand<span>-<span>&gt;siglock<span>)<span>;<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;result&nbsp;<span style="color:rgb(0,0,204);">= TRACE_SIGNAL_IGNORED<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(<span>!prepare_signal<span>(sig<span>, t<span>,<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;from_ancestor_ns&nbsp;<span style="color:rgb(0,0,204);">|<span>|&nbsp;<span>(info&nbsp;<span>=<span>= SEND_SIG_FORCED<span>)<span>)<span>)<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto ret<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;"><span>&nbsp;&nbsp;&nbsp;&nbsp;pending&nbsp;<span style="color:rgb(0,0,204);">=<span>&nbsp;group&nbsp;<span>?&nbsp;<span>&amp;<span>t<span>-<span>&gt;<span>signal<span>-<span>&gt;<span>shared_pending&nbsp;<span>:&nbsp;<span>&amp;<span>t<span>-<span>&gt;<span>pending<span>; &nbsp; //&nbsp;tkill用的自己的pending，</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; //&nbsp;kill/sigqueue用的线程组共享的signal-&gt;shared_pending</li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>*<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* Short<span>-circuit ignored signals&nbsp;<span style="color:rgb(0,0,255);">and support queuing<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* exactly one non<span>-rt signal<span>, so that we can&nbsp;<span style="color:rgb(0,0,255);">get more<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* detailed information about the cause of the signal<span>.<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;result&nbsp;<span style="color:rgb(0,0,204);">= TRACE_SIGNAL_ALREADY_PENDING<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(legacy_queue<span>(pending<span>, sig<span>)<span>)<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto ret<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;result&nbsp;<span style="color:rgb(0,0,204);">= TRACE_SIGNAL_DELIVERED<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>*<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* fast<span>-pathed signals&nbsp;<span style="color:rgb(0,0,255);">for kernel<span style="color:rgb(0,0,204);">-internal things like SIGSTOP<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">*&nbsp;<span style="color:rgb(0,0,255);">or SIGKILL<span style="color:rgb(0,0,204);">.<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(info&nbsp;<span>=<span>= SEND_SIG_FORCED<span>)<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto out_set<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>*<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* Real<span>-<span style="color:rgb(255,0,0);">time signals must be queued&nbsp;<span style="color:rgb(0,0,255);">if sent by sigqueue<span style="color:rgb(0,0,204);">,&nbsp;<span style="color:rgb(0,0,255);">or<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* some other real<span>-<span style="color:rgb(255,0,0);">time mechanism<span style="color:rgb(0,0,204);">. It&nbsp;<span style="color:rgb(0,0,255);">is implementation<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* defined whether kill<span>(<span>) does so<span>. We attempt&nbsp;<span style="color:rgb(0,0,255);">to&nbsp;<span>do so<span style="color:rgb(0,0,204);">,&nbsp;<span style="color:rgb(0,0,255);">on<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* the principle of least surprise<span>, but since kill&nbsp;<span style="color:rgb(0,0,255);">is&nbsp;<span>not<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* allowed&nbsp;<span style="color:rgb(0,0,255);">to fail with EAGAIN when low&nbsp;<span>on memory we just<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* make sure at least one signal gets delivered&nbsp;<span style="color:rgb(0,0,255);">and don<span style="color:rgb(0,0,204);">'t<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* pass&nbsp;<span style="color:rgb(0,0,255);">on the info struct<span style="color:rgb(0,0,204);">.<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(sig&nbsp;<span>&lt; SIGRTMIN<span>)<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;override_rlimit&nbsp;<span style="color:rgb(0,0,204);">=&nbsp;<span>(is_si_special<span>(info<span>)&nbsp;<span>|<span>| info<span>-<span>&gt;si_code&nbsp;<span>&gt;<span>= 0<span>)<span>;<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">else<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;override_rlimit&nbsp;<span style="color:rgb(0,0,204);">= 0<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;q&nbsp;<span style="color:rgb(0,0,204);">= __sigqueue_alloc<span>(sig<span>, t<span>, GFP_ATOMIC&nbsp;<span>| __GFP_NOTRACK_FALSE_POSITIVE<span>,<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;override_rlimit<span style="color:rgb(0,0,204);">)<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(q<span>)&nbsp;<span>{<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;list_add_tail<span style="color:rgb(0,0,204);">(<span>&amp;q<span>-<span>&gt;list<span>,&nbsp;<span>&amp;pending<span>-<span>&gt;list<span>)<span>;<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;switch&nbsp;<span style="color:rgb(0,0,204);">(<span>(unsigned long<span>) info<span>)&nbsp;<span>{<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">case&nbsp;<span style="color:rgb(0,0,204);">(unsigned long<span>) SEND_SIG_NOINFO<span>:<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_signo&nbsp;<span>= sig<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_errno&nbsp;<span>= 0<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_code&nbsp;<span>= SI_USER<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_pid&nbsp;<span>= task_tgid_nr_ns<span>(current<span>,<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;task_active_pid_ns<span style="color:rgb(0,0,204);">(t<span>)<span>)<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_uid&nbsp;<span>= from_kuid_munged<span>(current_user_ns<span>(<span>)<span>, current_uid<span>(<span>)<span>)<span>;<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">case&nbsp;<span style="color:rgb(0,0,204);">(unsigned long<span>) SEND_SIG_PRIV<span>:<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_signo&nbsp;<span>= sig<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_errno&nbsp;<span>= 0<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_code&nbsp;<span>= SI_KERNEL<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_pid&nbsp;<span>= 0<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_uid&nbsp;<span>= 0<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;default<span style="color:rgb(0,0,204);">:<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;copy_siginfo<span style="color:rgb(0,0,204);">(<span>&amp;q<span>-<span>&gt;info<span>, info<span>)<span>;<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(from_ancestor_ns<span>)<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:rgb(0,0,204);">-<span>&gt;info<span>.si_pid&nbsp;<span>= 0<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;userns_fixup_signal_uid<span style="color:rgb(0,0,204);">(<span>&amp;q<span>-<span>&gt;info<span>, t<span>)<span>;<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}&nbsp;<span style="color:rgb(0,0,255);">else&nbsp;<span>if&nbsp;<span style="color:rgb(0,0,204);">(<span>!is_si_special<span>(info<span>)<span>)&nbsp;<span>{<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(sig&nbsp;<span>&gt;<span>= SIGRTMIN&nbsp;<span>&amp;<span>&amp; info<span>-<span>&gt;si_code&nbsp;<span>!<span>= SI_USER<span>)&nbsp;<span>{<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>*<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* Queue overflow<span>, abort<span>. We may abort&nbsp;<span style="color:rgb(0,0,255);">if the<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* signal was rt&nbsp;<span style="color:rgb(0,0,255);">and sent by user using something<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* other than kill<span>(<span>)<span>.<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;result&nbsp;<span style="color:rgb(0,0,204);">= TRACE_SIGNAL_OVERFLOW_FAIL<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ret&nbsp;<span style="color:rgb(0,0,204);">=&nbsp;<span>-EAGAIN<span>;<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto ret<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}&nbsp;<span style="color:rgb(0,0,255);">else&nbsp;<span style="color:rgb(0,0,204);">{<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>*<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* This&nbsp;<span style="color:rgb(0,0,255);">is a silent loss of information<span style="color:rgb(0,0,204);">. We still<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* send the signal<span>, but the&nbsp;<span>*info bits are lost<span>.<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;result&nbsp;<span style="color:rgb(0,0,204);">= TRACE_SIGNAL_LOSE_INFO<span>;<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">out_set<span style="color:rgb(0,0,204);">:<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;signalfd_notify<span style="color:rgb(0,0,204);">(t<span>, sig<span>)<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span>sigaddset<span style="color:rgb(0,0,204);">(<span>&amp;<span>pending<span>-<span>&gt;<span>signal<span>,<span>&nbsp;sig<span>)<span><span>;//修改位图，表明该信号存在挂起信号。<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;complete_signal<span style="color:rgb(0,0,204);">(sig<span>, t<span>, group<span>)<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">ret<span style="color:rgb(0,0,204);">:<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;trace_signal_generate<span style="color:rgb(0,0,204);">(sig<span>, info<span>, t<span>, group<span>, result<span>)<span>;<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return ret<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">}</span></li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 线程存在一个很让人迷惑的问题，如何让线程组的所有线程一起退出。我们都知道，多线程的程序有一个线程访问了非法地址，引发段错误，会造成所有线程一起退出。这也是多线程程序脆弱的地方。但是如何做到的呢？<br><span style="line-height:2;">&nbsp; &nbsp; do_signal---&gt;get_signal_to_deliver中，会选择信号，如果发现需要退出，会执行do_group_exit。这个名字顾名思义了，线程组退出。&nbsp; &nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);">void<br></span></li> 
+     <li style="list-style:decimal;">do_group_exit<span style="color:rgb(0,0,204);">(<span style="color:rgb(255,0,0);">int exit_code<span style="color:rgb(0,0,204);">)<br></span></span></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">{<br></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct signal_struct&nbsp;<span style="color:rgb(0,0,204);">*sig&nbsp;<span>= current<span>-<span>&gt;signal<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;BUG_ON<span style="color:rgb(0,0,204);">(exit_code&nbsp;<span>&amp; 0x80<span>)<span>;&nbsp;<span>/<span>* core dumps don<span>'t&nbsp;<span style="color:rgb(0,0,255);">get here&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(signal_group_exit<span>(sig<span>)<span>)<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;exit_code&nbsp;<span style="color:rgb(0,0,204);">= sig<span>-<span>&gt;group_exit_code<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">else&nbsp;<span>if&nbsp;<span style="color:rgb(0,0,204);">(<span>!thread_group_empty<span>(current<span>)<span>)&nbsp;<span>{<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;struct sighand_struct&nbsp;<span style="color:rgb(0,0,204);">*<span style="color:rgb(0,0,255);">const sighand&nbsp;<span style="color:rgb(0,0,204);">= current<span>-<span>&gt;sighand<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;spin_lock_irq<span style="color:rgb(0,0,204);">(<span>&amp;sighand<span>-<span>&gt;siglock<span>)<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(signal_group_exit<span>(sig<span>)<span>)<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>* Another thread got here before we took the lock<span>.&nbsp;<span>*<span>/<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;exit_code&nbsp;<span style="color:rgb(0,0,204);">= sig<span>-<span>&gt;group_exit_code<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">else&nbsp;<span style="color:rgb(0,0,204);">{<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sig<span style="color:rgb(0,0,204);">-<span>&gt;group_exit_code&nbsp;<span>= exit_code<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sig<span style="color:rgb(0,0,204);">-<span>&gt;flags&nbsp;<span>= SIGNAL_GROUP_EXIT<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<strong>zap_other_threads</strong><span style="color:rgb(0,0,204);">(current<span>)<span>;<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;spin_unlock_irq<span style="color:rgb(0,0,204);">(<span>&amp;sighand<span>-<span>&gt;siglock<span>)<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;do_exit<span style="color:rgb(0,0,204);">(exit_code<span>)<span>;<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>* NOTREACHED&nbsp;<span>*<span>/<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">}</span></li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 如果是多线程，会走入到else中，主要的操作都在zap_other_threads函数中：<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);"><span style="color:rgb(0,0,204);">/<span>*<br></span></span></span></li> 
+     <li style="list-style:decimal;">&nbsp;<span style="color:rgb(0,0,204);">* Nuke all other threads&nbsp;<span style="color:rgb(0,0,255);">in the group<span style="color:rgb(0,0,204);">.<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(255,0,0);">int zap_other_threads<span style="color:rgb(0,0,204);">(struct task_struct&nbsp;<span>*p<span>)<br></span></span></span></span></li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">{<br></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct task_struct&nbsp;<span style="color:rgb(0,0,204);">*t&nbsp;<span>= p<span>;<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(255,0,0);">int count&nbsp;<span style="color:rgb(0,0,204);">= 0<span>;<br></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;p<span style="color:rgb(0,0,204);">-<span>&gt;signal<span>-<span>&gt;group_stop_count&nbsp;<span>= 0<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;while_each_thread<span style="color:rgb(0,0,204);">(p<span>, t<span>)&nbsp;<span>{<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;task_clear_jobctl_pending<span style="color:rgb(0,0,204);">(t<span>, JOBCTL_PENDING_MASK<span>)<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;count<span style="color:rgb(0,0,204);">+<span>+<span>;<br></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>* Don<span>'t bother with already dead threads&nbsp;<span>*<span>/<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(t<span>-<span>&gt;exit_state<span>)<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;continue<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sigaddset<span style="color:rgb(0,0,204);">(<span>&amp;t<span>-<span>&gt;pending<span>.signal<span>, SIGKILL<span>)<span>;<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;signal_wake_up<span style="color:rgb(0,0,204);">(t<span>, 1<span>)<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return count<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">}</span></li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 不多说了，就是给每一个线程都挂上一个SIGKILL的信号，当CPU选择线程执行时候的时候，自然会处理这个信号，而对SIGKILL的处理，会再次调用do_group_exit。这一次会调用do_exit退出。当线程组所有进程都执行过之后，整个线程组就消亡了。<br><span style="line-height:2;">&nbsp;&nbsp;&nbsp;&nbsp;<br><span style="line-height:2;">&nbsp; &nbsp; 讲完这些，需要讲block了。我第一篇就讲到，我们有时候需要阻塞某些信号。POSIX说了多线程中每个线程要有自己的阻塞信号。不必说，task_struct中的blocked就是阻塞信号位图。我们的glibc的sigprocmask函数，就是设置进程的blocked。<br><span style="line-height:2;">&nbsp; &nbsp; 那些block的信号为何不能传递，内核是怎么做到的？<br><span style="line-height:2;">&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; &nbsp;<img src="http://blog.chinaunix.net/attachment/201401/5/24774106_1388927021Uz0g.png" alt="" width="700" height="143" style="border:none;"><br><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);"><span style="color:rgb(255,0,0);">int next_signal<span style="color:rgb(0,0,204);">(struct sigpending&nbsp;<span>*pending<span>, sigset_t&nbsp;<span>*mask<span>)<br></span></span></span></span></span></span></span></li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">{<br></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;unsigned long i<span style="color:rgb(0,0,204);">,&nbsp;<span>*s<span>,&nbsp;<span>*m<span>, x<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(255,0,0);">int sig&nbsp;<span style="color:rgb(0,0,204);">= 0<span>;<br></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;s&nbsp;<span style="color:rgb(0,0,204);">= pending<span>-<span>&gt;signal<span>.sig<span>;<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;m&nbsp;<span style="color:rgb(0,0,204);">= mask<span>-<span>&gt;sig<span>;<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>*<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* Handle the first word specially<span>: it contains the<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* synchronous signals that need&nbsp;<span style="color:rgb(0,0,255);">to be dequeued first<span style="color:rgb(0,0,204);">.<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;x&nbsp;<span style="color:rgb(0,0,204);">=&nbsp;<span>*s&nbsp;<span>&amp;<span>~&nbsp;<span>*m<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(x<span>)&nbsp;<span>{<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(x&nbsp;<span>&amp; SYNCHRONOUS_MASK<span>)<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;x&nbsp;<span style="color:rgb(0,0,204);">&amp;<span>= SYNCHRONOUS_MASK<span>;<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sig&nbsp;<span style="color:rgb(0,0,204);">= ffz<span>(<span>~x<span>)&nbsp;<span>+ 1<span>;<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return sig<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;switch&nbsp;<span style="color:rgb(0,0,204);">(_NSIG_WORDS<span>)&nbsp;<span>{<br></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;default<span style="color:rgb(0,0,204);">:<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">for&nbsp;<span style="color:rgb(0,0,204);">(i&nbsp;<span>= 1<span>; i&nbsp;<span>&lt; _NSIG_WORDS<span>;&nbsp;<span>+<span>+i<span>)&nbsp;<span>{<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;x&nbsp;<span style="color:rgb(0,0,204);">=&nbsp;<span>*<span>+<span>+s&nbsp;<span>&amp;<span>~&nbsp;<span>*<span>+<span>+m<span>;<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(<span>!x<span>)<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;continue<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sig&nbsp;<span style="color:rgb(0,0,204);">= ffz<span>(<span>~x<span>)&nbsp;<span>+ i<span>*_NSIG_BPW&nbsp;<span>+ 1<span>;<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">case 2<span style="color:rgb(0,0,204);">:<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;x&nbsp;<span style="color:rgb(0,0,204);">= s<span>[1<span>]&nbsp;<span>&amp;<span>~ m<span>[1<span>]<span>;<br></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(<span>!x<span>)<br></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sig&nbsp;<span style="color:rgb(0,0,204);">= ffz<span>(<span>~x<span>)&nbsp;<span>+ _NSIG_BPW&nbsp;<span>+ 1<span>;<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">case 1<span style="color:rgb(0,0,204);">:<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>*&nbsp;<span style="color:rgb(0,0,255);">Nothing&nbsp;<span>to&nbsp;<span>do&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">}<br></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return sig<span style="color:rgb(0,0,204);">;<br></span> </li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">}</span></li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; m就是task_struct中的blocked，阻塞的信号就不会不会被取出传递了。很有意思的一点是信号传递的顺序。在Linux programming interface一书中提到小signo优先的策略，比如SIGINT（2）和SIGQUIT（3）同时存在，SIGINT（2）&nbsp;先deliver，然后才是SIGQUIT（3）.我们看代码，很有意思的是有同步信号：<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;line-height:2;"> 
+    <ol>
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);">#define SYNCHRONOUS_MASK&nbsp;<span style="color:rgb(0,0,204);">\<br></span></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">(sigmask<span>(SIGSEGV<span>)&nbsp;<span>| sigmask<span>(SIGBUS<span>)&nbsp;<span>| sigmask<span>(SIGILL<span>)&nbsp;<span>|&nbsp;<span>\<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp; sigmask<span style="color:rgb(0,0,204);">(SIGTRAP<span>)&nbsp;<span>| sigmask<span>(SIGFPE<span>)&nbsp;<span>| sigmask<span>(SIGSYS<span>)<span>)</span></span></span></span></span></span></span></span></span> </li> 
+    </ol>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;">&nbsp; &nbsp; 有SIGSEGV SIGBUS SIGILL SIGTRAP SIGFPE SIGSYS，那么这几个信号优先。没有这几个信号，按照小信号优先。当然了，这些是Linux kernel的实现，毕竟不是POSIX标准，不可依赖这种顺序。<br><span style="line-height:2;">&nbsp; &nbsp;另外，dequeue很有意思，先去task_struct中的pending中取，取不到再去整个线程组共享的shered_pending位图去取。<span style="line-height:2;">&nbsp;&nbsp; &nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"> 
+    <ol style="line-height:2;">
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,0);"><span style="color:rgb(255,0,0);">int dequeue_signal<span style="color:rgb(0,0,204);">(struct task_struct&nbsp;<span>*tsk<span>, sigset_t&nbsp;<span>*mask<span>, siginfo_t&nbsp;<span>*info<span>)<br></span></span></span></span></span></span></span></span></span></li> 
+     <li style="list-style:decimal;"><span style="color:rgb(0,0,204);">{<br></span></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(255,0,0);">int signr<span style="color:rgb(0,0,204);">;<br></span></span> </li> 
+     <li style="list-style:decimal;"><br></li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">/<span>* We only dequeue&nbsp;<span style="color:rgb(0,0,255);">private signals from ourselves<span style="color:rgb(0,0,204);">, we don<span>'t&nbsp;<span style="color:rgb(0,0,255);">let<br></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">* signalfd steal them<br></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,204);">*<span>/<br></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;signr&nbsp;<span style="color:rgb(0,0,204);">= __dequeue_signal<span>(<span>&amp;tsk<span>-<span>&gt;<span>pending<span>, mask<span>, info<span>)<span>;<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:rgb(0,0,255);">if&nbsp;<span style="color:rgb(0,0,204);">(<span>!signr<span>)&nbsp;<span>{<br></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;signr&nbsp;<span style="color:rgb(0,0,204);">= __dequeue_signal<span>(<span>&amp;tsk<span>-<span>&gt;signal<span>-<span>&gt;<span>shared_pending<span>,<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mask<span style="color:rgb(0,0,204);">, info<span>)<span>;</span></span></span> </li> 
+    </ol>
+    <div>
+     <span style="color:rgb(0,0,204);"><span style="line-height:12px;">&nbsp; &nbsp; &nbsp; &nbsp;。。。。<br> }</span></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><br> 参考文献:<br> 1<span>&nbsp;<span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><a href="http://www.longene.org/forum/viewtopic.php?f=5&amp;t=94&amp;sid=22968b336b6436dccb540a6a0077dc84" rel="nofollow" style="color:rgb(16,82,137);font-weight:inherit;line-height:normal;text-decoration:none;font-size:2em;"><span style="font-size:14px;">L<span>inux2.6内核中的线程组初探<br></span></span></a><span>2 Linux kernel 3.8.0</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><span><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><span><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><span><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><span><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><span><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><span><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><span><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;line-height:normal;color:rgb(16,82,137);"><span><br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p><font color="#105289"><span style="font-size:14px;"><br></span></font></p> 
+   <p><span><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span><span style="line-height:normal;"><font color="#105289"><span style="font-size:14px;"></span></font></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p><font color="#105289"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/6844580.html</span></font><span style="font-size:14px;color:rgb(16,82,137);font-family:'Trebuchet MS', Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

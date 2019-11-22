@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>SQL Server-聚焦查询计划Stream Aggregate VS Hash Match Aggregate（二十） « NotBeCN</title>
+  <meta name="description" content="             前言    之前系列中在查询计划中一直出现Stream Aggregate，当时也只是做了基本了解，对于查询计划中出现的操作，我们都需要去详细研究下，只有这样才能对查询计划执行的每一步操作都了如指掌，所以才有了本文的出现，简短的内容，深入的理解，Always to review the ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/21/weixin_34008933_90121784.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">SQL Server-聚焦查询计划Stream Aggregate VS Hash Match Aggregate（二十）</h1>
+    <p class="post-meta">Nov 21, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:'Helvetica Neue', Arial;">前言</h1> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">之前系列中在查询计划中一直出现Stream Aggregate，当时也只是做了基本了解，对于查询计划中出现的操作，我们都需要去详细研究下，只有这样才能对查询计划执行的每一步操作都了如指掌，所以才有了本文的出现，简短的内容，深入的理解，Always to review the basics。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">Stream Aggregate</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">Stream Aggregate通过单列或者多列来对行进行分组并且对指定的查询来计算聚合表达式。最常见的聚合类型如SUM、COUNT、SUM、AVG、MIN、MAX，当我们执行这些聚合函数时在查询计划中就会出现Stream Aggregate，Stream Aggregate是非常快的，因为它需要在输入时通过在GROUP BY中指定的列进行排序。如果聚合中的数据没有进行排序此时会通过Sort进行预排序或者使用索引查找或者索引扫描来提前预排序数据。之前我们讨论过出现Stream Aggregate有三种方式分别为：聚合函数聚合，分组聚合，DISTINCT聚合，实际上只有两种，DISTINCT内部就用到了分组，这里我们将Stream Aggregate分为两种类型，一种是标量聚合，另外一种则是分组聚合。我们举一个标量聚合的例子，也就是返回单值聚合。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">标值聚合</h2> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT COUNT(</span>*<span style="line-height:1.5;">)
+FROM Sales.Orders</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161213193316354-66895111.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">下面我们再来分组聚合的例子</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT custid
+FROM Sales.Orders
+GROUP BY custid</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161213193414073-1570386138.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述就是Stream Aggregate两种类型的例子，关于标量聚合比较简单直接利用聚合函数就行，下面我们主要详细讲解这两种类型中的分组聚合。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">分组聚合</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们来结合SQL Server 2012基础教程来看一个简单的例子</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT custid, COUNT(shipcity) AS [shipcity_count]
+FROM Sales.Orders
+GROUP BY custid</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214192354542-1372616451.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述查询计划比较简单我们来解释下，首先通过默认主键创建的聚集索引来读取表中行数据，接着通过GROUP BY上指定的列custid来进行排序，我们看到其排序操作具体信息就知道，如下。接着遍历所有custid，所有行被读取，开始一行行读取并计算其聚合表达式的值。重复处理直到完成为止。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214193115058-1717756755.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">对于通过流聚合对custid进行分组的示意图大概如下：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214194247964-459859177.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述由于未对custid创建索引导致所以会通过Sort来进行排序，毫无疑问导致查询缓慢，这里我们对custid创建非聚集索引再来看看情况</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>CREATE NONCLUSTERED INDEX idx_nc_custid ON Sales.Orders(custid)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">&nbsp;<img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214195459683-1503737956.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时查询将会充分利用索引，它会通过使用索引排序来进行聚合计算，所以就不会再利用Sort来排序导致性能低下，通过上述我们知道，在进行Stream Aggregate之前事实上在指定的分组列上创建索引来预先排序会提高查询性能，而不需要再去利用Sort进行排序而耗费不必要的时间。上述我们已经说过在进行排序要么在GROUP BY上指定的列通过创建索引查找或者索引排序，如果GROUP BY中的列没有创建索引此时利用Sort来进行显示排序，如下显示指定ORDER BY custid来排序和没有指定的话结果依然都是使用Sort来排序，此时Stream Aggregate，其实这种说法不太准确，因为在SQL Server中有两种聚合方式，一种是Stream Aggregate，另外一种则是Hash Match Aggregate。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT custid, COUNT(shipcity) AS [shipcity_count]
+FROM Sales.Orders
+GROUP BY custid
+ORDER BY custid</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">自从SQL Server 7之后就出现了Stream Aggregate和Hash Aggregate两种聚合方式，也就是说上述我们稍作修改查询计划就变成了Hash Aggregate的形式。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+<span style="color:rgb(255,0,0);line-height:1.5;">DBCC RULEOFF(</span></span><span style="color:rgb(255,0,0);line-height:1.5;">'GbAggToStrm'</span><span style="line-height:1.5;"><span style="color:rgb(255,0,0);line-height:1.5;">);</span>
+GO
+
+SELECT custid, COUNT(shipcity) AS [shipcity_count]
+FROM Sales.Orders
+GROUP BY custid
+OPTION(RECOMPILE)
+GO
+<span style="color:rgb(255,0,0);line-height:1.5;"> DBCC RULEON(</span></span><span style="color:rgb(255,0,0);line-height:1.5;">'GbAggToStrm');</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述GbAggToStrm是什么鬼，其实如果查询计划中走的Stream Aggregate操作的话，也就说它走的是GbAggToStrm规则（GROUP BY Aggregate To Stream ），但是这里我们关闭了查询计划本该走的Stream Aggregate操作即GbAggToStrm规则，所以此时它将只能走Hash Aggregate。所以到这里说明在排序时即使指定了ORDER BY操作有可能是多余的，但是如果我们不指定的话，要是我们希望返回的结果集是排序的，此时要是走的Hash Aggregate，结果返回的结果集将是无序的，导致我们得不到想要的结果集，所以还是希望在排序时指定ORDER BY操作，这样能够避免不必要的情况发生。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">DISTINCT在Hash Match Aggregate和Stream Aggregate和DISTINCT Sort中的使用</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">当查询中用到了DISTINCT关键字时，此时查询计划有可能走Stream Aggregate，也有可能走的是Hash Match Aggregate。所以在这里我们分析下什么时候会用Hash Match Aggregate，什么时候又会用到Stream Aggregate。说到底DISTINCT关键字时用来去重的，在SQL Server中利用DISTINCT关键字来去重其查询计划走的方式分为两种，一种是在哈希表中建立唯一值，另外一种则是将行进行排序分配到组中然后只返回组中的一个值即可。所以在SQL Server中使用Hash Match Aggregate来实现哈希表，使用Stream Aggregate或者DISTINCT Sort来对数据进行排序去重。</p> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">使用DISTINCT关键字走DISTINCT Sort</h3> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">当我们如下直接利用DISTINCT来查询时就是利用的DISTINCT Sort来排序去重。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">select</span><span style="line-height:1.5;"> DISTINCT custid 
+FROM Sales.Orders</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214210818745-1260882992.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">虽然很明确走的Sort，但是这是经过SQL查询引擎优化过后才有的，最原始的情况是先进行Sort接着进行Stream Aggregate，下面我们关闭Sort的规则看看。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+DBCC RULEOFF(</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">GbAggToSort</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">)
+SELECT DISTINCT custid
+FROM Sales.Orders
+OPTION(RECOMPILE)<br>
+DBCC RULEON(</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">GbAggToSort</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>)</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214233041245-1144551078.png" alt="" style="border:0px;"></p> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">使用DISTINCT关键字走Hash Match Aggregate</h3> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">当未在列SomeColumn创建索引时我们进行如下查询</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT DISTINCT SomeColumn
+FROM dbo.BigTable</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214220126886-789322511.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">接下来我们在列上创建索引</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>CREATE NONCLUSTERED INDEX idx_noncls_somecolumn ON dbo.BigTable(SomeColumn)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214220504339-494180598.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">在创建索引时此时查询计划走的却是Stream Aggregate，也就是说当利用DISTINCT关键字查询时且列已经进行了排序，此时查询计划走Stream Aggregate。那什么时候用Hash Match Aggregate呢，上述对列未创建索引时走的是Hash Match Aggregate因为数据量比较大此时还利用了并行计算，换句话说当对列未创建索引时且数据量非常大同时分组比较少时，查询计划更加更倾向于走Hash Match Aggregate，输入大量的数据通过Hash Match Aggregate结合并行计算效率也非常高，当然分组较少更好，此时不会太占用哈希表。接下来我们限制查询结果集的条数。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT DISTINCT TOP </span><span style="color:rgb(128,0,128);line-height:1.5;">10</span><span style="line-height:1.5;"> SomeColumn
+FROM dbo.BigTable</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201612/589642-20161214223602573-1958198756.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时查询计划不再是Hash Match Aggregate代替的是Hash Match(Flow Distinct)我们看下msdn关于Flow Distinct的解释：<span style="color:rgb(128,128,0);">Flow Distinct逻辑运算符用于通过扫描输入来删除重复项。虽然<span class="input">Distinct&nbsp;运算符在生成任何输入前消耗所有的输入，但<span class="input">Flow<span class="input">Distinct&nbsp;运算符在从输入获得行时返回每行（除非该行是一个重复项，若是这样则删除该行）</span></span></span></span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">也就是说DISTINCT直接就过滤了重复行，而Flow Distict则获得每行时并返回每一行，这就是Flow Distinct，它的出现依赖于在查询计划中估计唯一值的数量，当我们将TOP的数量设置为接近100万或者比100万还少一点时此时走的是Hash Match Aggregate。到此我们关于Hash Match Aggregate和Stream Aggregate的分析算是结束了，我们下个基本结论：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(128,128,0);">Hash Match Aggregate和Stream Aggregate分析结论：</span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(128,128,0);">（1）查询中有DISTINCT关键字时：当在查询列上创建索引时即列进行了排序时此时走Stream Aggregate，当数据量非常大时且未创建索引时此时一般走的是Hash Match Aggregate并结合并行计算，其余情况则是走的Distinct Sort。</span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(128,128,0);">（2）查询中没有DISTINCT关键字时，对于标量聚合和分组聚合走的是Stream Aggregate。</span></p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">总结</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">好了本节关于Hash Match Aggregate和Stream Aggregate的介绍就到此为止，基本算是了解，太复杂的也没去过多探讨，这是DBA的事情了，下一节我们穿插讲讲关于计算列持久化系列文章，简短的内容，深入的理解，我们下节再会。&nbsp;</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p><font color="#111111"><span style="font-size:13px;line-height:23.4px;">本文转自Jeffcky博客园博客，原文链接：http://www.cnblogs.com/CreateMyself/p/6170565.html，如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

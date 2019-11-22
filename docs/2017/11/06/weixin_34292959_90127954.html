@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux环境内存分配原理 mallocinfo【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/dongzhiquan/p/5621906.html    Linux的虚拟内存管理有几个关键概念：    Linux 虚拟地址空间如何分布？malloc和free是如何分配和释放内存？如何查看堆内内存的碎片情况？既然堆内内存brk和s...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/06/weixin_34292959_90127954.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux环境内存分配原理 mallocinfo【转】</h1>
+    <p class="post-meta">Nov 6, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://www.cnblogs.com/dongzhiquan/p/5621906.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.cnblogs.com/dongzhiquan/p/5621906.html</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>Linux</strong><strong>的虚拟内存管理有几个关键概念</strong>：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">Linux 虚拟地址空间如何分布？malloc和free是如何分配和释放内存？如何查看堆内内存的碎片情况？既然堆内内存brk和sbrk不能直接释放，为什么不全部使用 mmap 来分配，munmap直接释放呢 ？</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>Linux&nbsp;</strong><strong>的虚拟内存管理有几个关键概念：</strong><strong>&nbsp;<br> 1</strong><strong>、每个进程都有独立的虚拟地址空间，进程访问的虚拟地址并不是真正的物理地址；&nbsp;<br> 2、虚拟地址可通过每个进程上的页表(在每个进程的内核虚拟地址空间)与物理地址进行映射，获得真正物理地址；&nbsp;<br> 3、如果虚拟地址对应物理地址不在物理内存中，则产生缺页中断，真正分配物理地址，同时更新进程的页表；如果此时物理内存已耗尽，则根据内存替换算法淘汰部分页面至物理磁盘中。&nbsp;<br></strong><br><strong>一、Linux 虚拟地址空间如何分布？</strong>&nbsp;<br> Linux 使用虚拟地址空间，大大增加了进程的寻址空间，<strong>由低地址到高地址分别为</strong>：&nbsp;<br><strong>1</strong><strong>、只读段：</strong>该部分空间只能读，不可写；(包括：代码段、rodata 段(C常量字符串和#define定义的常量) )&nbsp;<br><strong>2</strong><strong>、数据段：</strong>保存全局变量、静态变量的空间；&nbsp;<br><strong>3</strong><strong>、堆 ：</strong>就是平时所说的动态内存， malloc/new 大部分都来源于此。其中堆顶的位置可通过函数 brk 和 sbrk 进行动态调整。&nbsp;<br><strong>4</strong><strong>、文件映射区域：</strong>如动态库、共享内存等映射物理空间的内存，一般是 mmap 函数所分配的虚拟地址空间。&nbsp;<br><strong>5</strong><strong>、栈：</strong>用于维护函数调用的上下文空间，一般为 8M ，可通过 ulimit –s 查看。&nbsp;<br><strong>6</strong><strong>、内核虚拟空间：</strong>用户代码不可见的内存区域，由内核管理(页表就存放在内核虚拟空间)。&nbsp;<br><strong>下图是 32 位系统典型的虚拟地址空间分布(来自《深入理解计算机系统》)。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="http://images2015.cnblogs.com/blog/172955/201606/172955-20160627232424359-1624605522.jpg" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img title="clip_image001" src="https://images2015.cnblogs.com/blog/172955/201606/172955-20160627232425218-1059564818.jpg" alt="clip_image001" width="519" height="595" style="border:none;"></a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>32&nbsp;</strong><strong>位系统有4G 的地址空间::</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">其中 0x08048000~0xbfffffff 是用户空间，0xc0000000~0xffffffff 是内核空间，包括内核代码和数据、与进程相关的数据结构（如页表、内核栈）等。另外，<strong>%esp 执行栈顶，往低地址方向变化；brk/sbrk 函数控制堆顶_edata往高地址方向变化</strong>。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>64</strong><strong>位系统结果怎样呢？ 64 位系统是否拥有 2^64 的地址空间吗？</strong>&nbsp;<br> 事实上， 64 位系统的虚拟地址空间划分发生了改变：&nbsp;<br><strong>1</strong><strong>、地址空间大小不是2^32，也不是2^64，而一般是2^48。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">因为并不需要 2^64 这么大的寻址空间，过大空间只会导致资源的浪费。64位Linux一般使用48位来表示虚拟地址空间，40位表示物理地址，&nbsp;<br> 这可通过#cat&nbsp; /proc/cpuinfo 来查看：&nbsp;<br><a href="http://images2015.cnblogs.com/blog/172955/201606/172955-20160627232425999-562622797.jpg" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img title="clip_image002" src="https://images2015.cnblogs.com/blog/172955/201606/172955-20160627232426921-1046216091.jpg" alt="clip_image002" width="739" height="347" style="border:none;"></a>&nbsp;<br> 2、其中，0x0000000000000000~0x00007fffffffffff 表示用户空间， 0xFFFF800000000000~ 0xFFFFFFFFFFFFFFFF 表示内核空间，共提供 256TB(2^48) 的寻址空间。&nbsp;<br> 这两个区间的特点是，第 47 位与 48~63 位相同，若这些位为 0 表示用户空间，否则表示内核空间。&nbsp;<br> 3、用户空间由低地址到高地址仍然是<strong>只读段、数据段、堆、文件映射区域和栈</strong>；</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>二、malloc和free是如何分配和释放内存？</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>如何查看进程发生缺页中断的次数</strong>？</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">用# ps -o majflt,minflt -C program 命令查看</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="http://images2015.cnblogs.com/blog/172955/201606/172955-20160627232427640-2118163655.jpg" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img title="clip_image003" src="https://images2015.cnblogs.com/blog/172955/201606/172955-20160627232428343-611846558.jpg" alt="clip_image003" width="427" height="123" style="border:none;"></a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>majflt</strong><strong>代表major fault，中文名叫大错误，minflt代表minor fault，中文名叫小错误</strong>。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>这两个数值表示一个进程自启动以来所发生的缺页中断的次数。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">可以用命令ps -o majflt minflt -C program来查看进程的majflt, minflt的值，这两个值都是累加值，从进程启动开始累加。在对高性能要求的程序做压力测试的时候，我们可以多关注一下这两个值。&nbsp;<br> 如果一个进程使用了mmap将很大的数据文件映射到进程的虚拟地址空间，我们需要重点关注majflt的值，因为相比minflt，majflt对于性能的损害是致命的，随机读一次磁盘的耗时数量级在几个毫秒，而minflt只有在大量的时候才会对性能产生影响。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>发成缺页中断后，执行了那些操作？</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>当一个进程发生缺页中断的时候，进程会陷入内核态，执行以下操作</strong>：&nbsp;<br><strong>1</strong><strong>、检查要访问的虚拟地址是否合法&nbsp;<br> 2、查找/分配一个物理页&nbsp;<br> 3、填充物理页内容（读取磁盘，或者直接置0，或者啥也不干）&nbsp;<br> 4、建立映射关系（虚拟地址到物理地址）&nbsp;<br></strong>重新执行发生缺页中断的那条指令&nbsp;<br><strong>如果第3步，需要读取磁盘，那么这次缺页中断就是majflt，否则就是minflt。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>内存分配的原理</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">从操作系统角度来看，进程分配内存有两种方式，分别由两个系统调用完成：<strong>brk和mmap（不考虑共享内存）。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>1</strong><strong>、brk是将数据段(.data)的最高地址指针_edata往高地址推；</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>2</strong><strong>、mmap是在进程的虚拟地址空间中（堆和栈中间，称为文件映射区域的地方）找一块空闲的虚拟内存</strong>。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>这两种方式分配的都是虚拟内存，没有分配物理内存</strong>。<strong>在第一次访问已分配的虚拟地址空间的时候，发生缺页中断，操作系统负责分配物理内存，然后建立虚拟内存和物理内存之间的映射关系。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><br></strong>在标准C库中，提供了malloc/free函数分配释放内存，这两个函数底层是由brk，mmap，munmap这些系统调用实现的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>下面以一个例子来说明内存分配的原理：</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>情况一、</strong><strong>malloc</strong><strong>小于128k的内存，使用brk分配内存，将_edata往高地址推(只分配虚拟空间，不对应物理内存(因此没有初始化)，第一次读/写数据时，引起内核缺页中断，内核才分配对应的物理内存，然后虚拟地址空间建立映射关系)，如下图：</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="http://images2015.cnblogs.com/blog/172955/201606/172955-20160627232256124-917101929.jpg" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img title="clip_image004" src="https://images2015.cnblogs.com/blog/172955/201606/172955-20160627232257093-667975331.jpg" alt="clip_image004" width="669" height="527" style="border:none;"></a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>1</strong><strong>、</strong>进程启动的时候，其（虚拟）内存空间的初始布局如图1所示。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">其中，<strong>mmap内存映射文件是在堆和栈的中间</strong>（例如libc-2.2.93.so，其它数据文件等），为了简单起见，省略了内存映射文件。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>_edata</strong><strong>指针（glibc里面定义）指向数据段的最高地址。</strong><strong>&nbsp;<br> 2</strong><strong>、</strong>进程调用A=malloc(30K)以后，内存空间如图2：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; malloc函数会调用brk系统调用，将_edata指针往高地址推30K，就完成虚拟内存分配。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>你可能会问：</strong>只要把_edata+30K就完成内存分配了？</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">事实是这样的，_edata+30K只是完成虚拟地址的分配，A这块内存现在还是没有物理页与之对应的，等到进程第一次读写A这块内存的时候，发生缺页中断，这个时候，内核才分配A这块内存对应的物理页。<strong>也就是说，如果用malloc分配了A这块内容，然后从来不访问它，那么，A对应的物理页是不会被分配的。&nbsp;<br> 3、</strong>进程调用B=malloc(40K)以后，内存空间如图3。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>情况二、</strong><strong>malloc</strong><strong>大于128k的内存，使用mmap分配内存，在堆和栈之间找一块空闲内存分配(对应独立内存，而且初始化为0)，如下图：</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="http://images2015.cnblogs.com/blog/172955/201606/172955-20160627232257702-959855196.jpg" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img title="clip_image005" src="https://images2015.cnblogs.com/blog/172955/201606/172955-20160627232258374-1309360972.jpg" alt="clip_image005" width="664" height="527" style="border:none;"></a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>4</strong><strong>、</strong>进程调用C=malloc(200K)以后，内存空间如图4：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">默认情况下，<strong>malloc函数分配内存，如果请求内存大于128K（可由M_MMAP_THRESHOLD选项调节），那就不是去推_edata指针了，而是利用mmap系统调用，从堆和栈的中间分配一块虚拟内存。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>这样子做主要是因为::</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>brk</strong><strong>分配的内存需要等到高地址内存释放以后才能释放（例如，在B释放之前，A是不可能释放的，这就是内存碎片产生的原因，什么时候</strong><strong>紧缩</strong><strong>看下面），而mmap分配的内存可以单独释放。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">当然，还有其它的好处，也有坏处，再具体下去，有兴趣的同学可以去看glibc里面malloc的代码了。&nbsp;<br><strong>5</strong><strong>、</strong>进程调用D=malloc(100K)以后，内存空间如图5；&nbsp;<br><strong>6</strong><strong>、</strong>进程调用free(C)以后，C对应的虚拟内存和物理内存一起释放。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="http://images2015.cnblogs.com/blog/172955/201606/172955-20160627232259171-993644898.jpg" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img title="clip_image006" src="https://images2015.cnblogs.com/blog/172955/201606/172955-20160627232259874-1657539880.jpg" alt="clip_image006" width="668" height="520" style="border:none;"></a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>7</strong><strong>、</strong>进程调用free(B)以后，如图7所示：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; B</strong><strong>对应的虚拟内存和物理内存都没有释放，因为只有一个_edata指针，如果往回推，那么D这块内存怎么办呢</strong>？</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>当然，B这块内存，是可以重用的，如果这个时候再来一个40K的请求，那么malloc很可能就把B这块内存返回回去了</strong>。&nbsp;<br><strong>8</strong><strong>、</strong>进程调用free(D)以后，如图8所示：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; B</strong><strong>和D连接起来，变成一块140K的空闲内存。</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>9</strong><strong>、</strong>默认情况下：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>当最高地址空间的空闲内存超过128K（可由M_TRIM_THRESHOLD选项调节）时，执行内存紧缩操作（trim）。</strong>在上一个步骤free的时候，发现最高地址空闲内存超过128K，于是内存紧缩，变成图9所示。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>真相大白</strong>&nbsp;<br> 说完内存分配的原理，那么被测模块在内核态cpu消耗高的原因就很清楚了：每次请求来都malloc一块2M的内存，默认情况下，malloc调用 mmap分配内存，请求结束的时候，调用munmap释放内存。假设每个请求需要6个物理页，那么每个请求就会产生6个缺页中断，在2000的压力下，每 秒就产生了10000多次缺页中断，这些缺页中断不需要读取磁盘解决，所以叫做minflt；缺页中断在内核态执行，因此进程的内核态cpu消耗很大。缺 页中断分散在整个请求的处理过程中，所以表现为分配语句耗时（10us）相对于整条请求的处理时间（1000us）比重很小。&nbsp;<br><strong>解决办法</strong>&nbsp;<br> 将动态内存改为静态分配，或者启动的时候，用malloc为每个线程分配，然后保存在threaddata里面。但是，由于这个模块的特殊性，静态分配，或者启动时候分配都不可行。另外，Linux下默认栈的大小限制是10M，如果在栈上分配几M的内存，有风险。&nbsp;<br> 禁止malloc调用mmap分配内存，禁止内存紧缩。&nbsp;<br> 在进程启动时候，加入以下两行代码：&nbsp;<br> mallopt(M_MMAP_MAX, 0); // 禁止malloc调用mmap分配内存&nbsp;<br> mallopt(M_TRIM_THRESHOLD, -1); // 禁止内存紧缩&nbsp;<br> 效果：加入这两行代码以后，用ps命令观察，压力稳定以后，majlt和minflt都为0。进程的系统态cpu从20降到10。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>三、如何查看堆内内存的碎片情况 ？</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">glibc 提供了以下结构和接口来查看堆内内存和 mmap 的使用情况。&nbsp;<br> struct mallinfo {&nbsp;<br> &nbsp; int arena;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* non-mmapped space allocated from system */&nbsp;<br> &nbsp; int ordblks;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* number of free chunks */&nbsp;<br> &nbsp; int smblks;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* number of fastbin blocks */&nbsp;<br> &nbsp; int hblks;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* number of mmapped regions */&nbsp;<br> &nbsp; int hblkhd;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* space in mmapped regions */&nbsp;<br> &nbsp; int usmblks;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* maximum total allocated space */&nbsp;<br> &nbsp; int fsmblks;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* space available in freed fastbin blocks */&nbsp;<br> &nbsp; int uordblks;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* total allocated space */&nbsp;<br> &nbsp; int fordblks;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* total free space */&nbsp;<br> &nbsp; int keepcost;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* top-most, releasable (via malloc_trim) space */&nbsp;<br> };</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>/*</strong><strong>返回heap(main_arena)的内存使用情况，以 mallinfo 结构返回 */</strong>&nbsp;<br> struct mallinfo mallinfo();</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>/*&nbsp;</strong><strong>将heap和mmap的使用情况输出到stderr*/</strong>&nbsp;<br> void malloc_stats();</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>可通过以下例子来验证mallinfo和malloc_stats输出结果。</strong>&nbsp;<br> #include &lt;stdlib.h&gt;&nbsp;<br> #include &lt;stdio.h&gt;&nbsp;<br> #include &lt;string.h&gt;&nbsp;<br> #include &lt;unistd.h&gt;&nbsp;<br> #include &lt;sys/mman.h&gt;&nbsp;<br> #include &lt;malloc.h&gt;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">size_t&nbsp; heap_malloc_total, heap_free_total,mmap_total, mmap_count;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">void print_info()&nbsp;<br> {&nbsp;<br> &nbsp;&nbsp;&nbsp; struct mallinfo mi = mallinfo();&nbsp;<br> printf("count by itself:\n");&nbsp;<br> &nbsp;&nbsp;&nbsp; printf("\theap_malloc_total=%lu heap_free_total=%lu heap_in_use=%lu\n\tmmap_total=%lu mmap_count=%lu\n",&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; heap_malloc_total*1024, heap_free_total*1024, heap_malloc_total*1024-heap_free_total*1024,&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_total*1024, mmap_count);&nbsp;<br> printf("count by mallinfo:\n");&nbsp;<br> printf("\theap_malloc_total=%lu heap_free_total=%lu heap_in_use=%lu\n\tmmap_total=%lu mmap_count=%lu\n",&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mi.arena, mi.fordblks, mi.uordblks,&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mi.hblkhd, mi.hblks);&nbsp;<br> printf("from malloc_stats:\n");&nbsp;<br> malloc_stats();&nbsp;<br> }</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">#define ARRAY_SIZE 200&nbsp;<br> int main(int argc, char** argv)&nbsp;<br> {&nbsp;<br> &nbsp;&nbsp;&nbsp; char** ptr_arr[ARRAY_SIZE];&nbsp;<br> &nbsp;&nbsp;&nbsp; int i;&nbsp;&nbsp;<br> &nbsp;&nbsp;&nbsp; for( i = 0; i &lt; ARRAY_SIZE; i++)&nbsp;<br> &nbsp;&nbsp;&nbsp; {&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ptr_arr[i] = malloc(i * 1024);&nbsp;&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ( i &lt; 128)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //glibc默认128k以上使用mmap&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; heap_malloc_total += i;&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_total += i;&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_count++;&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br> &nbsp;&nbsp;&nbsp; }&nbsp;&nbsp;<br> &nbsp;&nbsp;&nbsp; print_info();</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;&nbsp;&nbsp; for( i = 0; i &lt; ARRAY_SIZE; i++)&nbsp;<br> &nbsp;&nbsp;&nbsp; {&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ( i % 2 == 0)&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; continue;&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; free(ptr_arr[i]);</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ( i &lt; 128)&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; heap_free_total += i;&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_total -= i;&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_count--;&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br> &nbsp;&nbsp;&nbsp; }&nbsp;&nbsp;<br> &nbsp;&nbsp;&nbsp; printf("\nafter free\n");&nbsp;<br> &nbsp;&nbsp;&nbsp; print_info();</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;&nbsp;&nbsp; return 1;&nbsp;<br> }</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>该例子第一个循环</strong>为指针数组每个成员分配索引位置 (KB) 大小的内存块，并通过 128 为分界分别对 heap 和 mmap 内存分配情况进行计数；&nbsp;<br><strong>第二个循环</strong>是 free 索引下标为奇数的项，同时更新计数情况。通过程序的计数与mallinfo/malloc_stats 接口得到结果进行对比，并通过 print_info打印到终端。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">下面是一个执行结果：&nbsp;<br> count by itself:&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; heap_malloc_total=8323072 heap_free_total=0 heap_in_use=8323072&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_total=12054528 mmap_count=72&nbsp;<br> count by mallinfo:&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; heap_malloc_total=8327168 heap_free_total=2032 heap_in_use=8325136&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_total=12238848 mmap_count=72</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">from malloc_stats:&nbsp;<br> Arena 0:&nbsp;<br> system bytes&nbsp;&nbsp;&nbsp;&nbsp; =&nbsp;&nbsp;&nbsp; 8327168&nbsp;<br> in use bytes&nbsp;&nbsp;&nbsp;&nbsp; =&nbsp;&nbsp;&nbsp; 8325136&nbsp;<br> Total (incl. mmap):&nbsp;<br> system bytes&nbsp;&nbsp;&nbsp;&nbsp; =&nbsp;&nbsp; 20566016&nbsp;<br> in use bytes&nbsp;&nbsp;&nbsp;&nbsp; =&nbsp;&nbsp; 20563984&nbsp;<br> max mmap regions =&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 72&nbsp;<br> max mmap bytes&nbsp;&nbsp; =&nbsp;&nbsp; 12238848</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">after free&nbsp;<br> count by itself:&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; heap_malloc_total=8323072 heap_free_total=4194304 heap_in_use=4128768&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_total=6008832 mmap_count=36</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">count by mallinfo:&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; heap_malloc_total=8327168 heap_free_total=4197360 heap_in_use=4129808&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mmap_total=6119424 mmap_count=36</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">from malloc_stats:&nbsp;<br> Arena 0:&nbsp;<br> system bytes&nbsp;&nbsp;&nbsp;&nbsp; =&nbsp;&nbsp;&nbsp; 8327168&nbsp;<br> in use bytes&nbsp;&nbsp;&nbsp;&nbsp; =&nbsp;&nbsp;&nbsp; 4129808&nbsp;<br> Total (incl. mmap):&nbsp;<br> system bytes&nbsp;&nbsp;&nbsp;&nbsp; =&nbsp;&nbsp; 14446592&nbsp;<br> in use bytes&nbsp;&nbsp;&nbsp;&nbsp; =&nbsp;&nbsp; 10249232&nbsp;<br> max mmap regions =&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 72&nbsp;<br> max mmap bytes&nbsp;&nbsp; =&nbsp;&nbsp; 12238848</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">由上可知，程序统计和mallinfo 得到的信息基本吻合，其中 heap_free_total 表示堆内已释放的内存碎片总和。&nbsp;<br><strong>如果想知道堆内究竟有多少碎片，</strong><strong>可通过 mallinfo 结构中的 fsmblks 、smblks 、ordblks 值得到，这些值表示不同大小区间的碎片总个数，这些区间分别是 0~80 字节，80~512 字节，512~128k</strong>。如果 fsmblks 、 smblks 的值过大，那碎片问题可能比较严重了。&nbsp;<br> 不过，&nbsp;mallinfo 结构有一个很致命的问题，就是其成员定义全部都是 int ，在 64 位环境中，其结构中的 uordblks/fordblks/arena/usmblks 很容易就会导致溢出，应该是历史遗留问题，使用时要注意！</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>四、既然堆内内存brk和sbrk不能直接释放，为什么不全部使用 mmap 来分配，munmap直接释放呢？&nbsp;<br></strong>既然堆内碎片不能直接释放，导致疑似“内存泄露”问题，为什么 malloc 不全部使用 mmap 来实现呢(mmap分配的内存可以会通过 munmap 进行 free ，实现真正释放)？而是仅仅对于大于 128k 的大块内存才使用 mmap ？</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">其实，进程向 OS 申请和释放地址空间的接口 sbrk/mmap/munmap 都是系统调用，频繁调用系统调用都比较消耗系统资源的。并且， mmap 申请的内存被 munmap 后，重新申请会产生更多的缺页中断。例如使用 mmap 分配 1M 空间，第一次调用产生了大量缺页中断 (1M/4K 次 ) ，当munmap 后再次分配 1M 空间，会再次产生大量缺页中断。<strong>缺页中断是内核行为，会导致内核态CPU消耗较大。</strong>另外，如果使用 mmap 分配小内存，会导致地址空间的分片更多，内核的管理负担更大。&nbsp;<br><strong>同时堆是一个连续空间，并且堆内碎片由于没有归还 OS ，如果可重用碎片，再次访问该内存很可能不需产生任何系统调用和缺页中断，这将大大降低 CPU 的消耗</strong>。 因此， glibc 的 malloc 实现中，充分考虑了 sbrk 和 mmap 行为上的差异及优缺点，默认分配大块内存 (128k) 才使用 mmap 获得地址空间，也可通过 mallopt(M_MMAP_THRESHOLD, &lt;SIZE&gt;) 来修改这个临界值。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>五、如何查看进程的缺页中断信息？</strong>&nbsp;<br> 可通过以下命令查看缺页中断信息&nbsp;<br> ps -o majflt,minflt -C &lt;program_name&gt;&nbsp;<br> ps -o majflt,minflt -p &lt;pid&gt;&nbsp;<br> 其中:: majflt 代表 major fault ，指大错误；</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; minflt 代表 minor fault ，指小错误。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">这两个数值表示一个进程自启动以来所发生的缺页中断的次数。&nbsp;<br> 其中 majflt 与 minflt 的不同是::</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; majflt 表示需要读写磁盘，可能是内存对应页面在磁盘中需要load 到物理内存中，也可能是此时物理内存不足，需要淘汰部分物理页面至磁盘中。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">参看::&nbsp;<a href="http://blog.163.com/xychenbaihu@yeah/blog/static/132229655201210975312473/" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://blog.163.com/xychenbaihu@yeah/blog/static/132229655201210975312473/</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>六、除了 glibc 的 malloc/free ，还有其他第三方实现吗？</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">其实，很多人开始诟病 glibc 内存管理的实现，特别是高并发性能低下和内存碎片化问题都比较严重，因此，陆续出现一些第三方工具来替换 glibc 的实现，最著名的当属 google 的tcmalloc和facebook 的jemalloc 。&nbsp;<br> 网上有很多资源，可以自己查(只用使用第三方库，代码不用修改，就可以使用第三方库中的malloc)。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>参考资料：</strong>&nbsp;<br> 《深入理解计算机系统》第 10 章&nbsp;<br><a href="http://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="https://www.ibm.com/developerworks/cn/linux/l-lvm64/" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">https://www.ibm.com/developerworks/cn/linux/l-lvm64/</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="http://www.kerneltravel.net/journal/v/mem.htm" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.kerneltravel.net/journal/v/mem.htm</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="http://blog.csdn.net/baiduforum/article/details/6126337" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://blog.csdn.net/baiduforum/article/details/6126337</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="http://www.nosqlnotes.net/archives/105" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.nosqlnotes.net/archives/105</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">http://www.man7.org/linux/man-pages/man3/mallinfo.3.html</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">原文地址：<a href="http://blog.163.com/xychenbaihu@yeah/blog/static/132229655201210975312473/" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://blog.163.com/xychenbaihu@yeah/blog/static/132229655201210975312473/</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">测试程序代码</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>#include &lt;malloc.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;iostream&gt;
+
+static void
+display_mallinfo(void)
+{
+    struct mallinfo mi;
+
+   mi = mallinfo();
+
+    printf("Total non-mmapped bytes (arena):       %d\n", mi.arena);
+    printf("# of free chunks (ordblks):            %d\n", mi.ordblks);
+    printf("# of free fastbin blocks (smblks):     %d\n", mi.smblks);
+    printf("# of mapped regions (hblks):           %d\n", mi.hblks);
+    printf("Bytes in mapped regions (hblkhd):      %d\n", mi.hblkhd);
+    printf("Max. total allocated space (usmblks):  %d\n", mi.usmblks);
+    printf("Free bytes held in fastbins (fsmblks): %d\n", mi.fsmblks);
+    printf("Total allocated space (uordblks):      %d\n", mi.uordblks);
+    printf("Total free space (fordblks):           %d\n", mi.fordblks);
+    printf("Topmost releasable block (keepcost):   %d\n", mi.keepcost);
+}
+
+int
+main(int argc, char *argv[])
+{
+#define MAX_ALLOCS 2000000
+    char *alloc[MAX_ALLOCS];
+    int numBlocks, j, freeBegin, freeEnd, freeStep;
+    size_t blockSize;
+
+   if (argc &lt; 3 || strcmp(argv[1], "--help") == 0)
+   {
+        printf("%s num-blocks block-size [free-step [start-free "
+                "[end-free]]]\n", argv[0]);
+        return 0;
+   }
+    numBlocks = atoi(argv[1]);
+    blockSize = atoi(argv[2]);
+    freeStep = (argc &gt; 3) ? atoi(argv[3]) : 1;
+    freeBegin = (argc &gt; 4) ? atoi(argv[4]) : 0;
+    freeEnd = (argc &gt; 5) ? atoi(argv[5]) : numBlocks;
+
+   printf("============== Before allocating blocks ==============\n");
+    display_mallinfo();
+
+   for (j = 0; j &lt; numBlocks; j++) {
+        if (numBlocks &gt;= MAX_ALLOCS)
+            std::cout&lt;&lt;"Too many allocations"&lt;&lt;std::endl;
+
+       alloc[j] = (char *)malloc(blockSize);
+        if (alloc[j] == NULL)
+            std::cout&lt;&lt;"malloc"&lt;&lt;std::endl;
+    }
+
+   printf("\n============== After allocating blocks ==============\n");
+    display_mallinfo();
+
+   for (j = freeBegin; j &lt; freeEnd; j += freeStep)
+   {
+        free(alloc[j]);
+   }
+   printf("\n============== After freeing blocks ==============\n");
+    display_mallinfo();
+
+   exit(EXIT_SUCCESS);
+}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p><font color="#666666"><span style="font-size:14px;"><br></span></font></p> 
+   <p><font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/6282967.html</span></font><span style="font-size:14px;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

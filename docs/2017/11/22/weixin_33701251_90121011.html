@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Scripting Java #3：Groovy与invokedynamic « NotBeCN</title>
+  <meta name="description" content="                  只需看看今天Groovy语言实现机制。在此之前，是第一个推倒静态类型与动态类型语言在实现上面的一些差异。     静态类型 vs. 动态类型     看以下这个简单的栗子。     def addtwo(a, b) {    return a + b;}     静态类型语言与...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/22/weixin_33701251_90121011.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Scripting Java #3：Groovy与invokedynamic</h1>
+    <p class="post-meta">Nov 22, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="markdown_views" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"> 
+    <p>只需看看今天Groovy语言实现机制。在此之前，是第一个推倒<a href="http://en.wikipedia.org/wiki/Type_system#STATIC" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">静态类型</a>与<a href="http://en.wikipedia.org/wiki/Type_system#DYNAMIC" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">动态类型</a>语言在实现上面的一些差异。</p> 
+    <h2 style="color:rgb(0,0,0);line-height:1.5;font-size:21px;">静态类型 vs. 动态类型</h2> 
+    <p>看以下这个简单的栗子。</p> 
+    <pre class="prettyprint"><code class="hljs autohotkey" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">def addtwo(<span class="hljs-literal" style="color:rgb(163,21,21);line-height:1.8;">a</span>, b) {
+    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span> <span class="hljs-literal" style="color:rgb(163,21,21);line-height:1.8;">a</span> + b<span class="hljs-comment" style="color:#008000;line-height:1.8;">;</span>
+}</code></pre> 
+    <p>静态类型语言与动态类型语言对于上面这个简单的加法实现全然不同。静态类型语言。比如Java。<strong>语言的编译器</strong>在编译时就已经进行类型检查，所以能够将<code>+</code>运算符编译成特定的指令。<strong>语言的runtime系统</strong>能够直接执行该指令。比如<strong>javac</strong>会将两个<code>int</code>类型的<code>+</code>运算编译成<code>iadd</code>指令，执行时由<strong>JVM</strong>直接执行<code>iadd</code>指令。</p> 
+    <p>而对于动态类型语言，因为须要到执行时才干确定变量的类型，因此运算符的详细实现也须要到执行时才干确定。<code>a + b</code>会被编译成相似<code>(+ a b)</code>这个方案调用（Lisp风格^_^）。<code>+</code>仅仅是个方法名。语言的runtime系统须要依据方法名（<code>+</code>）和參数类型（<code>a</code>和<code>b</code>的类型）来确定这个加法运算的详细实现。</p> 
+    <blockquote style="background:none;border:2px solid rgb(239,239,239);"> 
+     <p>The challenge of compiling dynamically typed languages is how to implement a runtime system that can choose the most appropriate implementation of a method or function — after the program has been compiled.</p> 
+    </blockquote> 
+    <p>总而言之，言而总之。静态类型语言苦了编译器爽了执行时。动态类型语言爽了编译器苦了执行时。</p> 
+    <p>既然是这样，那以下我们就来看看Groovy的编译器（<a href="http://groovy-lang.org/groovyc.html" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">groovyc</a>）是怎么苦了Groovy的runtime系统的。</p> 
+    <h2 style="color:rgb(0,0,0);line-height:1.5;font-size:21px;">invokedynamic之前</h2> 
+    <p>使用groovyc编译上面的栗子。得到class文件。javap看下字节码，</p> 
+    <pre class="prettyprint"><code class="hljs markdown" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);"><span class="hljs-blockquote" style="line-height:1.8;">&gt; groovyc demo.groovy</span>
+<span class="hljs-blockquote" style="line-height:1.8;">&gt; javap -v -p demo</span></code></pre> 
+    <pre class="prettyprint"><code class="language-bytecode hljs lasso" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">Classfile /C:/Users/tongyuan<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>zbs/demo<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>class
+  Last modified <span class="hljs-number" style="line-height:1.8;">2015</span><span class="hljs-subst" style="line-height:1.8;">-</span><span class="hljs-number" style="line-height:1.8;">3</span><span class="hljs-subst" style="line-height:1.8;">-</span><span class="hljs-number" style="line-height:1.8;">7</span>; size <span class="hljs-number" style="line-height:1.8;">2287</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">bytes</span>
+  MD5 checksum ee25ddebc1ef5ab750baebf75f8031b6
+  Compiled from <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"demo.groovy"</span>
+<span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> class demo extends groovy<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Script
+  SourceFile: <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"demo.groovy"</span>
+  minor version: <span class="hljs-number" style="line-height:1.8;">0</span>
+  major version: <span class="hljs-number" style="line-height:1.8;">49</span>
+  flags: ACC_PUBLIC, ACC_SUPER
+
+Constant pool:
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#1</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               demo
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#1</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// demo</span>
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#3</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               groovy/lang/Script
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#4</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#3</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// groovy/lang/Script</span>
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#5</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               demo<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>groovy
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#6</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-variable" style="color:#008000;line-height:1.8;">$staticClassInfo</span>
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#7</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Lorg/codehaus/groovy/reflection/ClassInfo;
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#8</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               __<span class="hljs-variable" style="color:#008000;line-height:1.8;">$stMC</span>
+    <span class="hljs-variable" style="color:#008000;line-height:1.8;">#9</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Z
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#10</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-subst" style="line-height:1.8;">&lt;</span>init<span class="hljs-subst" style="line-height:1.8;">&gt;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#11</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()V
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#12</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#10</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#11</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// "&lt;init&gt;":()V</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#13</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#4</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#12</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// groovy/lang/Script."&lt;init&gt;":()V</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#14</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-variable" style="color:#008000;line-height:1.8;">$getCallSiteArray</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#15</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()<span class="hljs-preprocessor" style="line-height:1.8;">[</span>Lorg/codehaus/groovy/runtime/callsite/CallSite;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#16</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#14</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#15</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// $getCallSiteArray:()[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#17</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#16</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// demo.$getCallSiteArray:()[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#18</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               this
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#19</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Ldemo;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#20</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Lgroovy/lang/Binding;)V
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#21</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#10</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#20</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// "&lt;init&gt;":(Lgroovy/lang/Binding;)V</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#22</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#4</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#21</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// groovy/lang/Script."&lt;init&gt;":(Lgroovy/lang/Binding;)V</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#23</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               context
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#24</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Lgroovy/lang/Binding;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#25</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               main
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#26</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (<span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;)V
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#27</span> <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">Integer</span>            <span class="hljs-number" style="line-height:1.8;">0</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#28</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/runtime/InvokerHelper
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#29</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#28</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/InvokerHelper</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#30</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/runtime/callsite/CallSite
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#31</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#30</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/callsite/CallSite</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#32</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               call
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#33</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#34</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#32</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#33</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// call:(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#35</span> <span class="hljs-subst" style="line-height:1.8;">=</span> InterfaceMethodref <span class="hljs-variable" style="color:#008000;line-height:1.8;">#31</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#34</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/callsite/CallSite.call:(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#36</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               args
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#37</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#38</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               run
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#39</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()Ljava/lang/Object;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#40</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               addtwo
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#41</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#42</span> <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">Integer</span>            <span class="hljs-number" style="line-height:1.8;">1</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#43</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#32</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#41</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// call:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#44</span> <span class="hljs-subst" style="line-height:1.8;">=</span> InterfaceMethodref <span class="hljs-variable" style="color:#008000;line-height:1.8;">#31</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#43</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/callsite/CallSite.call:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#45</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               a
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#46</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Ljava/lang/Object;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#47</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               b
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#48</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-variable" style="color:#008000;line-height:1.8;">$getStaticMetaClass</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#49</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()Lgroovy/lang/MetaClass;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#50</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               java/lang/Object
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#51</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#50</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/Object</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#52</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               getClass
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#53</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()Ljava/lang/Class;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#54</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#52</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#53</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// getClass:()Ljava/lang/Class;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#55</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#51</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#54</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/Object.getClass:()Ljava/lang/Class;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#56</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/runtime/ScriptBytecodeAdapter
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#57</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#56</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/ScriptBytecodeAdapter</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#58</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               initMetaClass
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#59</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Object;)Lgroovy/lang/MetaClass;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#60</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#58</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#59</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// initMetaClass:(Ljava/lang/Object;)Lgroovy/lang/MetaClass;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#61</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#57</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#60</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/ScriptBytecodeAdapter.initMetaClass:(Ljava/lang/Object;)Lgroovy/lang/MetaClass;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#62</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#6</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#7</span>         <span class="hljs-comment" style="color:#008000;line-height:1.8;">// $staticClassInfo:Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#63</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Fieldref           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#62</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// demo.$staticClassInfo:Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#64</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/reflection/ClassInfo
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#65</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#64</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/reflection/ClassInfo</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#66</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               getClassInfo
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#67</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Class;)Lorg/codehaus/groovy/reflection/ClassInfo;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#68</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#66</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#67</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// getClassInfo:(Ljava/lang/Class;)Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#69</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#65</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#68</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/reflection/ClassInfo.getClassInfo:(Ljava/lang/Class;)Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#70</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               getMetaClass
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#71</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#70</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#49</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// getMetaClass:()Lgroovy/lang/MetaClass;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#72</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#65</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#71</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/reflection/ClassInfo.getMetaClass:()Lgroovy/lang/MetaClass;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#73</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-variable" style="color:#008000;line-height:1.8;">$callSiteArray</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#74</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Ljava/lang/ref/SoftReference;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#75</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-variable" style="color:#008000;line-height:1.8;">$createCallSiteArray_1</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#76</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               runScript
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#77</span> <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>             <span class="hljs-variable" style="color:#008000;line-height:1.8;">#76</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// runScript</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#78</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               plus
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#79</span> <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>             <span class="hljs-variable" style="color:#008000;line-height:1.8;">#78</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// plus</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#80</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-variable" style="color:#008000;line-height:1.8;">$createCallSiteArray</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#81</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()Lorg/codehaus/groovy/runtime/callsite/CallSiteArray;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#82</span> <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">Integer</span>            <span class="hljs-number" style="line-height:1.8;">2</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#83</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               java/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#84</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#83</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/String</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#85</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#75</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#26</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// $createCallSiteArray_1:([Ljava/lang/String;)V</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#86</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#85</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// demo.$createCallSiteArray_1:([Ljava/lang/String;)V</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#87</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/runtime/callsite/CallSiteArray
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#88</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#87</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/callsite/CallSiteArray</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#89</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Class;<span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;)V
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#90</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#10</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#89</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// "&lt;init&gt;":(Ljava/lang/Class;[Ljava/lang/String;)V</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#91</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#88</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#90</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/callsite/CallSiteArray."&lt;init&gt;":(Ljava/lang/Class;[Ljava/lang/String;)V</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#92</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#73</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#74</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// $callSiteArray:Ljava/lang/ref/SoftReference;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#93</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Fieldref           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#92</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// demo.$callSiteArray:Ljava/lang/ref/SoftReference;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#94</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               java/lang/ref/SoftReference
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#95</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#94</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/ref/SoftReference</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#96</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               get
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#97</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#96</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#39</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// get:()Ljava/lang/Object;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#98</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#95</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#97</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/ref/SoftReference.get:()Ljava/lang/Object;</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#99</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#80</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#81</span>       <span class="hljs-comment" style="color:#008000;line-height:1.8;">// $createCallSiteArray:()Lorg/codehaus/groovy/runtime/callsite/CallSiteArray;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#100</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#99</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// demo.$createCallSiteArray:()Lorg/codehaus/groovy/runtime/callsite/CallSiteArray;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#101</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Object;)V
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#102</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#10</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#101</span>      <span class="hljs-comment" style="color:#008000;line-height:1.8;">// "&lt;init&gt;":(Ljava/lang/Object;)V</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#103</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#95</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#102</span>      <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/ref/SoftReference."&lt;init&gt;":(Ljava/lang/Object;)V</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#104</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">array</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#105</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-preprocessor" style="line-height:1.8;">[</span>Lorg/codehaus/groovy/runtime/callsite/CallSite;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#106</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#104</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#105</span>     <span class="hljs-comment" style="color:#008000;line-height:1.8;">// array:[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#107</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Fieldref           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#88</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#106</span>      <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/callsite/CallSiteArray.array:[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#108</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Code
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#109</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               LocalVariableTable
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#110</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               LineNumberTable
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#111</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               SourceFile
+{
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">private</span> static org<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>codehaus<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>groovy<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>reflection<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>ClassInfo <span class="hljs-variable" style="color:#008000;line-height:1.8;">$staticClassInfo</span>;
+    flags: ACC_PRIVATE, ACC_STATIC, ACC_SYNTHETIC
+
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> static transient boolean __<span class="hljs-variable" style="color:#008000;line-height:1.8;">$stMC</span>;
+    flags: ACC_PUBLIC, ACC_STATIC, ACC_TRANSIENT, ACC_SYNTHETIC
+
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">private</span> static java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>ref<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>SoftReference <span class="hljs-variable" style="color:#008000;line-height:1.8;">$callSiteArray</span>;
+    flags: ACC_PRIVATE, ACC_STATIC, ACC_SYNTHETIC
+
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> demo();
+    flags: ACC_PUBLIC
+
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: aload_0       
+         <span class="hljs-number" style="line-height:1.8;">1</span>: invokespecial <span class="hljs-variable" style="color:#008000;line-height:1.8;">#13</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method groovy/lang/Script."&lt;init&gt;":()V</span>
+         <span class="hljs-number" style="line-height:1.8;">4</span>: invokestatic  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#17</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method $getCallSiteArray:()[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+         <span class="hljs-number" style="line-height:1.8;">7</span>: astore_1      
+         <span class="hljs-number" style="line-height:1.8;">8</span>: <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span>        
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">4</span>       <span class="hljs-number" style="line-height:1.8;">4</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  this   Ldemo;
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> demo(groovy<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Binding);
+    flags: ACC_PUBLIC
+
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">3</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: invokestatic  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#17</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method $getCallSiteArray:()[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+         <span class="hljs-number" style="line-height:1.8;">3</span>: astore_2      
+         <span class="hljs-number" style="line-height:1.8;">4</span>: aload_0       
+         <span class="hljs-number" style="line-height:1.8;">5</span>: aload_1       
+         <span class="hljs-number" style="line-height:1.8;">6</span>: invokespecial <span class="hljs-variable" style="color:#008000;line-height:1.8;">#22</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method groovy/lang/Script."&lt;init&gt;":(Lgroovy/lang/Binding;)V</span>
+         <span class="hljs-number" style="line-height:1.8;">9</span>: <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span>        
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">0</span>       <span class="hljs-number" style="line-height:1.8;">9</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  this   Ldemo;
+               <span class="hljs-number" style="line-height:1.8;">0</span>       <span class="hljs-number" style="line-height:1.8;">9</span>     <span class="hljs-number" style="line-height:1.8;">1</span> context   Lgroovy/lang/Binding;
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> static <span class="hljs-literal" style="color:rgb(163,21,21);line-height:1.8;">void</span> main(java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span><span class="hljs-attribute" style="color:rgb(163,21,21);line-height:1.8;">...</span>);
+    flags: ACC_PUBLIC, ACC_STATIC, ACC_VARARGS
+
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">4</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: invokestatic  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#17</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method $getCallSiteArray:()[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+         <span class="hljs-number" style="line-height:1.8;">3</span>: astore_1      
+         <span class="hljs-number" style="line-height:1.8;">4</span>: aload_1       
+         <span class="hljs-number" style="line-height:1.8;">5</span>: ldc           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#27</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// int 0</span>
+         <span class="hljs-number" style="line-height:1.8;">7</span>: aaload        
+         <span class="hljs-number" style="line-height:1.8;">8</span>: ldc           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#29</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// class org/codehaus/groovy/runtime/InvokerHelper</span>
+        <span class="hljs-number" style="line-height:1.8;">10</span>: ldc           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span>                  <span class="hljs-comment" style="color:#008000;line-height:1.8;">// class demo</span>
+        <span class="hljs-number" style="line-height:1.8;">12</span>: aload_0       
+        <span class="hljs-number" style="line-height:1.8;">13</span>: invokeinterface <span class="hljs-variable" style="color:#008000;line-height:1.8;">#35</span>,  <span class="hljs-number" style="line-height:1.8;">4</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// InterfaceMethod org/codehaus/groovy/runtime/callsite/CallSite.call:(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span>
+        <span class="hljs-number" style="line-height:1.8;">18</span>: pop           
+        <span class="hljs-number" style="line-height:1.8;">19</span>: <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span>        
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">0</span>      <span class="hljs-number" style="line-height:1.8;">19</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  args   <span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Object run();
+    flags: ACC_PUBLIC
+
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: invokestatic  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#17</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method $getCallSiteArray:()[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+         <span class="hljs-number" style="line-height:1.8;">3</span>: astore_1      
+         <span class="hljs-number" style="line-height:1.8;">4</span>: aconst_null   
+         <span class="hljs-number" style="line-height:1.8;">5</span>: areturn       
+         <span class="hljs-number" style="line-height:1.8;">6</span>: aconst_null   
+         <span class="hljs-number" style="line-height:1.8;">7</span>: areturn       
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">0</span>       <span class="hljs-number" style="line-height:1.8;">6</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  this   Ldemo;
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Object addtwo(java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Object, java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Object);
+    flags: ACC_PUBLIC
+
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">3</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">4</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">3</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: invokestatic  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#17</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method $getCallSiteArray:()[Lorg/codehaus/groovy/runtime/callsite/CallSite;</span>
+         <span class="hljs-number" style="line-height:1.8;">3</span>: astore_3      
+         <span class="hljs-number" style="line-height:1.8;">4</span>: aload_3       
+         <span class="hljs-number" style="line-height:1.8;">5</span>: ldc           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#42</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// int 1</span>
+         <span class="hljs-number" style="line-height:1.8;">7</span>: aaload        
+         <span class="hljs-number" style="line-height:1.8;">8</span>: aload_1       
+         <span class="hljs-number" style="line-height:1.8;">9</span>: aload_2       
+        <span class="hljs-number" style="line-height:1.8;">10</span>: invokeinterface <span class="hljs-variable" style="color:#008000;line-height:1.8;">#44</span>,  <span class="hljs-number" style="line-height:1.8;">3</span>           <span class="hljs-comment" style="color:#008000;line-height:1.8;">// InterfaceMethod org/codehaus/groovy/runtime/callsite/CallSite.call:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span>
+        <span class="hljs-number" style="line-height:1.8;">15</span>: areturn       
+        <span class="hljs-number" style="line-height:1.8;">16</span>: aconst_null   
+        <span class="hljs-number" style="line-height:1.8;">17</span>: areturn       
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">0</span>      <span class="hljs-number" style="line-height:1.8;">16</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  this   Ldemo;
+               <span class="hljs-number" style="line-height:1.8;">0</span>      <span class="hljs-number" style="line-height:1.8;">16</span>     <span class="hljs-number" style="line-height:1.8;">1</span>     a   Ljava/lang/Object;
+               <span class="hljs-number" style="line-height:1.8;">0</span>      <span class="hljs-number" style="line-height:1.8;">16</span>     <span class="hljs-number" style="line-height:1.8;">2</span>     b   Ljava/lang/Object;
+      LineNumberTable:
+        line <span class="hljs-number" style="line-height:1.8;">2</span>: <span class="hljs-number" style="line-height:1.8;">4</span>
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">protected</span> groovy<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>MetaClass <span class="hljs-variable" style="color:#008000;line-height:1.8;">$getStaticMetaClass</span>();
+    flags: ACC_PROTECTED, ACC_SYNTHETIC
+
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: aload_0       
+         <span class="hljs-number" style="line-height:1.8;">1</span>: invokevirtual <span class="hljs-variable" style="color:#008000;line-height:1.8;">#55</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method java/lang/Object.getClass:()Ljava/lang/Class;</span>
+         <span class="hljs-number" style="line-height:1.8;">4</span>: ldc           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span>                  <span class="hljs-comment" style="color:#008000;line-height:1.8;">// class demo</span>
+         <span class="hljs-number" style="line-height:1.8;">6</span>: if_acmpeq     <span class="hljs-number" style="line-height:1.8;">14</span>
+         <span class="hljs-number" style="line-height:1.8;">9</span>: aload_0       
+        <span class="hljs-number" style="line-height:1.8;">10</span>: invokestatic  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#61</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method org/codehaus/groovy/runtime/ScriptBytecodeAdapter.initMetaClass:(Ljava/lang/Object;)Lgroovy/lang/MetaClass;</span>
+        <span class="hljs-number" style="line-height:1.8;">13</span>: areturn       
+        <span class="hljs-number" style="line-height:1.8;">14</span>: getstatic     <span class="hljs-variable" style="color:#008000;line-height:1.8;">#63</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Field $staticClassInfo:Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+        <span class="hljs-number" style="line-height:1.8;">17</span>: astore_1      
+        <span class="hljs-number" style="line-height:1.8;">18</span>: aload_1       
+        <span class="hljs-number" style="line-height:1.8;">19</span>: ifnonnull     <span class="hljs-number" style="line-height:1.8;">34</span>
+        <span class="hljs-number" style="line-height:1.8;">22</span>: aload_0       
+        <span class="hljs-number" style="line-height:1.8;">23</span>: invokevirtual <span class="hljs-variable" style="color:#008000;line-height:1.8;">#55</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method java/lang/Object.getClass:()Ljava/lang/Class;</span>
+        <span class="hljs-number" style="line-height:1.8;">26</span>: invokestatic  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#69</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method org/codehaus/groovy/reflection/ClassInfo.getClassInfo:(Ljava/lang/Class;)Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+        <span class="hljs-number" style="line-height:1.8;">29</span>: dup           
+        <span class="hljs-number" style="line-height:1.8;">30</span>: astore_1      
+        <span class="hljs-number" style="line-height:1.8;">31</span>: putstatic     <span class="hljs-variable" style="color:#008000;line-height:1.8;">#63</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Field $staticClassInfo:Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+        <span class="hljs-number" style="line-height:1.8;">34</span>: aload_1       
+        <span class="hljs-number" style="line-height:1.8;">35</span>: invokevirtual <span class="hljs-variable" style="color:#008000;line-height:1.8;">#72</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method org/codehaus/groovy/reflection/ClassInfo.getMetaClass:()Lgroovy/lang/MetaClass;</span>
+        <span class="hljs-number" style="line-height:1.8;">38</span>: areturn       
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">private</span> static <span class="hljs-literal" style="color:rgb(163,21,21);line-height:1.8;">void</span> <span class="hljs-variable" style="color:#008000;line-height:1.8;">$createCallSiteArray_1</span>(java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span><span class="hljs-preprocessor" style="line-height:1.8;">[</span><span class="hljs-preprocessor" style="line-height:1.8;">]</span><span class="hljs-markup" style="line-height:1.8;">); flags: ACC_PRIVATE, ACC_STATIC, ACC_SYNTHETIC Code: stack=3, locals=1, args_size=1 0: aload_0 1: ldc #27 // int 0 3: ldc #77 // String runScript 5: aastore 6: aload_0 7: ldc #42 // int 1 9: ldc #79 // String plus 11: aastore 12: return private static org.codehaus.groovy.runtime.callsite.CallSiteArray $createCallSiteArray(); flags: ACC_PRIVATE, ACC_STATIC, ACC_SYNTHETIC Code: stack=4, locals=1, args_size=0 0: ldc #82 // int 2 2: anewarray #84 // class java/lang/String 5: astore_0 6: aload_0 7: invokestatic #86 // Method $createCallSiteArray_1:(</span><span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;)V
+        <span class="hljs-number" style="line-height:1.8;">10</span>: <span class="hljs-literal" style="color:rgb(163,21,21);line-height:1.8;">new</span>           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#88</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// class org/codehaus/groovy/runtime/callsite/CallSiteArray</span>
+        <span class="hljs-number" style="line-height:1.8;">13</span>: dup           
+        <span class="hljs-number" style="line-height:1.8;">14</span>: ldc           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span>                  <span class="hljs-comment" style="color:#008000;line-height:1.8;">// class demo</span>
+        <span class="hljs-number" style="line-height:1.8;">16</span>: aload_0       
+        <span class="hljs-number" style="line-height:1.8;">17</span>: invokespecial <span class="hljs-variable" style="color:#008000;line-height:1.8;">#91</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method org/codehaus/groovy/runtime/callsite/CallSiteArray."&lt;init&gt;":(Ljava/lang/Class;[Ljava/lang/String;)V</span>
+        <span class="hljs-number" style="line-height:1.8;">20</span>: areturn       
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">private</span> static org<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>codehaus<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>groovy<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>runtime<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>callsite<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>CallSite<span class="hljs-preprocessor" style="line-height:1.8;">[</span><span class="hljs-preprocessor" style="line-height:1.8;">]</span><span class="hljs-markup" style="line-height:1.8;"> $getCallSiteArray(); flags: ACC_PRIVATE, ACC_STATIC, ACC_SYNTHETIC Code: stack=3, locals=1, args_size=0 0: getstatic #93 // Field $callSiteArray:Ljava/lang/ref/SoftReference; 3: ifnull 20 6: getstatic #93 // Field $callSiteArray:Ljava/lang/ref/SoftReference; 9: invokevirtual #98 // Method java/lang/ref/SoftReference.get:()Ljava/lang/Object; 12: checkcast #88 // class org/codehaus/groovy/runtime/callsite/CallSiteArray 15: dup 16: astore_0 17: ifnonnull 35 20: invokestatic #100 // Method $createCallSiteArray:()Lorg/codehaus/groovy/runtime/callsite/CallSiteArray; 23: astore_0 24: new #95 // class java/lang/ref/SoftReference 27: dup 28: aload_0 29: invokespecial #103 // Method java/lang/ref/SoftReference."&lt;init&gt;":(Ljava/lang/Object;)V 32: putstatic #93 // Field $callSiteArray:Ljava/lang/ref/SoftReference; 35: aload_0 36: getfield #107 // Field org/codehaus/groovy/runtime/callsite/CallSiteArray.array:</span><span class="hljs-preprocessor" style="line-height:1.8;">[</span>Lorg/codehaus/groovy/runtime/callsite/CallSite;
+        <span class="hljs-number" style="line-height:1.8;">39</span>: areturn       
+}</code></pre> 
+    <p>人肉反编译，大概是这个样子来使用Groovy的runtime的，</p> 
+    <pre class="prettyprint"><code class="language-java hljs" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">private</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">static</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">void</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">addtwo</span>(Object o1, Object o2) <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">throws</span> Throwable {
+        String[] names = <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">new</span> String[]{<span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"plus"</span>};
+        CallSiteArray callSiteArray = <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">new</span> CallSiteArray(Main.class, names);
+        CallSite callSite = callSiteArray.array[<span class="hljs-number" style="line-height:1.8;">0</span>];
+        System.out.println(callSite.call(o1, o2));
+    }</code></pre> 
+    <p><code>plus</code>就是我们上面说到的方法名<code>+</code>。</p> 
+    <p>写个栗子跑跑看，</p> 
+    <pre class="prettyprint"><code class="language-java hljs" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">static</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">void</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">main</span>(String[] args) <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">throws</span> Throwable {
+        addtwo(<span class="hljs-number" style="line-height:1.8;">7</span>, <span class="hljs-number" style="line-height:1.8;">7</span>);
+        addtwo(<span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"hello,"</span>, <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"world"</span>);
+        addtwo(<span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">new</span> Receiver(), <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">new</span> Parameter());
+    }</code></pre> 
+    <pre class="prettyprint"><code class="language-java hljs" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);"><span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> <span class="hljs-class" style="line-height:1.8;"><span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">class</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">Receiver</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">implements</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">GroovyInterceptable</span> {</span>
+
+    <span class="hljs-annotation" style="line-height:1.8;">@Override</span>
+    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> Object <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">invokeMethod</span>(String name, Object args) {
+        System.out.println(<span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"methodName-&gt;"</span> + name);
+        System.out.println(<span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"args-&gt;"</span> + args);
+        <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">if</span>(args <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">instanceof</span> Object[]) {
+            Object[] params = (Object[])args;
+            System.out.println(<span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"params-&gt;"</span>);
+            <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">for</span> (Object param : params) {
+                System.out.println(param);
+            }
+        }
+        <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span> <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"Receiver#invokeMethod"</span>;
+    }
+    ...
+}</code></pre> 
+    <p>输出例如以下，<code>Receiver</code>的输出跟Groovy的<a href="http://docs.groovy-lang.org/latest/html/gapi/groovy/lang/MetaObjectProtocol.html" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">MOP</a>有关，这个以后再说。</p> 
+    <pre class="prettyprint"><code class="language-out hljs avrasm" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);"><span class="hljs-number" style="line-height:1.8;">14</span>
+hello,world
+methodName-&gt;plus
+args-&gt;[Ljava<span class="hljs-preprocessor" style="line-height:1.8;">.lang</span><span class="hljs-preprocessor" style="line-height:1.8;">.Object</span><span class="hljs-comment" style="color:#008000;line-height:1.8;">;@6b573f80</span>
+params-&gt;
+me<span class="hljs-preprocessor" style="line-height:1.8;">.kisimple</span><span class="hljs-preprocessor" style="line-height:1.8;">.just</span>4fun<span class="hljs-preprocessor" style="line-height:1.8;">.Parameter</span><span class="hljs-localvars" style="line-height:1.8;">@2</span>d0a238e
+Receiver<span class="hljs-preprocessor" style="line-height:1.8;">#invokeMethod</span></code></pre> 
+    <p>Groovy的runtime应该也是个不小的坑。以后再研究。以下来看下<code>invokedynamic</code>。</p> 
+    <p></p> 
+    <h2 style="color:rgb(0,0,0);line-height:1.5;font-size:21px;">使用invokedynamic</h2> 
+    <p>从上面的栗子能够看到，groovyc须要生成非常多runtime相关的字节码，为了使动态类型语言在Java平台上更easy实现，JavaSE 7引入了<code>invokedynamic</code>指令。</p> 
+    <p>简单来讲，执行时虚拟机在执行<code>invokedynamic</code>指令时会执行用户自己定义的bootstrap方法，用户能够在bootstrap方法中给出调用点的详细实现，这样就能达到执行时才确定详细实现的目的了。<code>invokedynamic</code>与<a href="http://docs.oracle.com/javase/7/docs/api/java/lang/invoke/MethodHandle.html" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);"><code>MethodHandle</code></a>的详细内容參<a href="http://docs.oracle.com/javase/8/docs/technotes/guides/vm/multiple-language-support.html#invokedynamic" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">官方文档</a>，以下我们来看下Groovy是怎样使用<code>invokedynamic</code>的。</p> 
+    <p>依据<a href="http://groovy-lang.org/indy.html" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">官方文档说明</a>更换一下jar包，编译时加上<code>--indy</code>选项。得到的字节码例如以下，</p> 
+    <pre class="prettyprint"><code class="language-bytecode hljs lasso" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">Classfile /home/blues/Projects/groovy<span class="hljs-attribute" style="color:rgb(163,21,21);line-height:1.8;">-core</span>/demo<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>class
+  Last modified Mar <span class="hljs-number" style="line-height:1.8;">8</span>, <span class="hljs-number" style="line-height:1.8;">2015</span>; size <span class="hljs-number" style="line-height:1.8;">1839</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">bytes</span>
+  MD5 checksum <span class="hljs-number" style="line-height:1.8;">5</span>bbf49b81b00dece4523fbf55f8e7266
+  Compiled from <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"demo.groovy"</span>
+<span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> class demo extends groovy<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Script
+  BootstrapMethods:
+    <span class="hljs-number" style="line-height:1.8;">0</span>: <span class="hljs-variable" style="color:#008000;line-height:1.8;">#31</span> invokestatic org/codehaus/groovy/vmplugin/v7/IndyInterface<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>bootstrap:(Ljava/lang/invoke/MethodHandles<span class="hljs-variable" style="color:#008000;line-height:1.8;">$Lookup</span>;Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;Ljava/lang/invoke/MethodType;Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;I)Ljava/lang/invoke/CallSite;
+      Method arguments:
+        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#33</span> runScript
+        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#34</span> <span class="hljs-number" style="line-height:1.8;">0</span>
+    <span class="hljs-number" style="line-height:1.8;">1</span>: <span class="hljs-variable" style="color:#008000;line-height:1.8;">#31</span> invokestatic org/codehaus/groovy/vmplugin/v7/IndyInterface<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>bootstrap:(Ljava/lang/invoke/MethodHandles<span class="hljs-variable" style="color:#008000;line-height:1.8;">$Lookup</span>;Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;Ljava/lang/invoke/MethodType;Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;I)Ljava/lang/invoke/CallSite;
+      Method arguments:
+        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#48</span> plus
+        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#34</span> <span class="hljs-number" style="line-height:1.8;">0</span>
+  SourceFile: <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"demo.groovy"</span>
+  minor version: <span class="hljs-number" style="line-height:1.8;">0</span>
+  major version: <span class="hljs-number" style="line-height:1.8;">51</span>
+  flags: ACC_PUBLIC, ACC_SUPER
+Constant pool:
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#1</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               demo
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#1</span>             <span class="hljs-comment" style="color:#008000;line-height:1.8;">// demo</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#3</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               groovy/lang/Script
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#4</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#3</span>             <span class="hljs-comment" style="color:#008000;line-height:1.8;">// groovy/lang/Script</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#5</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               demo<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>groovy
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#6</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-variable" style="color:#008000;line-height:1.8;">$staticClassInfo</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#7</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Lorg/codehaus/groovy/reflection/ClassInfo;
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#8</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               __<span class="hljs-variable" style="color:#008000;line-height:1.8;">$stMC</span>
+   <span class="hljs-variable" style="color:#008000;line-height:1.8;">#9</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Z
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#10</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-subst" style="line-height:1.8;">&lt;</span>init<span class="hljs-subst" style="line-height:1.8;">&gt;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#11</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()V
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#12</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#10</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#11</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// "&lt;init&gt;":()V</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#13</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#4</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#12</span>         <span class="hljs-comment" style="color:#008000;line-height:1.8;">// groovy/lang/Script."&lt;init&gt;":()V</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#14</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               this
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#15</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Ldemo;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#16</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Lgroovy/lang/Binding;)V
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#17</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#10</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#16</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// "&lt;init&gt;":(Lgroovy/lang/Binding;)V</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#18</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#4</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#17</span>         <span class="hljs-comment" style="color:#008000;line-height:1.8;">// groovy/lang/Script."&lt;init&gt;":(Lgroovy/lang/Binding;)V</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#19</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               context
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#20</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Lgroovy/lang/Binding;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#21</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               main
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#22</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (<span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;)V
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#23</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/runtime/InvokerHelper
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#24</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#23</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/InvokerHelper</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#25</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/vmplugin/v7/IndyInterface
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#26</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#25</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/vmplugin/v7/IndyInterface</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#27</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               bootstrap
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#28</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/invoke/MethodHandles<span class="hljs-variable" style="color:#008000;line-height:1.8;">$Lookup</span>;Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;Ljava/lang/invoke/MethodType;Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;I)Ljava/lang/invoke/CallSite;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#29</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#27</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#28</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;I)Ljava/lang/invoke/CallSite;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#30</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#26</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#29</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/vmplugin/v7/IndyInterface.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;I)Ljava/lang/invoke/CallSite;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#31</span> <span class="hljs-subst" style="line-height:1.8;">=</span> MethodHandle       <span class="hljs-variable" style="color:#008000;line-height:1.8;">#6</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#30</span>         <span class="hljs-comment" style="color:#008000;line-height:1.8;">// invokestatic org/codehaus/groovy/vmplugin/v7/IndyInterface.bootstrap:(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;I)Ljava/lang/invoke/CallSite;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#32</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               runScript
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#33</span> <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>             <span class="hljs-variable" style="color:#008000;line-height:1.8;">#32</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// runScript</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#34</span> <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">Integer</span>            <span class="hljs-number" style="line-height:1.8;">0</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#35</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               invoke
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#36</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Class;Ljava/lang/Class;<span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;)Ljava/lang/Object;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#37</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#35</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#36</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// invoke:(Ljava/lang/Class;Ljava/lang/Class;[Ljava/lang/String;)Ljava/lang/Object;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#38</span> <span class="hljs-subst" style="line-height:1.8;">=</span> InvokeDynamic      <span class="hljs-variable" style="color:#008000;line-height:1.8;">#0</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#37</span>         <span class="hljs-comment" style="color:#008000;line-height:1.8;">// #0:invoke:(Ljava/lang/Class;Ljava/lang/Class;[Ljava/lang/String;)Ljava/lang/Object;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#39</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               args
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#40</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#41</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               run
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#42</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()Ljava/lang/Object;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#43</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               java/lang/Throwable
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#44</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#43</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/Throwable</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#45</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               addtwo
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#46</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#47</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               plus
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#48</span> <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>             <span class="hljs-variable" style="color:#008000;line-height:1.8;">#47</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// plus</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#49</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#35</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#46</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// invoke:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#50</span> <span class="hljs-subst" style="line-height:1.8;">=</span> InvokeDynamic      <span class="hljs-variable" style="color:#008000;line-height:1.8;">#1</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#49</span>         <span class="hljs-comment" style="color:#008000;line-height:1.8;">// #1:invoke:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#51</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               a
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#52</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Ljava/lang/Object;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#53</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               b
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#54</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               <span class="hljs-variable" style="color:#008000;line-height:1.8;">$getStaticMetaClass</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#55</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()Lgroovy/lang/MetaClass;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#56</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               java/lang/Object
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#57</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#56</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/Object</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#58</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               getClass
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#59</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               ()Ljava/lang/Class;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#60</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#58</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#59</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// getClass:()Ljava/lang/Class;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#61</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#57</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#60</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// java/lang/Object.getClass:()Ljava/lang/Class;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#62</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/runtime/ScriptBytecodeAdapter
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#63</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#62</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/ScriptBytecodeAdapter</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#64</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               initMetaClass
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#65</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Object;)Lgroovy/lang/MetaClass;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#66</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#64</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#65</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// initMetaClass:(Ljava/lang/Object;)Lgroovy/lang/MetaClass;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#67</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#63</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#66</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/runtime/ScriptBytecodeAdapter.initMetaClass:(Ljava/lang/Object;)Lgroovy/lang/MetaClass;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#68</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#6</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#7</span>          <span class="hljs-comment" style="color:#008000;line-height:1.8;">// $staticClassInfo:Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#69</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Fieldref           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#68</span>         <span class="hljs-comment" style="color:#008000;line-height:1.8;">// demo.$staticClassInfo:Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#70</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               org/codehaus/groovy/reflection/ClassInfo
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#71</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Class              <span class="hljs-variable" style="color:#008000;line-height:1.8;">#70</span>            <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/reflection/ClassInfo</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#72</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               getClassInfo
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#73</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               (Ljava/lang/Class;)Lorg/codehaus/groovy/reflection/ClassInfo;
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#74</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#72</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#73</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// getClassInfo:(Ljava/lang/Class;)Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#75</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#71</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#74</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/reflection/ClassInfo.getClassInfo:(Ljava/lang/Class;)Lorg/codehaus/groovy/reflection/ClassInfo;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#76</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               getMetaClass
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#77</span> <span class="hljs-subst" style="line-height:1.8;">=</span> NameAndType        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#76</span>:<span class="hljs-variable" style="color:#008000;line-height:1.8;">#55</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// getMetaClass:()Lgroovy/lang/MetaClass;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#78</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Methodref          <span class="hljs-variable" style="color:#008000;line-height:1.8;">#71</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-variable" style="color:#008000;line-height:1.8;">#77</span>        <span class="hljs-comment" style="color:#008000;line-height:1.8;">// org/codehaus/groovy/reflection/ClassInfo.getMetaClass:()Lgroovy/lang/MetaClass;</span>
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#79</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               Code
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#80</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               LocalVariableTable
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#81</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               StackMapTable
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#82</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               LineNumberTable
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#83</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               BootstrapMethods
+  <span class="hljs-variable" style="color:#008000;line-height:1.8;">#84</span> <span class="hljs-subst" style="line-height:1.8;">=</span> Utf8               SourceFile
+{
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">private</span> static org<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>codehaus<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>groovy<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>reflection<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>ClassInfo <span class="hljs-variable" style="color:#008000;line-height:1.8;">$staticClassInfo</span>;
+    flags: ACC_PRIVATE, ACC_STATIC, ACC_SYNTHETIC
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> static transient boolean __<span class="hljs-variable" style="color:#008000;line-height:1.8;">$stMC</span>;
+    flags: ACC_PUBLIC, ACC_STATIC, ACC_TRANSIENT, ACC_SYNTHETIC
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> demo();
+    flags: ACC_PUBLIC
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: aload_0       
+         <span class="hljs-number" style="line-height:1.8;">1</span>: invokespecial <span class="hljs-variable" style="color:#008000;line-height:1.8;">#13</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method groovy/lang/Script."&lt;init&gt;":()V</span>
+         <span class="hljs-number" style="line-height:1.8;">4</span>: <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span>        
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">4</span>       <span class="hljs-number" style="line-height:1.8;">0</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  this   Ldemo;
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> demo(groovy<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Binding);
+    flags: ACC_PUBLIC
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">2</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: aload_0       
+         <span class="hljs-number" style="line-height:1.8;">1</span>: aload_1       
+         <span class="hljs-number" style="line-height:1.8;">2</span>: invokespecial <span class="hljs-variable" style="color:#008000;line-height:1.8;">#18</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// Method groovy/lang/Script."&lt;init&gt;":(Lgroovy/lang/Binding;)V</span>
+         <span class="hljs-number" style="line-height:1.8;">5</span>: <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span>        
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">0</span>       <span class="hljs-number" style="line-height:1.8;">5</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  this   Ldemo;
+               <span class="hljs-number" style="line-height:1.8;">0</span>       <span class="hljs-number" style="line-height:1.8;">5</span>     <span class="hljs-number" style="line-height:1.8;">1</span> context   Lgroovy/lang/Binding;
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> static <span class="hljs-literal" style="color:rgb(163,21,21);line-height:1.8;">void</span> main(java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span><span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span><span class="hljs-attribute" style="color:rgb(163,21,21);line-height:1.8;">...</span>);
+    flags: ACC_PUBLIC, ACC_STATIC, ACC_VARARGS
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">3</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: ldc           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#24</span>                 <span class="hljs-comment" style="color:#008000;line-height:1.8;">// class org/codehaus/groovy/runtime/InvokerHelper</span>
+         <span class="hljs-number" style="line-height:1.8;">2</span>: ldc           <span class="hljs-variable" style="color:#008000;line-height:1.8;">#2</span>                  <span class="hljs-comment" style="color:#008000;line-height:1.8;">// class demo</span>
+         <span class="hljs-number" style="line-height:1.8;">4</span>: aload_0       
+         <span class="hljs-number" style="line-height:1.8;">5</span>: invokedynamic <span class="hljs-variable" style="color:#008000;line-height:1.8;">#38</span>,  <span class="hljs-number" style="line-height:1.8;">0</span>             <span class="hljs-comment" style="color:#008000;line-height:1.8;">// InvokeDynamic #0:invoke:(Ljava/lang/Class;Ljava/lang/Class;[Ljava/lang/String;)Ljava/lang/Object;</span>
+        <span class="hljs-number" style="line-height:1.8;">10</span>: pop           
+        <span class="hljs-number" style="line-height:1.8;">11</span>: <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span>        
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">0</span>      <span class="hljs-number" style="line-height:1.8;">11</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  args   <span class="hljs-preprocessor" style="line-height:1.8;">[</span>Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;
+
+  <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> java<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>lang<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>Object run();
+    flags: ACC_PUBLIC
+    Code:
+      <span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">stack</span><span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>, locals<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>, args_size<span class="hljs-subst" style="line-height:1.8;">=</span><span class="hljs-number" style="line-height:1.8;">1</span>
+         <span class="hljs-number" style="line-height:1.8;">0</span>: aconst_null   
+         <span class="hljs-number" style="line-height:1.8;">1</span>: areturn       
+         <span class="hljs-number" style="line-height:1.8;">2</span>: nop           
+         <span class="hljs-number" style="line-height:1.8;">3</span>: athrow        
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+               <span class="hljs-number" style="line-height:1.8;">0</span>       <span class="hljs-number" style="line-height:1.8;">2</span>     <span class="hljs-number" style="line-height:1.8;">0</span>  this   Ldemo;
+      StackMapTable: number_of_entries <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-number" style="line-height:1.8;">1</span>
+           frame_type <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-number" style="line-height:1.8;">255</span> <span class="hljs-comment" style="color:#008000;line-height:1.8;">/* full_frame */</span>
+          offset_delta <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-number" style="line-height:1.8;">2</span>
+          locals <span class="hljs-subst" style="line-height:1.8;">=</span> <span class="hljs-preprocessor" style="line-height:1.8;">[</span><span class="hljs-preprocessor" style="line-height:1.8;">]</span><span class="hljs-markup" style="line-height:1.8;"> stack = </span><span class="hljs-preprocessor" style="line-height:1.8;">[</span> class java/lang/Throwable <span class="hljs-preprocessor" style="line-height:1.8;">]</span><span class="hljs-markup" style="line-height:1.8;"> public java.lang.Object addtwo(java.lang.Object, java.lang.Object); flags: ACC_PUBLIC Code: stack=2, locals=3, args_size=3 0: aload_1 1: aload_2 2: invokedynamic #50, 0 // InvokeDynamic #1:invoke:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object; 7: areturn 8: nop 9: athrow LocalVariableTable: Start Length Slot Name Signature 0 8 0 this Ldemo; 0 8 1 a Ljava/lang/Object; 0 8 2 b Ljava/lang/Object; LineNumberTable: line 2: 0 StackMapTable: number_of_entries = 1 frame_type = 255 /* full_frame */ offset_delta = 8 locals = </span><span class="hljs-preprocessor" style="line-height:1.8;">[</span><span class="hljs-preprocessor" style="line-height:1.8;">]</span><span class="hljs-markup" style="line-height:1.8;"> stack = </span><span class="hljs-preprocessor" style="line-height:1.8;">[</span> class java/lang/Throwable <span class="hljs-preprocessor" style="line-height:1.8;">]</span><span class="hljs-markup" style="line-height:1.8;"> protected groovy.lang.MetaClass $getStaticMetaClass(); flags: ACC_PROTECTED, ACC_SYNTHETIC Code: stack=2, locals=2, args_size=1 0: aload_0 1: invokevirtual #61 // Method java/lang/Object.getClass:()Ljava/lang/Class; 4: ldc #2 // class demo 6: if_acmpeq 14 9: aload_0 10: invokestatic #67 // Method org/codehaus/groovy/runtime/ScriptBytecodeAdapter.initMetaClass:(Ljava/lang/Object;)Lgroovy/lang/MetaClass; 13: areturn 14: getstatic #69 // Field $staticClassInfo:Lorg/codehaus/groovy/reflection/ClassInfo; 17: astore_1 18: aload_1 19: ifnonnull 34 22: aload_0 23: invokevirtual #61 // Method java/lang/Object.getClass:()Ljava/lang/Class; 26: invokestatic #75 // Method org/codehaus/groovy/reflection/ClassInfo.getClassInfo:(Ljava/lang/Class;)Lorg/codehaus/groovy/reflection/ClassInfo; 29: dup 30: astore_1 31: putstatic #69 // Field $staticClassInfo:Lorg/codehaus/groovy/reflection/ClassInfo; 34: aload_1 35: invokevirtual #78 // Method org/codehaus/groovy/reflection/ClassInfo.getMetaClass:()Lgroovy/lang/MetaClass; 38: areturn StackMapTable: number_of_entries = 2 frame_type = 14 /* same */ frame_type = 252 /* append */ offset_delta = 19 locals = </span><span class="hljs-preprocessor" style="line-height:1.8;">[</span> class org/codehaus/groovy/reflection/ClassInfo <span class="hljs-preprocessor" style="line-height:1.8;">]</span><span class="hljs-markup" style="line-height:1.8;"> }</span></code></pre> 
+    <p>能够看到生成的字节码确实比不使用<code>invokedynamic</code>要少得多。</p> 
+    <p>跟上面一样，人肉反编译，<code>invokedynamic</code>相关的runtime大概是这么来使用的。</p> 
+    <pre class="prettyprint"><code class="language-java hljs" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">private</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">static</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">void</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">addtwo</span>(Object o1, Object o2) <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">throws</span> Throwable {
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        MethodType mt = MethodType.methodType(Object.class,
+                Object.class, Object.class);
+        java.lang.invoke.CallSite callSite =
+                IndyInterface.bootstrap(lookup, <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"invoke"</span>, mt, <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"plus"</span>, <span class="hljs-number" style="line-height:1.8;">0</span>);
+        MethodHandle mh = callSite.getTarget();
+        System.out.println(mh.invoke(o1, o2));
+    }</code></pre> 
+    <p>有一点值得说明的是，通过字节码能够看到，除了bootstrap方法默认的三个參数。groovyc还多生成了两个參数。</p> 
+    <pre class="prettyprint"><code class="language-bytecode hljs http" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">         <span class="hljs-attribute" style="color:rgb(163,21,21);line-height:1.8;">2</span>: <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">invokedynamic #50, 0 // InvokeDynamic #1:invoke:(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;</span></code></pre> 
+    <pre class="prettyprint"><code class="language-bytecode hljs lasso" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">    <span class="hljs-number" style="line-height:1.8;">1</span>: <span class="hljs-variable" style="color:#008000;line-height:1.8;">#31</span> invokestatic org/codehaus/groovy/vmplugin/v7/IndyInterface<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">.</span>bootstrap:(Ljava/lang/invoke/MethodHandles<span class="hljs-variable" style="color:#008000;line-height:1.8;">$Lookup</span>;Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;Ljava/lang/invoke/MethodType;Ljava/lang/<span class="hljs-built_in" style="color:rgb(0,0,255);line-height:1.8;">String</span>;I)Ljava/lang/invoke/CallSite;
+      Method arguments:
+        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#48</span> plus
+        <span class="hljs-variable" style="color:#008000;line-height:1.8;">#34</span> <span class="hljs-number" style="line-height:1.8;">0</span></code></pre> 
+    <p>也就是说给bootstrap方法传递的<code>methodName</code>是<code>invoke</code>，<code>methodType</code>是<code>(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object</code>，而我们关心的方法名。也就是<code>plus</code>。是作为额外的參数传进去的。所以我们上面的栗子中对bootstrap方法的调用才会是<code>IndyInterface.bootstrap(lookup, "invoke", mt, "plus", 0)</code>这个样子的。假设是要实现减法。则能够这么写<code>IndyInterface.bootstrap(lookup, "invoke", mt, "minus", 0)</code>。也就是通过额外的參数来进行方法的分发。至于为什么要这么来实现。须要后面再研究下Groovy的runtime看看了。</p> 
+    <h2 style="color:rgb(0,0,0);line-height:1.5;font-size:21px;">简单实现</h2> 
+    <p>Groovy的runtime是比較复杂的，以下我们用相关的API实现一个简单一点的，仅仅能进行整数的加法与字符串的加法。</p> 
+    <p></p> 
+    <pre class="prettyprint"><code class="language-java hljs" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);"><span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> <span class="hljs-class" style="line-height:1.8;"><span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">class</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">IntegerOps</span> {</span>
+    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">static</span> Integer <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">adder</span>(Integer x, Integer y) {
+        <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span> x + y;
+    }
+}</code></pre> 
+    <pre class="prettyprint"><code class="language-java hljs" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);"><span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> <span class="hljs-class" style="line-height:1.8;"><span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">class</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">StringOps</span> {</span>
+    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">static</span> String <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">adder</span>(String x, String y) {
+        <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span> x + y;
+    }
+}</code></pre> 
+    <pre class="prettyprint"><code class="language-java hljs" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);"><span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> <span class="hljs-class" style="line-height:1.8;"><span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">class</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">BootstrapMethod</span> {</span>
+
+    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">public</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">static</span> CallSite <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">link</span>(MethodHandles.Lookup callerClass,
+                                String dynMethodName,
+                                MethodType dynMethodType)
+            <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">throws</span> Throwable {
+        <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">if</span>(<span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"adder"</span>.equals(dynMethodName)) {
+
+            MethodHandle mh;
+            Class receiverType = dynMethodType.parameterType(<span class="hljs-number" style="line-height:1.8;">0</span>);
+            <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">if</span>(receiverType.equals(Integer.class)) {
+                mh = callerClass.findStatic(
+                        IntegerOps.class,
+                        <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"adder"</span>,
+                        MethodType.methodType(Integer.class, Integer.class, Integer.class));
+            } <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">else</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">if</span>(receiverType.equals(String.class)) {
+                mh = callerClass.findStatic(
+                        StringOps.class,
+                        <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"adder"</span>,
+                        MethodType.methodType(String.class, String.class, String.class));
+            } <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">else</span> {
+                <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">null</span>;
+            }
+            <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">new</span> ConstantCallSite(mh);
+
+        }
+        <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">return</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">null</span>;
+    }
+
+}</code></pre> 
+    <pre class="prettyprint"><code class="language-java hljs" style="line-height:1.8;vertical-align:middle;font-family:'Courier New', sans-serif;font-size:12px;border:1px solid rgb(204,204,204);">    <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">private</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">static</span> <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">void</span> <span class="hljs-title" style="color:rgb(163,21,21);line-height:1.8;">addtwo</span>(Object o1, Object o2) <span class="hljs-keyword" style="color:rgb(0,0,255);line-height:1.8;">throws</span> Throwable {
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        MethodType mt = MethodType.methodType(o1.getClass(),
+                o1.getClass(), o2.getClass());
+        java.lang.invoke.CallSite callSite =
+                BootstrapMethod.link(lookup, <span class="hljs-string" style="color:rgb(163,21,21);line-height:1.8;">"adder"</span>, mt);
+        MethodHandle mh = callSite.getTarget();
+        System.out.println(mh.invoke(o1, o2));
+    }</code></pre> 
+    <p>有两点须要说明。首先是<code>MethodType</code>，栗子的bootstrap方法须要依据<code>MethodType</code>来进行方法分发（这里我们仅仅依据第一个參数的类型来推断）。究竟如今是要进行整数的加法，还是要进行字符串的加法。</p> 
+    <p>但因为这个<code>MethodType</code>是<code>invokedynamic</code>指令的參数，因此个人认为这样设计事实上是有问题的，所以groovyc也才会直接传的<code>(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object</code>。</p> 
+    <p>另外一点是<code>MethodHandle</code>的问题。当我们执行<code>addtwo(7, 7L)</code>也就是第二个參数传的是个<code>long</code>型就跪了。<code>java.lang.ClassCastException: Cannot cast java.lang.Long to java.lang.Integer</code>，须要<a href="http://docs.oracle.com/javase/7/docs/api/java/lang/invoke/MethodHandle.html#asType%28java.lang.invoke.MethodType%29" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);"><code>MethodHandle#asType</code></a>转换一下。这里就不赘述了，想了解的同学看下API文档就清楚了。</p> 
+    <h2 style="color:rgb(0,0,0);line-height:1.5;font-size:21px;">參考资料</h2> 
+    <ul>
+     <li style="list-style:disc;"><a href="http://docs.oracle.com/javase/8/docs/technotes/guides/vm/multiple-language-support.html" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">http://docs.oracle.com/javase/8/docs/technotes/guides/vm/multiple-language-support.html</a></li> 
+     <li style="list-style:disc;"><a href="http://docs.oracle.com/javase/7/docs/api/java/lang/invoke/MethodHandle.html" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">http://docs.oracle.com/javase/7/docs/api/java/lang/invoke/MethodHandle.html</a></li> 
+     <li style="list-style:disc;"><a href="http://docs.oracle.com/javase/specs/jvms/se7/html/jvms-6.html#jvms-6.5.invokedynamic" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">http://docs.oracle.com/javase/specs/jvms/se7/html/jvms-6.html#jvms-6.5.invokedynamic</a></li> 
+     <li style="list-style:disc;"><a href="http://docs.groovy-lang.org/docs/groovy-2.4.0/pdf/wiki-snapshot.pdf" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">http://docs.groovy-lang.org/docs/groovy-2.4.0/pdf/wiki-snapshot.pdf</a></li> 
+    </ul>
+   </div> 
+   <div> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;">版权声明：本文博主原创文章。博客，未经同意不得转载。</p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p><font color="#333333"><span style="font-size:12px;">本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/4908670.html，如需转载请自行联系原作者</span></font></p> 
+    <div style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+     <br>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

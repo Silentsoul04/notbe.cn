@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Spring Cloud构建微服务架构：服务网关（基础）【Dalston版】 « NotBeCN</title>
+  <meta name="description" content="             通过之前几篇Spring Cloud中几个核心组件的介绍，我们已经可以构建一个简略的（不够完善）微服务架构了。比如下图所示：                                    alt            我们使用Spring Cloud Netflix中的Eurek...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/08/27/1557728755511.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Spring Cloud构建微服务架构：服务网关（基础）【Dalston版】</h1>
+    <p class="post-meta">Aug 27, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>通过之前几篇Spring Cloud中几个核心组件的介绍，我们已经可以构建一个简略的（不够完善）微服务架构了。比如下图所示：</p> 
+   <div class="image-package"> 
+    <div class="image-container"> 
+     <div class="image-container-fill"></div> 
+     <div class="image-view"></div> 
+    </div> 
+    <div class="image-caption">
+     alt
+    </div> 
+   </div> 
+   <p>我们使用Spring Cloud Netflix中的Eureka实现了服务注册中心以及服务注册与发现；而服务间通过Ribbon或Feign实现服务的消费以及均衡负载；通过Spring Cloud Config实现了应用多环境的外部化配置以及版本管理。为了使得服务集群更为健壮，使用Hystrix的融断机制来避免在微服务架构中个别服务出现异常时引起的故障蔓延。</p> 
+   <p>在该架构中，我们的服务集群包含：内部服务Service A和Service B，他们都会注册与订阅服务至Eureka Server，而Open Service是一个对外的服务，通过均衡负载公开至服务调用方。本文我们把焦点聚集在对外服务这块，这样的实现是否合理，或者是否有更好的实现方式呢？</p> 
+   <p>先来说说这样架构需要做的一些事儿以及存在的不足：</p> 
+   <ul>
+    <li>首先，破坏了服务无状态特点。为了保证对外服务的安全性，我们需要实现对服务访问的权限控制，而开放服务的权限控制机制将会贯穿并污染整个开放服务的业务逻辑，这会带来的最直接问题是，破坏了服务集群中REST API无状态的特点。从具体开发和测试的角度来说，在工作中除了要考虑实际的业务逻辑之外，还需要额外可续对接口访问的控制处理。</li> 
+    <li>其次，无法直接复用既有接口。当我们需要对一个即有的集群内访问接口，实现外部服务访问时，我们不得不通过在原有接口上增加校验逻辑，或增加一个代理调用来实现权限控制，无法直接复用原有的接口。</li> 
+   </ul>
+   <p>面对类似上面的问题，我们要如何解决呢？下面进入本文的正题：服务网关！</p> 
+   <p>为了解决上面这些问题，我们需要将权限控制这样的东西从我们的服务单元中抽离出去，而最适合这些逻辑的地方就是处于对外访问最前端的地方，我们需要一个更强大一些的均衡负载器，它就是本文将来介绍的：服务网关。</p> 
+   <p>服务网关是微服务架构中一个不可或缺的部分。通过服务网关统一向外系统提供REST API的过程中，除了具备服务路由、均衡负载功能之外，它还具备了权限控制等功能。Spring Cloud Netflix中的Zuul就担任了这样的一个角色，为微服务架构提供了前门保护的作用，同时将权限控制这些较重的非业务逻辑内容迁移到服务路由层面，使得服务集群主体能够具备更高的可复用性和可测试性。</p> 
+   <p>下面我们通过实例例子来使用一下Zuul来作为服务的路有功能。</p> 
+   <h2>准备工作</h2> 
+   <p>在构建服务网关之前，我们先准备一下网关内部的微服务，可以直接使用前几篇编写的内容，比如：</p> 
+   <ul>
+    <li>eureka-client</li> 
+    <li>eureka-consumer</li> 
+   </ul>
+   <p>由于我们用了基于eureka的服务，所以我们可以使用我的公益注册中心：<a href="https://link.jianshu.com?t=http://eureka.didispace.com/" rel="nofollow">http://eureka.didispace.com/</a></p> 
+   <p>这些服务可从我的仓库中直接获取：</p> 
+   <ul>
+    <li>Github：<a href="https://link.jianshu.com?t=https://github.com/dyc87112/SpringCloud-Learning" rel="nofollow">https://github.com/dyc87112/SpringCloud-Learning</a> </li> 
+    <li>码云：<a href="https://link.jianshu.com?t=https://gitee.com/didispace/SpringCloud-Learning" rel="nofollow">https://gitee.com/didispace/SpringCloud-Learning</a> </li> 
+   </ul>
+   <p>在启动了<code>eureka-client</code>和<code>eureka-consumer</code>的实例之后，所有的准备工作就以就绪，下面我们来试试使用Spring Cloud Zuul来实现服务网关的功能。</p> 
+   <h2>构建服务网关</h2> 
+   <p>使用Spring Cloud Zuul来构建服务网关的基础步骤非常简单，只需要下面几步：</p> 
+   <ul>
+    <li>创建一个基础的Spring Boot项目，命名为：<code>api-gateway</code>。并在<code>pom.xml</code>中引入依赖：</li> 
+   </ul>
+   <pre><code class="xml">&lt;parent&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+  &lt;version&gt;1.5.4.RELEASE&lt;/version&gt;
+  &lt;relativePath/&gt;
+&lt;/parent&gt;
+
+&lt;dependencies&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-cloud-starter-zuul&lt;/artifactId&gt;
+  &lt;/dependency&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-cloud-starter-eureka&lt;/artifactId&gt;
+  &lt;/dependency&gt;
+&lt;/dependencies&gt;
+
+&lt;dependencyManagement&gt;
+  &lt;dependencies&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+      &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+      &lt;version&gt;Dalston.SR1&lt;/version&gt;
+      &lt;type&gt;pom&lt;/type&gt;
+      &lt;scope&gt;import&lt;/scope&gt;
+    &lt;/dependency&gt;
+  &lt;/dependencies&gt;
+&lt;/dependencyManagement&gt;
+</code></pre> 
+   <ul>
+    <li>创建应用主类，并使用<code>@EnableZuulProxy</code>注解开启Zuul的功能。</li> 
+   </ul>
+   <pre><code class="java">@EnableZuulProxy
+@SpringCloudApplication
+public class Application {
+  
+  public static void main(String[] args) {
+    new SpringApplicationBuilder(Application.class).web(true).run(args);
+  }
+  
+}
+</code></pre> 
+   <ul>
+    <li>创建配置文件<code>application.yaml</code>，并加入服务名、端口号、eureka注册中心的地址：</li> 
+   </ul>
+   <pre><code class="yaml">spring:
+  application:
+    name: api-gateway
+
+server:
+  port: 1101
+
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://eureka.didispace.com/eureka/
+</code></pre> 
+   <p>到这里，一个基于Spring Cloud Zuul服务网关就已经构建完毕。启动该应用，一个默认的服务网关就构建完毕了。由于Spring Cloud Zuul在整合了Eureka之后，具备默认的服务路由功能，即：当我们这里构建的<code>api-gateway</code>应用启动并注册到eureka之后，服务网关会发现上面我们启动的两个服务<code>eureka-client</code>和<code>eureka-consumer</code>，这时候Zuul就会创建两个路由规则。每个路由规则都包含两部分，一部分是外部请求的匹配规则，另一部分是路由的服务ID。针对当前示例的情况，Zuul会创建下面的两个路由规则：</p> 
+   <ul>
+    <li>转发到<code>eureka-client</code>服务的请求规则为：<code>/eureka-client/**</code> </li> 
+    <li>转发到<code>eureka-consumer</code>服务的请求规则为：<code>/eureka-consumer/**</code> </li> 
+   </ul>
+   <p>最后，我们可以通过访问<code>1101</code>端口的服务网关来验证上述路由的正确性：</p> 
+   <ul>
+    <li>比如访问：<a href="https://link.jianshu.com?t=http://localhost:1101/eureka-client/dc" rel="nofollow">http://localhost:1101/eureka-client/dc</a> ，该请求将最终被路由到<code>eureka-client</code>的<code>/dc</code>接口上。</li> 
+   </ul>
+   <h2>本篇小结</h2> 
+   <p>本篇，我们介绍了构建服务网关的基础。通过上面的构建内容，我们已经为所有内部服务提供了一个统一的对外入口，同时对于服务的路由都是自动创建了，减少了传统方式大量的运维配置工作。</p> 
+   <p>但是，本篇只是入门小文，更多关于Spring Cloud Zuul的配置和使用将在后续陆续介绍。您也可以购买我的《Spring Cloud微服务实战》一书学习更多内容。</p> 
+   <h2>深入阅读</h2> 
+   <ul>
+    <li><a href="https://link.jianshu.com?t=http://blog.didispace.com/spring-cloud-source-zuul/" rel="nofollow">Spring Cloud源码分析（四）Zuul：核心过滤器</a></li> 
+    <li><a href="https://link.jianshu.com?t=http://blog.didispace.com/spring-cloud-zuul-cookie-redirect/" rel="nofollow">Spring Cloud实战小贴士：Zuul处理Cookie和重定向</a></li> 
+    <li><a href="https://link.jianshu.com?t=http://blog.didispace.com/spring-cloud-zuul-exception/" rel="nofollow">Spring Cloud实战小贴士：Zuul统一异常处理（一）</a></li> 
+    <li><a href="https://link.jianshu.com?t=http://blog.didispace.com/spring-cloud-zuul-exception-2/" rel="nofollow">Spring Cloud实战小贴士：Zuul统一异常处理（二）</a></li> 
+    <li><a href="https://link.jianshu.com?t=http://blog.didispace.com/spring-cloud-zuul-exception-3/" rel="nofollow">Spring Cloud实战小贴士：Zuul统一异常处理（三）【Dalston版】</a></li> 
+   </ul>
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

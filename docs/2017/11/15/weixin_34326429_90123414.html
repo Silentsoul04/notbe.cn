@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>基于ZooKeeper的分布式锁和队列 « NotBeCN</title>
+  <meta name="description" content="             在分布式系统中，往往需要一些分布式同步原语来做一些协同工作，上一篇文章介绍了Zookeeper的基本原理，本文介绍下基于Zookeeper的Lock和Queue的实现，主要代码都来自Zookeeper的官方recipe。    锁（Lock）    完全分布式锁是全局同步的，这意味着在任...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_34326429_90123414.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">基于ZooKeeper的分布式锁和队列</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在分布式系统中，往往需要一些分布式同步原语来做一些协同工作，<a href="http://www.cnblogs.com/luxiaoxun/p/4887452.html" rel="nofollow" style="color:rgb(0,0,0);">上一篇</a>文章介绍了Zookeeper的基本原理，本文介绍下基于Zookeeper的Lock和Queue的实现，主要代码都来自Zookeeper的官方recipe。</p> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">锁（Lock）</h3> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">完全分布式锁是全局同步的，这意味着在任何时刻没有两个客户端会同时认为它们都拥有相同的锁，使用 Zookeeper 可以实现分布式锁，需要首先定义一个锁节点（lock root node）。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">需要获得锁的客户端按照以下步骤来获取锁：</p> 
+   <ol style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">
+    <li style="list-style-type:decimal;">保证锁节点（lock root node）这个父根节点的存在，这个节点是每个要获取lock客户端共用的，这个节点是PERSISTENT的。</li> 
+    <li style="list-style-type:decimal;"> <p>第一次需要创建本客户端要获取lock的节点，调用&nbsp;create( )，并设置 节点为EPHEMERAL_SEQUENTIAL类型，表示该节点为临时的和顺序的。如果获取锁的节点挂掉，则该节点自动失效，可以让其他节点获取锁。<em><br></em></p> </li> 
+    <li style="list-style-type:decimal;"> <p>在父锁节点（lock root node）上调用&nbsp;getChildren( )&nbsp;，不需要设置监视标志。 (为了避免“羊群效应”).</p> </li> 
+    <li style="list-style-type:decimal;"> <p>按照Fair竞争的原则，将步骤3中的子节点（要获取锁的节点）按照节点顺序的大小做排序，取出编号最小的一个节点做为lock的owner，判断自己的节点id<br> 是否就为owner id，如果是则返回，lock成功。如果不是则<span style="line-height:1.5;">调用&nbsp;</span>exists( )监听比自己小的前一位的id，关注它锁释放的操作（也就是exist watch）。</p> </li> 
+    <li style="list-style-type:decimal;"> <p><span style="line-height:1.5;">如果第4步监听exist的watch被触发，则继续按4中的原则判断自己是否能获取到lock。</span></p> </li> 
+   </ol>
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">释放锁：需要释放锁的客户端只需要删除在第2步中创建的节点即可。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">注意事项：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">一个节点的删除只会导致一个客户端被唤醒，因为每个节点只被一个客户端watch，这避免了“羊群效应”。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">一个分布式lock的实现：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <img class="code_img_closed" src="https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif" alt="" style="border:none;vertical-align:middle;">&nbsp;
+    <span class="cnblogs_code_collapse" style="border-width:1px;border-style:solid;border-color:#808080;font-size:12px;line-height:1.5;">View Code</span> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">注意这里的lock，可能会失败，会尝试多次，每次失败后会Sleep一段时间。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">PS：官方的代码有个小bug，id和ownerId应该都是全路径，即id = dir + "/" + name;原代码在findPrefixInChildren里有问题。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">用于辅助节点大小顺序排序的类：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <img class="code_img_closed" src="https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif" alt="" style="border:none;vertical-align:middle;">&nbsp;
+    <span class="cnblogs_code_collapse" style="border-width:1px;border-style:solid;border-color:#808080;font-size:12px;line-height:1.5;">View Code</span> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">PS：这个ZNodeName类是被我修改过的，官方的代码比较有问题，官方的先用了节点路径的前缀prefix比较，再去比较sequence序号是不对的，这样会导致sessionid小的总是能拿到锁。应该直接比较全局有序的sequence序号，小的先拿到锁，先到先得。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Zookeeper统一操作ZooKeeperOperation接口：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <img class="code_img_closed" src="https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif" alt="" style="border:none;vertical-align:middle;">&nbsp;
+    <span class="cnblogs_code_collapse" style="border-width:1px;border-style:solid;border-color:#808080;font-size:12px;line-height:1.5;">View Code</span> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">因为Zookeeper的操作会失败，这个类封装了多次尝试：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <img class="code_img_closed" src="https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif" alt="" style="border:none;vertical-align:middle;">&nbsp;
+    <span class="cnblogs_code_collapse" style="border-width:1px;border-style:solid;border-color:#808080;font-size:12px;line-height:1.5;">View Code</span> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这个类是本客户端获取到lock和释放lock的时候触发操作的接口：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <img class="code_img_closed" src="https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif" alt="" style="border:none;vertical-align:middle;">&nbsp;
+    <span class="cnblogs_code_collapse" style="border-width:1px;border-style:solid;border-color:#808080;font-size:12px;line-height:1.5;">View Code</span> 
+   </div> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">队列（Queue）</h3> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">分布式队列是通用的数据结构，为了在 Zookeeper 中实现分布式队列，首先需要指定一个 Znode 节点作为队列节点（queue node）， 各个分布式客户端通过调用 create() 函数向队列中放入数据，调用create()时节点路径名带"qn-"结尾，并设置顺序（<em>sequence</em>）节点标志。 由于设置了节点的顺序标志，新的路径名具有以下字符串模式："_path-to-queue-node_/qn-X"，X 是唯一自增号。需要从队列中获取数据/移除数据的客户端首先调用&nbsp;getChildren()&nbsp;函数，有数据则获取（获取数据后可以删除也可以不删），没有则在队列节点（queue node）上将&nbsp;<em>watch</em>&nbsp;设置为 true，等待触发并处理最小序号的节点（即从序号最小的节点中取数据）。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">实现步骤基本如下：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">前提：需要一个队列root节点dir</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">入队：使用create()创建节点，将共享数据data放在该节点上，节点类型为PERSISTENT_SEQUENTIAL，永久顺序性的（也可以设置为临时的，看需求）。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">出队：因为队列可能为空，2种方式处理：一种如果为空则wait等待，一种返回异常。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">等待方式：这里使用了CountDownLatch的等待和Watcher的通知机制，使用了TreeMap的排序获取节点顺序最小的数据（FIFO）。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">抛出异常：getChildren()获取队列数据时，如果size==0则抛出异常。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">一个分布式Queue的实现，详细代码：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <img class="code_img_closed" src="https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif" alt="" style="border:none;vertical-align:middle;">&nbsp;
+    <span class="cnblogs_code_collapse" style="border-width:1px;border-style:solid;border-color:#808080;font-size:12px;line-height:1.5;">View Code</span> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><strong style="line-height:1.5;">Apache Curator</strong></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Curator是一个封装Zookeeper操作的库，使用这个库的好处是Curator帮你管理和Zookeeper的连接，当连接有问题时会自动重试（retry）。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>RetryPolicy retryPolicy = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span> ExponentialBackoffRetry(1000, 3<span style="font-size:12px;line-height:1.5;">)
+CuratorFramework client </span>=<span style="font-size:12px;line-height:1.5;"> CuratorFrameworkFactory.newClient(zookeeperConnectionString, retryPolicy);
+client.start();</span></pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Curator已经封装了一些常用的Recipes</p> 
+   <h4 style="font-size:15px;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">Distributed Lock</h4> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>InterProcessMutex lock = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> InterProcessMutex(client, lockPath);
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span><span style="font-size:12px;line-height:1.5;"> ( lock.acquire(maxWait, waitUnit) ) 
+{
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">try</span><span style="font-size:12px;line-height:1.5;"> 
+    {
+        </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> do some work inside of the critical section here</span>
+<span style="font-size:12px;line-height:1.5;">    }
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">finally</span><span style="font-size:12px;line-height:1.5;">
+    {
+        lock.release();
+    }
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h4 style="font-size:15px;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">Leader Election</h4> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>LeaderSelectorListener listener = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> LeaderSelectorListenerAdapter()
+{
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">public</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">void</span> takeLeadership(CuratorFramework client) <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">throws</span><span style="font-size:12px;line-height:1.5;"> Exception
+    {
+        </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> this callback will get called when you are the leader
+        </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> do whatever leader work you need to and only exit
+        </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> this method when you want to relinquish leadership</span>
+<span style="font-size:12px;line-height:1.5;">    }
+}
+
+LeaderSelector selector </span>= <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> LeaderSelector(client, path, listener);
+selector.autoRequeue();  </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> not required, but this is behavior that you will probably expect</span>
+selector.start();&nbsp;</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">参考：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">http://zookeeper.apache.org/doc/trunk/recipes.html</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">http://curator.apache.org/curator-recipes/index.html</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p><font color="#333333"><span style="font-size:15px;">&nbsp; &nbsp; 本文转自阿凡卢博客园博客，原文链接：http://www.cnblogs.com/luxiaoxun/p/4889764.html</span></font><span style="font-size:15px;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

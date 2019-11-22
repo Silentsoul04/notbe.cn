@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Apache Spark Jobs 性能调优 « NotBeCN</title>
+  <meta name="description" content="             当你开始编写 Apache Spark 代码或者浏览公开的 API 的时候，你会遇到各种各样术语，比如transformation，action，RDD(resilient distributed dataset)&nbsp;等等。 了解到这些是编写 Spark 代码的基础。 同样，当你...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/20/weixin_34032792_90132216.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Apache Spark Jobs 性能调优</h1>
+    <p class="post-meta">Nov 20, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">当你开始编写 Apache Spark 代码或者浏览公开的 API 的时候，你会遇到各种各样术语，比如<em>transformation</em>，<em>action</em>，<em>RDD(<em>resilient distributed dataset)</em></em>&nbsp;等等。 了解到这些是编写 Spark 代码的基础。 同样，当你任务开始失败或者你需要透过web界面去了解自己的应用为何如此费时的时候，你需要去了解一些新的名词：&nbsp;<em>job</em>,&nbsp;<em>stage</em>,&nbsp;<em>task</em>。对于这些新术语的理解有助于编写良好&nbsp;Spark 代码。这里的良好主要指更快的 Spark 程序。对于 Spark 底层的执行模型的了解对于写出效率更高的 Spark 程序非常有帮助。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">Spark 是如何执行程序的</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">一个 Spark 应用包括一个&nbsp;<em>driver</em>&nbsp;进程和若干个分布在集群的各个节点上的&nbsp;<em>executor</em>&nbsp;进程。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><em>driver</em>&nbsp;主要负责调度一些高层次的任务流（flow of work）。<em>exectuor</em>&nbsp;负责执行这些任务，这些任务以&nbsp;<em>task</em>&nbsp;的形式存在， 同时存储用户设置需要caching的数据。&nbsp;<em>task</em>&nbsp;和所有的&nbsp;<em>executor</em>&nbsp;的生命周期为整个程序的运行过程（如果使用了dynamic resource allocation 时可能不是这样的）。如何调度这些进程是通过集群管理应用完成的（比如YARN，Mesos，Spark Standalone），但是任何一个 Spark 程序都会包含一个&nbsp;<em>driver</em>&nbsp;和多个&nbsp;<em>executor</em>&nbsp;进程。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/434101/201702/434101-20170202153439933-1677638537.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在执行层次结构的最上方是一系列 Job。调用一个Spark内部的&nbsp;<em>action</em>&nbsp;会产生一个 Spark job 来完成它。 为了确定这些job实际的内容，Spark 检查&nbsp;<em>RDD</em>&nbsp;的DAG再计算出执行 plan 。这个 plan 以最远端的&nbsp;<em>RDD</em>&nbsp;为起点（最远端指的是对外没有依赖的&nbsp;<em>RDD</em>&nbsp;或者 数据已经缓存下来的&nbsp;<em>RDD</em>），产生结果&nbsp;<em>RDD</em>&nbsp;的&nbsp;<em>action</em>&nbsp;为结束 。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">执行的 plan 由一系列&nbsp;<em>stage</em>&nbsp;组成，<em>stage</em>&nbsp;是&nbsp;<em>job</em>&nbsp;的&nbsp;<em>transformation</em>&nbsp;的组合，<em>stage</em>&nbsp;对应于一系列&nbsp;<em>task</em>，&nbsp;<em>task</em>&nbsp;指的对于不同的数据集执行的相同代码。每个&nbsp;<em>stage</em>&nbsp;包含不需要&nbsp;<em>shuffle</em>&nbsp;数据的&nbsp;<em>transformation</em>&nbsp;的序列。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">什么决定数据是否需要&nbsp;<em>shuffle</em>&nbsp;？<em>RDD</em>&nbsp;包含固定数目的&nbsp;<em>partition</em>， 每个&nbsp;<em>partiton</em>&nbsp;包含若干的&nbsp;<em>record</em>。对于那些通过<em>narrow tansformation</em>（比如&nbsp;map&nbsp;和&nbsp;filter）返回的&nbsp;<em>RDD</em>，一个&nbsp;<em>partition</em>&nbsp;中的&nbsp;<em>record</em>&nbsp;只需要从父&nbsp;<em>RDD</em>&nbsp;对应的<em>partition</em>&nbsp;中的&nbsp;<em>record</em>&nbsp;计算得到。每个对象只依赖于父&nbsp;<em>RDD</em>&nbsp;的一个对象。有些操作（比如&nbsp;coalesce）可能导致一个&nbsp;<em>task</em>处理多个输入&nbsp;<em>partition</em>&nbsp;，但是这种&nbsp;<em>transformation</em>&nbsp;仍然被认为是&nbsp;<em>narrow</em>&nbsp;的，因为用于计算的多个输入&nbsp;<em>record</em>&nbsp;始终是来自有限个数的&nbsp;<em>partition</em>。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">然而 Spark 也支持需要&nbsp;<em>wide</em>&nbsp;依赖的&nbsp;<em>transformation</em>，比如&nbsp;groupByKey，reduceByKey。在这种依赖中，计算得到一个&nbsp;<em>partition</em>&nbsp;中的数据需要从父&nbsp;<em>RDD</em>&nbsp;中的多个&nbsp;<em>partition</em>&nbsp;中读取数据。所有拥有相同&nbsp;<em>key</em>&nbsp;的元组最终会被聚合到同一个<em>partition</em>&nbsp;中，被同一个&nbsp;<em>stage</em>&nbsp;处理。为了完成这种操作， Spark需要对数据进行&nbsp;<em>shuffle</em>，意味着数据需要在集群内传递，最终生成由新的&nbsp;<em>partition</em>&nbsp;集合组成的新的&nbsp;<em>stage</em>。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">举例，以下的代码中，只有一个&nbsp;<em>action</em>&nbsp;以及 从一个文本串下来的一系列&nbsp;<em>RDD</em>， 这些代码就只有一个&nbsp;<em>stage</em>，因为没有哪个操作需要从不同的&nbsp;<em>partition</em>&nbsp;里面读取数据。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>sc.textFile("someFile.txt"<span style="font-size:12px;line-height:1.5;">).
+  map(mapFunc).
+  flatMap(flatMapFunc).
+  filter(filterFunc).
+  count()</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">跟上面的代码不同，下面一段代码需要统计总共出现超过1000次的单词：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>val tokenized = sc.textFile(args(0)).flatMap(_.split(' '<span style="font-size:12px;line-height:1.5;">))
+val wordCounts </span>= tokenized.map((_, 1)).reduceByKey(_ +<span style="font-size:12px;line-height:1.5;"> _)
+val filtered </span>= wordCounts.filter(_._2 &gt;= 1000<span style="font-size:12px;line-height:1.5;">)
+val charCounts </span>= filtered.flatMap(_._1.toCharArray).map((_, 1<span style="font-size:12px;line-height:1.5;">)).
+  reduceByKey(_ </span>+<span style="font-size:12px;line-height:1.5;"> _)
+charCounts.collect()</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这段代码可以分成三个&nbsp;<em>stage</em>。recudeByKey&nbsp;操作是各&nbsp;<em>stage</em>&nbsp;之间的分界，因为计算&nbsp;recudeByKey&nbsp;的输出需要按照可以重新分配&nbsp;<em>partition</em>。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这里还有一个更加复杂的&nbsp;<em>transfromation</em>&nbsp;图，包含一个有多路依赖的&nbsp;<em>join transformation</em>。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/434101/201702/434101-20170202154052948-115546309.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">粉红色的框框展示了运行时使用的&nbsp;<em>stage</em>&nbsp;图。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/434101/201702/434101-20170202154130183-73123555.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">运行到每个&nbsp;<em>stage</em>&nbsp;的边界时，数据在父&nbsp;<em>stage</em>&nbsp;中按照&nbsp;<em>task</em>&nbsp;写到磁盘上，而在子&nbsp;<em>stage</em>&nbsp;中通过网络按照&nbsp;<em>task</em>&nbsp;去读取数据。这些操作会导致很重的网络以及磁盘的I/O，所以&nbsp;<em>stage</em>&nbsp;的边界是非常占资源的，在编写 Spark 程序的时候需要尽量避免的。父&nbsp;<em>stage</em>&nbsp;中&nbsp;<em>partition</em>&nbsp;个数与子&nbsp;<em>stage</em>&nbsp;的&nbsp;<em>partition</em>&nbsp;个数可能不同，所以那些产生&nbsp;<em>stage</em>&nbsp;边界的&nbsp;<em>transformation</em>&nbsp;常常需要接受一个 numPartition 的参数来觉得子&nbsp;<em>stage</em>&nbsp;中的数据将被切分为多少个&nbsp;<em>partition</em>。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">正如在调试&nbsp;<em>MapReduce</em>&nbsp;是选择&nbsp;<em>reducor</em>&nbsp;的个数是一项非常重要的参数，调整在&nbsp;<em>stage</em>&nbsp;边届时的&nbsp;<em>partition</em>&nbsp;个数经常可以很大程度上影响程序的执行效率。我们会在后面的章节中讨论如何调整这些值。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">选择正确的&nbsp;<em>Operator</em> </h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">当需要使用 Spark 完成某项功能时，程序员需要从不同的&nbsp;<em>action</em>&nbsp;和&nbsp;<em>transformation</em>&nbsp;中选择不同的方案以获得相同的结果。但是不同的方案，最后执行的效率可能有云泥之别。回避常见的陷阱选择正确的方案可以使得最后的表现有巨大的不同。一些规则和深入的理解可以帮助你做出更好的选择。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在最新的&nbsp;<a href="https://issues.apache.org/jira/browse/SPARK-5097" rel="nofollow" style="color:rgb(0,0,0);">Spark5097</a>&nbsp;文档中开始稳定&nbsp;<em>SchemaRDD</em>（也就是 Spark 1.3 开始支持的DataFrame)，这将为使用 Spark 核心API的程序员打开 Spark的 Catalyst optimizer，允许 Spark 在使用&nbsp;<em>Operator</em>&nbsp;时做出更加高级的选择。当&nbsp;<em>SchemaRDD</em>稳定之后，某些决定将不需要用户去考虑了。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">选择&nbsp;<em>Operator</em>&nbsp;方案的主要目标是减少&nbsp;<em>shuffle</em>&nbsp;的次数以及被&nbsp;<em>shuffle</em>&nbsp;的文件的大小。因为&nbsp;<em>shuffle</em>&nbsp;是最耗资源的操作，所以有&nbsp;<em>shuffle</em>&nbsp;的数据都需要写到磁盘并且通过网络传递。repartition，join，cogroup，以及任何&nbsp;*By&nbsp;或者&nbsp;*ByKey&nbsp;的<em>transformation</em>&nbsp;都需要&nbsp;<em>shuffle</em>&nbsp;数据。不是所有这些&nbsp;<em>Operator</em>&nbsp;都是平等的，但是有些常见的性能陷阱是需要注意的。</p> 
+   <ul style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">
+    <li style="list-style-type:disc;">当进行联合的规约操作时，避免使用&nbsp;groupByKey。举个例子，rdd.groupByKey().mapValues(_ .sum) 与 rdd.reduceByKey(_ + _) 执行的结果是一样的，但是前者需要把全部的数据通过网络传递一遍，而后者只需要根据每个<em>key</em>&nbsp;局部的&nbsp;<em>partition</em>&nbsp;累积结果，在&nbsp;<em>shuffle</em>&nbsp;的之后把局部的累积值相加后得到结果。</li> 
+    <li style="list-style-type:disc;">当输入和输入的类型不一致时，避免使用&nbsp;reduceByKey。举个例子，我们需要实现为每一个key查找所有不相同的 string。一个方法是利用&nbsp;map&nbsp;把每个元素的转换成一个 Set，再使用&nbsp;reduceByKey&nbsp;将这些 Set 合并起来</li> 
+   </ul>
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>rdd.map(kv =&gt; (kv._1, <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span> Set[String]() +<span style="font-size:12px;line-height:1.5;"> kv._2))
+    .reduceByKey(_ </span>++ _)</pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这段代码生成了无数的非必须的对象，因为每个需要为每个 record 新建一个 Set。这里使用&nbsp;aggregateByKey&nbsp;更加适合，因为这个操作是在&nbsp;map&nbsp;阶段做聚合。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>val zero = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> collection.mutable.Set[String]()
+rdd.aggregateByKey(zero)(
+    (set, v) </span>=&gt; set +=<span style="font-size:12px;line-height:1.5;"> v,
+    (set1, set2) </span>=&gt; set1 ++= set2)</pre>
+   </div> 
+   <ul style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">
+    <li style="list-style-type:disc;">避免 flatMap-join-groupBy 的模式。当有两个已经按照key分组的数据集，你希望将两个数据集合并，并且保持分组，这种情况可以使用&nbsp;cogroup。这样可以避免对group进行打包解包的开销。</li>
+   </ul>
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">什么时候不发生&nbsp;<em>Shuffle</em> </h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">当然了解在哪些&nbsp;<em>transformation</em>&nbsp;上不会发生&nbsp;<em>shuffle</em>&nbsp;也是非常重要的。当前一个&nbsp;<em>transformation</em>&nbsp;已经用相同的<em>patitioner</em>&nbsp;把数据分 patition 了，Spark知道如何避免&nbsp;<em>shuffle</em>。参考一下代码：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>rdd1 =<span style="font-size:12px;line-height:1.5;"> someRdd.reduceByKey(...)
+rdd2 </span>=<span style="font-size:12px;line-height:1.5;"> someOtherRdd.reduceByKey(...)
+rdd3 </span>= rdd1.join(rdd2)</pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">因为没有&nbsp;<em>partitioner</em>&nbsp;传递给&nbsp;reduceByKey，所以系统使用默认的&nbsp;<em>partitioner</em>，所以 rdd1 和 rdd2 都会使用 hash 进行分&nbsp;<em>partition</em>。代码中的两个&nbsp;reduceByKey&nbsp;会发生两次&nbsp;<em>shuffle</em>&nbsp;。如果&nbsp;<em>RDD</em>&nbsp;包含相同个数的&nbsp;<em>partition</em>，&nbsp;<em>join</em>&nbsp;的时候将不会发生额外的&nbsp;<em>shuffle</em>。因为这里的&nbsp;<em>RDD</em>&nbsp;使用相同的 hash 方式进行&nbsp;<em>partition</em>，所以全部&nbsp;<em>RDD</em>&nbsp;中同一个&nbsp;<em>partition</em>&nbsp;中的 key的集合都是相同的。因此，rdd3中一个&nbsp;<em>partiton</em>&nbsp;的输出只依赖rdd2和rdd1的同一个对应的&nbsp;<em>partition</em>，所以第三次<em>shuffle</em>&nbsp;是不必要的。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">举个例子说，当&nbsp;<em>someRdd</em>&nbsp;有4个&nbsp;<em>partition</em>，&nbsp;<em>someOtherRdd</em>&nbsp;有两个&nbsp;<em>partition</em>，两个&nbsp;reduceByKey&nbsp;都使用3个<em>partiton</em>，所有的&nbsp;<em>task</em>&nbsp;会按照如下的方式执行：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/434101/201702/434101-20170202154816136-348321193.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">如果 rdd1 和 rdd2 在&nbsp;reduceByKey&nbsp;时使用不同的&nbsp;<em>partitioner</em>&nbsp;或者使用相同的&nbsp;<em>partitioner</em>&nbsp;但是&nbsp;<em>partition</em>&nbsp;的个数不同的情况，那么只有一个&nbsp;<em>RDD</em>&nbsp;(<em>partiton</em>&nbsp;数更少的那个)需要重新&nbsp;<em>shuffle</em>。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">相同的&nbsp;<em>tansformation</em>，相同的输入，不同的&nbsp;<em>partition</em>&nbsp;个数：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/434101/201702/434101-20170202155010042-1731449237.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">当两个数据集需要&nbsp;join&nbsp;的时候，避免&nbsp;<em>shuffle</em>&nbsp;的一个方法是使用&nbsp;<a href="http://spark.apache.org/docs/latest/programming-guide.html#broadcast-variables" rel="nofollow" style="color:rgb(0,0,0);">broadcast variables</a>。如果一个数据集小到能够塞进一个<em>executor</em>&nbsp;的内存中，那么它就可以在&nbsp;<em>driver</em>&nbsp;中写入到一个 hash table中，然后 broadcast 到所有的&nbsp;<em>executor</em>&nbsp;中。然后<em>map transformation</em>&nbsp;可以引用这个 hash table 作查询。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">什么情况下&nbsp;<em>Shuffle</em>&nbsp;越多越好</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">尽可能减少&nbsp;<em>shuffle</em>&nbsp;的准则也有例外的场合。如果额外的&nbsp;<em>shuffle</em>&nbsp;能够增加并发那么这也能够提高性能。比如当你的数据保存在几个没有切分过的大文件中时，那么使用 InputFormat 产生分 partition 可能会导致每个 partiton 中聚集了大量的<em>record</em>，如果&nbsp;<em>partition</em>&nbsp;不够，导致没有启动足够的并发。在这种情况下，我们需要在数据载入之后使用&nbsp;repartiton&nbsp;（会导致shuffle）提高 partiton 的个数，这样能够充分使用集群的CPU。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">另外一种例外情况是在使用 recude 或者 aggregate&nbsp;<em>action</em>&nbsp;聚集数据到&nbsp;<em>driver</em>&nbsp;时，如果数据把很多&nbsp;<em>partititon</em>&nbsp;个数的数据，单进程执行的&nbsp;<em>driver</em>&nbsp;merge 所有&nbsp;<em>partition</em>&nbsp;的输出时很容易成为计算的瓶颈。为了缓解&nbsp;<em>driver</em>&nbsp;的计算压力，可以使用reduceByKey&nbsp;或者&nbsp;aggregateByKey&nbsp;执行分布式的 aggregate 操作把数据分布到更少的&nbsp;<em>partition</em>&nbsp;上。每个&nbsp;<em>partition</em>中的数据并行的进行 merge，再把 merge 的结果发个&nbsp;<em>driver</em>&nbsp;以进行最后一轮 aggregation。查看&nbsp;treeReduce&nbsp;和treeAggregate&nbsp;查看如何这么使用的例子。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这个技巧在已经按照 Key 聚集的数据集上格外有效，比如当一个应用是需要统计一个语料库中每个单词出现的次数，并且把结果输出到一个map中。一个实现的方式是使用&nbsp;aggregation，在每个&nbsp;<em>partition</em>&nbsp;中本地计算一个 map，然后在&nbsp;<em>driver</em>中把各个&nbsp;<em>partition</em>&nbsp;中计算的 map merge 起来。另一种方式是通过&nbsp;aggregateByKey&nbsp;把 merge 的操作分布到各个<em>partiton</em>&nbsp;中计算，然后在简单地通过&nbsp;collectAsMap&nbsp;把结果输出到&nbsp;<em>driver</em>&nbsp;中。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">二次排序</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">还有一个重要的技能是了解接口&nbsp;repartitionAndSortWithinPartitions&nbsp;<em>transformation</em>。这是一个听起来很晦涩的<em>transformation</em>，但是却能涵盖各种奇怪情况下的排序，这个&nbsp;<em>transformation</em>&nbsp;把排序推迟到&nbsp;<em>shuffle</em>&nbsp;操作中，这使大量的数据有效的输出，排序操作可以和其他操作合并。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">举例说，Apache Hive on Spark 在join的实现中，使用了这个&nbsp;<em>transformation</em>&nbsp;。而且这个操作在&nbsp;<a href="http://www.quora.com/What-is-secondary-sort-in-Hadoop-and-how-does-it-work" rel="nofollow" style="color:rgb(0,0,0);">secondary sort</a>&nbsp;模式中扮演着至关重要的角色。secondary sort 模式是指用户期望数据按照 key 分组，并且希望按照特定的顺序遍历 value。使用&nbsp;repartitionAndSortWithinPartitions&nbsp;再加上一部分用户的额外的工作可以实现 secondary sort。</p> 
+   <div class="md-section-divider" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">
+    在这篇文章中，首先完成在&nbsp;
+    <a href="https://www.zybuluo.com/xiaop1987/note/76737" rel="nofollow" style="color:rgb(0,0,0);">Part I</a>&nbsp;中提到的一些东西。作者将尽量覆盖到影响 Spark 程序性能的方方面面，你们将会了解到资源调优，或者如何配置 Spark 以压榨出集群每一分资源。然后我们将讲述调试并发度，这是job性能中最难也是最重要的参数。最后，你将了解到数据本身的表达形式，Spark 读取在磁盘的上的形式（主要是Apache Avro和 Apache Parquet)以及当数据需要缓存或者移动的时候内存中的数据形式。
+   </div> 
+   <div class="md-section-divider" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <h2 style="font-size:21px;line-height:1.5;">调试资源分配</h2> 
+    <p>Spark 的用户邮件邮件列表中经常会出现 “我有一个500个节点的集群，为什么但是我的应用一次只有两个&nbsp;<em>task</em>&nbsp;在执行”，鉴于 Spark 控制资源使用的参数的数量，这些问题不应该出现。但是在本章中，你将学会压榨出你集群的每一分资源。推荐的配置将根据不同的集群管理系统（&nbsp;YARN、Mesos、Spark Standalone）而有所不同，我们将主要集中在YARN&nbsp;上，因为这个&nbsp;Cloudera&nbsp;推荐的方式。</p> 
+    <p>我们先看一下在&nbsp;YARN　上运行　Spark 的一些背景。查看之前的博文：<a href="http://blog.cloudera.com/blog/2014/05/apache-spark-resource-management-and-yarn-app-models/" rel="nofollow" style="color:rgb(0,0,0);">点击这里查看</a></p> 
+    <p>Spark（以及YARN） 需要关心的两项主要的资源是 CPU 和 内存， 磁盘 和 IO 当然也影响着 Spark 的性能，但是不管是 Spark 还是 Yarn 目前都没法对他们做实时有效的管理。</p> 
+    <p>在一个 Spark 应用中，每个 Spark&nbsp;<em>executor</em>&nbsp;拥有固定个数的 core 以及固定大小的堆大小。core 的个数可以在执行 spark-submit 或者 pyspark 或者 spark-shell 时，通过参数 --executor-cores 指定，或者在 spark-defaults.conf 配置文件或者 SparkConf 对象中设置 spark.executor.cores 参数。同样地，堆的大小可以通过 --executor-memory 参数或者 spark.executor.memory 配置项。core 配置项控制一个&nbsp;<em>executor</em>&nbsp;中task的并发数。 --executor-cores 5 意味着每个<em>executor</em>&nbsp;中最多同时可以有5个&nbsp;<em>task</em>&nbsp;运行。memory 参数影响 Spark 可以缓存的数据的大小，也就是在&nbsp;<em>group</em><em>aggregate</em>&nbsp;以及&nbsp;<em>join</em>&nbsp;操作时&nbsp;<em>shuffle</em>&nbsp;的数据结构的最大值。</p> 
+    <p>--num-executors 命令行参数或者spark.executor.instances 配置项控制需要的&nbsp;<em>executor</em>&nbsp;个数。从 CDH 5.4/Spark 1.3 开始，你可以避免使用这个参数，只要你通过设置 spark.dynamicAllocation.enabled 参数打开&nbsp;<a href="https://spark.apache.org/docs/latest/job-scheduling.html#dynamic-resource-allocation" rel="nofollow" style="color:rgb(0,0,0);">动态分配</a>&nbsp;。动态分配可以使的 Spark 的应用在有后续积压的在等待的&nbsp;<em>task</em>&nbsp;时请求&nbsp;<em>executor</em>，并且在空闲时释放这些&nbsp;<em>executor</em>。</p> 
+    <p>同时 Spark 需求的资源如何跟&nbsp;YARN&nbsp;中可用的资源配合也是需要着重考虑的，YARN&nbsp;相关的参数有：</p> 
+    <ul>
+     <li style="list-style-type:disc;">yarn.nodemanager.resource.memory-mb 控制在每个节点上&nbsp;<em>container</em>&nbsp;能够使用的最大内存；</li> 
+     <li style="list-style-type:disc;">yarn.nodemanager.resource.cpu-vcores 控制在每个节点上&nbsp;<em>container</em>&nbsp;能够使用的最大core个数；</li> 
+    </ul>
+    <p>请求5个 core 会生成向&nbsp;YARN&nbsp;要5个虚拟core的请求。从&nbsp;YARN　请求内存相对比较复杂因为以下的一些原因：</p> 
+    <ul>
+     <li style="list-style-type:disc;">--executor-memory/spark.executor.memory 控制&nbsp;<em>executor</em>&nbsp;的堆的大小，但是 JVM 本身也会占用一定的堆空间，比如内部的 String 或者直接 byte buffer，<em>executor</em>&nbsp;memory 的 spark.yarn.executor.memoryOverhead 属性决定向&nbsp;YARN&nbsp;请求的每个&nbsp;<em>executor</em>&nbsp;的内存大小，默认值为max(384, 0.7 * spark.executor.memory);</li> 
+     <li style="list-style-type:disc;">YARN&nbsp;可能会比请求的内存高一点，YARN&nbsp;的 yarn.scheduler.minimum-allocation-mb 和 yarn.scheduler.increment-allocation-mb 属性控制请求的最小值和增加量。</li> 
+    </ul>
+    <p>下面展示的是 Spark on&nbsp;YARN&nbsp;内存结构：</p> 
+    <p><img src="https://images2015.cnblogs.com/blog/434101/201702/434101-20170202155934901-348382436.png" alt="" style="border:none;"></p> 
+    <p>如果这些还不够决定Spark&nbsp;<em>executor</em>&nbsp;个数，还有一些概念还需要考虑的：</p> 
+    <ul>
+     <li style="list-style-type:disc;">应用的master，是一个非&nbsp;<em>executor</em>&nbsp;的容器，它拥有特殊的从&nbsp;YARN&nbsp;请求资源的能力，它自己本身所占的资源也需要被计算在内。在&nbsp;<em>yarn-client</em>&nbsp;模式下，它默认请求 1024MB 和 1个core。在&nbsp;<em>yarn-cluster</em>&nbsp;模式中，应用的 master 运行&nbsp;<em>driver</em>，所以使用参数 --driver-memory 和 --driver-cores 配置它的资源常常很有用。</li> 
+     <li style="list-style-type:disc;">在&nbsp;<em>executor</em>&nbsp;执行的时候配置过大的 memory 经常会导致过长的GC延时，64G是推荐的一个&nbsp;<em>executor</em>&nbsp;内存大小的上限。</li> 
+     <li style="list-style-type:disc;">我们注意到&nbsp;HDFS&nbsp;client 在大量并发线程是时性能问题。大概的估计是每个&nbsp;<em>executor</em>&nbsp;中最多5个并行的&nbsp;<em>task</em>&nbsp;就可以占满的写入带宽。</li> 
+     <li style="list-style-type:disc;">在运行微型&nbsp;<em>executor</em>&nbsp;时（比如只有一个core而且只有够执行一个task的内存）扔掉在一个JVM上同时运行多个task的好处。比如 broadcast 变量需要为每个&nbsp;<em>executor</em>&nbsp;复制一遍，这么多小executor会导致更多的数据拷贝。</li> 
+    </ul>
+    <p>为了让以上的这些更加具体一点，这里有一个实际使用过的配置的例子，可以完全用满整个集群的资源。假设一个集群有6个节点有NodeManager在上面运行，每个节点有16个core以及64GB的内存。那么 NodeManager的容量：yarn.nodemanager.resource.memory-mb 和 yarn.nodemanager.resource.cpu-vcores 可以设为 63 * 1024 = 64512 （MB） 和 15。我们避免使用 100% 的&nbsp;YARN&nbsp;container 资源因为还要为 OS 和 hadoop 的 Daemon 留一部分资源。在上面的场景中，我们预留了1个core和1G的内存给这些进程。Cloudera Manager 会自动计算并且配置。</p> 
+    <p>所以看起来我们最先想到的配置会是这样的：--num-executors 6 --executor-cores 15 --executor-memory 63G。但是这个配置可能无法达到我们的需求，因为：&nbsp;<br> - 63GB+ 的&nbsp;<em>executor</em>&nbsp;memory 塞不进只有 63GB 容量的 NodeManager；&nbsp;<br> - 应用的 master 也需要占用一个core，意味着在某个节点上，没有15个core给&nbsp;<em>executor</em>&nbsp;使用；&nbsp;<br> - 15个core会影响 HDFS IO的吞吐量。&nbsp;<br> 配置成 --num-executors 17 --executor-cores 5 --executor-memory 19G 可能会效果更好，因为：&nbsp;<br> - 这个配置会在每个节点上生成3个&nbsp;<em>executor</em>，除了应用的master运行的机器，这台机器上只会运行2个&nbsp;<em>executor</em>&nbsp;<br> - --executor-memory 被分成3份（63G/每个节点3个executor）=21。 21 * （1 - 0.07） ~ 19。</p> 
+    <h2 style="font-size:21px;line-height:1.5;">调试并发</h2> 
+    <p>我们知道 Spark 是一套数据并行处理的引擎。但是 Spark 并不是神奇得能够将所有计算并行化，它没办法从所有的并行化方案中找出最优的那个。每个 Spark&nbsp;<em>stage</em>&nbsp;中包含若干个&nbsp;<em>task</em>，每个&nbsp;<em>task</em>&nbsp;串行地处理数据。在调试 Spark 的job时，<em>task</em>的个数可能是决定程序性能的最重要的参数。</p> 
+    <p>那么这个数字是由什么决定的呢？在之前的<a href="https://www.zybuluo.com/xiaop1987/note/76737" rel="nofollow" style="color:rgb(0,0,0);">博文</a>中介绍了 Spark 如何将&nbsp;<em>RDD</em>&nbsp;转换成一组&nbsp;<em>stage</em>。<em>task</em>&nbsp;的个数与&nbsp;<em>stage</em>&nbsp;中上一个&nbsp;<em>RDD</em>&nbsp;的&nbsp;<em>partition</em>&nbsp;个数相同。而一个&nbsp;<em>RDD</em>&nbsp;的&nbsp;<em>partition</em>&nbsp;个数与被它依赖的&nbsp;<em>RDD</em>&nbsp;的&nbsp;<em>partition</em>&nbsp;个数相同，除了以下的情况：&nbsp;coalesce&nbsp;transformation 可以创建一个具有更少&nbsp;<em>partition</em>&nbsp;个数的&nbsp;<em>RDD</em>，union&nbsp;transformation 产出的&nbsp;<em>RDD</em>的&nbsp;<em>partition</em>&nbsp;个数是它父&nbsp;<em>RDD</em>&nbsp;的&nbsp;<em>partition</em>&nbsp;个数之和，&nbsp;cartesian&nbsp;返回的&nbsp;<em>RDD</em>&nbsp;的&nbsp;<em>partition</em>&nbsp;个数是它们的积。</p> 
+    <p>如果一个&nbsp;<em>RDD</em>&nbsp;没有父&nbsp;<em>RDD</em>&nbsp;呢？ 由&nbsp;textFile&nbsp;或者&nbsp;hadoopFile&nbsp;生成的&nbsp;<em>RDD</em>&nbsp;的&nbsp;<em>partition</em>&nbsp;个数由它们底层使用的 MapReduce InputFormat 决定的。一般情况下，每读到的一个 HDFS block 会生成一个&nbsp;<em>partition</em>。通过&nbsp;parallelize&nbsp;接口生成的&nbsp;<em>RDD</em>&nbsp;的&nbsp;<em>partition</em>&nbsp;个数由用户指定，如果用户没有指定则由参数 spark.default.parallelism 决定。</p> 
+    <p>要想知道&nbsp;<em>partition</em>&nbsp;的个数，可以通过接口 rdd.partitions().size() 获得。</p> 
+    <p>这里最需要关心的问题在于&nbsp;<em>task</em>&nbsp;的个数太小。如果运行时&nbsp;<em>task</em>&nbsp;的个数比实际可用的 slot 还少，那么程序解没法使用到所有的 CPU 资源。</p> 
+    <p>过少的&nbsp;<em>task</em>&nbsp;个数可能会导致在一些聚集操作时， 每个&nbsp;<em>task</em>&nbsp;的内存压力会很大。任何&nbsp;join，cogroup，*ByKey&nbsp;操作都会在内存生成一个 hash-map或者 buffer 用于分组或者排序。join，&nbsp;cogroup&nbsp;，groupByKey&nbsp;会在&nbsp;<em>shuffle</em>&nbsp;时在 fetching 端使用这些数据结构，&nbsp;reduceByKey&nbsp;，aggregateByKey&nbsp;会在&nbsp;<em>shuffle</em>&nbsp;时在两端都会使用这些数据结构。</p> 
+    <p>当需要进行这个聚集操作的&nbsp;<em>record</em>&nbsp;不能完全轻易塞进内存中时，一些问题会暴露出来。首先，在内存 hold 大量这些数据结构的&nbsp;<em>record</em>&nbsp;会增加 GC的压力，可能会导致流程停顿下来。其次，如果数据不能完全载入内存，Spark 会将这些数据写到磁盘，这会引起磁盘 IO和排序。在 Cloudera 的用户中，这可能是导致 Spark Job 慢的首要原因。</p> 
+    <p>那么如何增加你的&nbsp;<em>partition</em>&nbsp;的个数呢？如果你的问题&nbsp;<em>stage</em>&nbsp;是从 Hadoop 读取数据，你可以做以下的选项：&nbsp;<br> - 使用&nbsp;repartition&nbsp;选项，会引发&nbsp;<em>shuffle</em>；&nbsp;<br> - 配置 InputFormat 用户将文件分得更小；&nbsp;<br> - 写入 HDFS 文件时使用更小的block。</p> 
+    <p>如果问题&nbsp;<em>stage</em>&nbsp;从其他&nbsp;<em>stage</em>&nbsp;中获得输入，引发&nbsp;<em>stage</em>&nbsp;边界的操作会接受一个 numPartitions 的参数，比如</p> 
+   </div> 
+   <div class="md-section-divider" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">
+     <pre>val rdd2 = rdd1.reduceByKey(_ + _, numPartitions = X)</pre>
+    </div> 
+    <p>X 应该取什么值？最直接的方法就是做实验。不停的将&nbsp;<em>partition</em>&nbsp;的个数从上次实验的&nbsp;<em>partition</em>&nbsp;个数乘以1.5，直到性能不再提升为止。</p> 
+    <p>同时也有一些原则用于计算 X，但是也不是非常的有效是因为有些参数是很难计算的。这里写到不是因为它们很实用，而是可以帮助理解。这里主要的目标是启动足够的&nbsp;<em>task</em>&nbsp;可以使得每个&nbsp;<em>task</em>&nbsp;接受的数据能够都塞进它所分配到的内存中。</p> 
+    <p>每个&nbsp;<em>task</em>&nbsp;可用的内存通过这个公式计算：spark.executor.memory * spark.shuffle.memoryFraction * spark.shuffle.safetyFraction)/spark.executor.cores 。 memoryFraction 和 safetyFractio 默认值分别 0.2 和 0.8.</p> 
+    <p>在内存中所有&nbsp;<em>shuffle</em>&nbsp;数据的大小很难确定。最可行的是找出一个&nbsp;<em>stage</em>&nbsp;运行的 Shuffle Spill（memory） 和 Shuffle Spill(Disk) 之间的比例。在用所有shuffle 写乘以这个比例。但是如果这个&nbsp;<em>stage</em>&nbsp;是 reduce 时，可能会有点复杂：</p> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/434101/201702/434101-20170202160132136-1362245353.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在往上增加一点因为大多数情况下&nbsp;<em>partition</em>&nbsp;的个数会比较多。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">试试在，在有所疑虑的时候，使用更多的&nbsp;<em>task</em>&nbsp;数（也就是&nbsp;<em>partition</em>&nbsp;数）都会效果更好，这与 MapRecuce 中建议&nbsp;<em>task</em>&nbsp;数目选择尽量保守的建议相反。这个因为 MapReduce 在启动&nbsp;<em>task</em>&nbsp;时相比需要更大的代价。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">压缩你的数据结构</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Spark 的数据流由一组&nbsp;<em>record</em>&nbsp;构成。一个&nbsp;<em>record</em>&nbsp;有两种表达形式:一种是反序列化的 Java 对象另外一种是序列化的二进制形式。通常情况下，Spark 对内存中的&nbsp;<em>record</em>&nbsp;使用反序列化之后的形式，对要存到磁盘上或者需要通过网络传输的<em>record</em>&nbsp;使用序列化之后的形式。也有<a href="https://issues.apache.org/jira/browse/SPARK-2926" rel="nofollow" style="color:rgb(0,0,0);">计划</a>在内存中存储序列化之后的&nbsp;<em>record</em>。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">spark.serializer 控制这两种形式之间的转换的方式。Kryo serializer，org.apache.spark.serializer.KryoSerializer 是推荐的选择。但不幸的是它不是默认的配置，因为 KryoSerializer 在早期的 Spark 版本中不稳定，而 Spark 不想打破版本的兼容性，所以没有把 KryoSerializer 作为默认配置，但是 KryoSerializer 应该在任何情况下都是第一的选择。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">你的&nbsp;<em>record</em>&nbsp;在这两种形式切换的频率对于 Spark 应用的运行效率具有很大的影响。去检查一下到处传递数据的类型，看看能否挤出一点水分是非常值得一试的。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">过多的反序列化之后的&nbsp;<em>record</em>&nbsp;可能会导致数据到处到磁盘上更加频繁，也使得能够 Cache 在内存中的&nbsp;<em>record</em>&nbsp;个数减少。<a href="http://spark.apache.org/docs/latest/tuning.html#memory-tuning" rel="nofollow" style="color:rgb(0,0,0);">点击这里</a>查看如何压缩这些数据。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">过多的序列化之后的&nbsp;<em>record</em>&nbsp;导致更多的 磁盘和网络 IO，同样的也会使得能够 Cache 在内存中的&nbsp;<em>record</em>&nbsp;个数减少，这里主要的解决方案是把所有的用户自定义的 class 都通过&nbsp;<a href="https://spark.apache.org/docs/latest/api/scala/index.html#org.apache.spark.SparkConf" rel="nofollow" style="color:rgb(0,0,0);">SparkConf#registerKryoClasses</a>&nbsp;的API定义和传递的。&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">数据格式</h2> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">任何时候你都可以决定你的数据如何保持在磁盘上，使用可扩展的二进制格式比如：Avro，Parquet，Thrift或者Protobuf，从中选择一种。当人们在谈论在Hadoop上使用Avro，Thrift或者Protobuf时，都是认为每个&nbsp;<em>record</em>&nbsp;保持成一个 Avro/Thrift/Protobuf 结构保存成 sequence file。而不是JSON。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">每次当时试图使用JSON存储大量数据时，还是先放弃吧...</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p><font color="#333333"><span style="font-size:15px;">&nbsp; &nbsp; 本文转自阿凡卢博客园博客，原文链接：http://www.cnblogs.com/luxiaoxun/p/6361298.html</span></font><span style="font-size:15px;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Oracle -- 字符集编码'GBK'库数据导入到'UFT-8'库中 大量报错 ORA-12899 解决方案 « NotBeCN</title>
+  <meta name="description" content="             需求：其他项目要求将某环境(字符集编码 'GBK')某用户数据导入到 (字符集编码 'UFT-8')库中.    注释说明：          编码格式转换要注意VARCHAR2的字段类型.           --GBK  ：VARCHAR2汉字占2字节，英文1字节 --&gt;ORA...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/04/weixin_33911824_90134968.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Oracle -- 字符集编码'GBK'库数据导入到'UFT-8'库中 大量报错 ORA-12899 解决方案</h1>
+    <p class="post-meta">Dec 4, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>需求：<br>其他项目要求将某环境(字符集编码 'GBK')某用户数据导入到 (字符集编码 'UFT-8')库中.</p> 
+   <p>注释说明：</p> 
+   <pre><code class="js">      编码格式转换要注意VARCHAR2的字段类型.
+           --GBK  ：VARCHAR2汉字占2字节，英文1字节 --&gt;ORACLE 默认GBK编码格式
+           --UTF-8：VARCHAR2汉字占3字节，英文1字节 --&gt;SELECT USERENV('LANGUAGE') FROM DUAL 或者/V$NLS_PARAMETERS查看ORACLE编码格式
+        所以源库中VARCHAR2类型字段的数据导入到UTF- 8(VARCHAR2 (N*1.5))有可能超过GBK VARCHAR2(N)的N长度
+
+      有2个方案 可避免有可能导入的时候报错 'ORA-12899: 列 "TAB"."COLUMN" 的值太大 (实际值: 7, 最大值: 6)' ：
+           1）批量将环境(字符集编码'GBK')VARCHAR2类型DDATA_LENGTH全部改成DATA_LENGTH*1.5 
+        --&gt; 1.5表示：UTF-8汉字存3字节/GBK汉字存2字节  --&gt;根据user_tab_columns查询写批量alter table...即可
+           2）校验类型为VARCHAR2的字段, LENGTHB(字段的最大值)*1.5是否超过VARCHAR2(N)中的N，若超过，将更改表结构ALTER ..为字段的最大数据*1.5..否则报错
+        --&gt; 方案2 寓意 ==&gt;  MAX(LENGTHB(COLUMN_NAME)*1.5 是否大于 VARCHAR2(N)里的N值
+
+--&gt; 如下重点介绍和存储校验：
+
+--&gt;--&gt; 2字符集编码间就汉字存储的字节不同，所以可以只考虑汉字部分进行判断
+               --&gt;--&gt; 用LENGTH(‘STRING’)!=LENGTHB(‘STRING’)来判断字符串是否含有中文
+         --&gt;--&gt; 介绍相关函数：
+                --LENGTH FUNCTIONS RETURN THE LENGTH OF CHAR.
+                --LENGTH CALCULATES LENGTH USING CHARACTERS AS DEFINED BY THE INPUT CHARACTER SET.  -- 所占字节长度‘单位是字符’
+                --LENGTHB USES BYTES INSTEAD OF CHARACTERS.    --文章用到.... 所占字节长度‘单位是字节’
+                --LENGTHC USES UNICODE COMPLETE CHARACTERS.
+                --LENGTH2 USES UCS2 CODE POINTS.
+                --LENGTH4 USES UCS4 CODE POINTS.
+
+ --校验存储....
+ --简意：类型为VARCHAR2的字段, LENGTHB(字段的最大值)*1.5是否超过VARCHAR2(N)中的N，若超过，将更改表结构ALTER ..
+  CREATE OR REPLACE PROCEDURE CHANGE_VARCHAR2(USERNAME VARCHAR2 ) IS
+  --USERNAME 传入要判断的用户
+  P_OWNER       VARCHAR2 (4000 );
+  P_TABLE_NAME  VARCHAR2 (4000 );
+  P_COLUMN_NAME VARCHAR2 (4000 );
+  P_DATA_LENGTH NUMBER (30 );
+  P_SQL         VARCHAR2 (4000 );
+  MAX_NUM       NUMBER (20 ); ---要是写成VARCHAR2(2000)，发现他没有比对，只是将只改成最大，其实就是跳过了比对
+  P_SQL_SQL     VARCHAR2 (4000 );
+
+  --创建游标(包含：TABLE_NAME, COLUMN_NAME, DATA_LENGTH)
+  CURSOR C_CONS IS
+    SELECT OWNER, TABLE_NAME, COLUMN_NAME, DATA_LENGTH
+      FROM DBA_TAB_COLUMNS UTC
+     WHERE UTC.OWNER = UPPER (USERNAME)
+       AND UTC.DATA_TYPE = 'VARCHAR2'
+       AND UTC.TABLE_NAME NOT IN
+           ( SELECT TABLE_NAME
+              FROM DBA_EXTERNAL_TABLES E
+             WHERE E.OWNER = UPPER (USERNAME)) --筛选掉临时表
+       AND UTC.TABLE_NAME NOT LIKE 'BIN%' ; --筛选掉回收站表
+  -- 编辑存储的用户要有查询DBA_TAB_COLUMNS/DBA_EXTERNAL_TABLES权限；
+  -- 没权限会报错：’ERROR: PL/SQL: ORA-00942: 表或视图不存在’
+  -- 或者用USER_TAB_COLUMNS/USER_EXTERNAL_TABLES视图避免权限问题..
+  -- 授权命令：GRANT SELECT ON DBA_TAB_COLUMNS TO 用户;
+  -- 授权命令：GRANT SELECT ON DBA_EXTERNAL_TABLES TO 用户;
+BEGIN
+  FOR P_C_CONS IN C_CONS LOOP
+    P_OWNER       := P_C_CONS.OWNER;
+    P_TABLE_NAME  := P_C_CONS.TABLE_NAME;
+    P_COLUMN_NAME := P_C_CONS.COLUMN_NAME;
+    P_DATA_LENGTH := P_C_CONS.DATA_LENGTH;
+    P_SQL         := 'SELECT ROUND((CASE WHEN NVL((MAX(LENGTHB(' ||
+                     P_COLUMN_NAME || ')' ||
+                     ')*1.5 ),0) =0 THEN 1 ELSE (MAX(LENGTHB(' ||
+                     P_COLUMN_NAME || ')' || ')*1.5 ) END))  FROM  ' ||
+                     P_OWNER || '.' || P_TABLE_NAME || ' WHERE LENGTH(' ||
+                     P_COLUMN_NAME || ')!=LENGTHB(' || P_COLUMN_NAME || ')' ; --查询LENGTHB(字段的最大值)*1.5
+ 
+    --CASE WHEN 加判断是因为 字段可能存在空数据 （报错信息：ORA-06535: EXECUTE IMMEDIATE 中的语句字符串为 NULL 或长度为零）
+    --ROUND 若字段存的数据都是NUMBER 且都为1个数字，上面的SQL会为 将列改为1.5（报错：DATA TYPE INCORRECT） 所以四舍五入下..
+ 
+    --DBMS_OUTPUT.PUT_LINE(P_SQL);    -- 若出现问题，打印信息,利于检验为题
+    EXECUTE IMMEDIATE P_SQL
+      INTO MAX_NUM;
+    --DBMS_OUTPUT.PUT_LINE(MAX_NUM);
+    IF MAX_NUM &gt; P_DATA_LENGTH /*OR MAX_NUM = P_DATA_LENGTH*/
+    --如果LENGTHB(字段的最大值)*1.5的结果 大于 VARCHAR2(N)中的N ，执行alter table改字段长度到（LENGTHB(字段的最大值)*1.5）
+     THEN
+      P_SQL_SQL := 'ALTER TABLE ' || P_TABLE_NAME || ' MODIFY(' ||
+                   P_COLUMN_NAME || ' VARCHAR2(' || MAX_NUM || ')) ' ;
+      --DBMS_OUTPUT.PUT_LINE(P_SQL_SQL);  -- 若出现问题，打印信息,利于检验为题
+      EXECUTE IMMEDIATE P_SQL_SQL;
+    ELSE
+      RETURN ;
+    END IF ;
+  END LOOP ;
+END CHANGE_VARCHAR2;
+
+--使用步骤：
+--   编辑存储..--&gt;调用存储（Call change_varchar2(username =&gt; 'u1' );或者begin...等）
+</code></pre> 
+   <p>大家是否有疑问，为什么只判断varchar2 不判断char 和nvarchar等类型么？<br>实验 ：--字符集编码'GBK' 库中 字段类型为CHAR/NVARCHAR2导入到字符集编码'UTF-8'情况 :</p> 
+   <pre><code class="js">SQL &gt; SELECT USERENV( 'LANGUAGE' ) FROM DUAL;
+USERENV ('LANGUAGE' )
+----------------------------------------------------
+SIMPLIFIED CHINESE_CHINA.ZHS16GBK
+ 
+SQL &gt; CREATE TABLE T_1(CHA CHAR ( 2 ),NVARCHAR NVARCHAR2 ( 3 ));
+ 
+Table created
+SQL &gt; INSERT INTO T_1 (CHA, NVARCHAR) VALUES ( '11' , '111' );
+ 
+1 row inserted
+SQL &gt; INSERT INTO T_1 (CHA, NVARCHAR) VALUES ( 'AA' , '111' );
+ 
+1 row inserted
+SQL &gt; INSERT INTO T_1 (CHA, NVARCHAR) VALUES ( '中' , '中中中' );
+ 
+1 row inserted
+ 
+SQL &gt; commit ;
+ 
+Commit complete
+ 
+SQL &gt; SELECT * FROM t_1;
+ 
+CHA NVARCHAR
+--- --------
+11   111
+AA  111
+中  中中中
+ 
+SQL &gt;
+--再在字符集编码'UTF-8'情况
+SQL &gt; SELECT USERENV( 'LANGUAGE' ) FROM DUAL;
+ 
+USERENV ('LANGUAGE' )
+----------------------------------------------------
+SIMPLIFIED CHINESE_CHINA.AL32UTF8
+ 
+SQL &gt; create table T_1 as select * from sys.T_1@DB_GBK;
+ 
+Table created
+ 
+SQL &gt; SELECT * FROM t_1;
+ 
+CHA    NVARCHAR
+------ --------
+11      111
+AA     111
+中     中中中
+SQL &gt;
+</code></pre> 
+   <p>本文转自ICT时空 dbasdk博客，原文链接：<a href="http://blog.itpub.net/29734436/viewspace-1262014/" rel="nofollow">Oracle -- 字符集编码'GBK'库数据导入到'UFT-8'库中 大量报错 ORA-12899 解决方案</a> ，如需转载请自行联系原博主。</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

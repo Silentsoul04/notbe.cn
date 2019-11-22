@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>SQL Server-聚焦移除Bookmark Lookup、RID Lookup、Key Lookup提高SQL查询性能（六） « NotBeCN</title>
+  <meta name="description" content="             前言    前面几节都是讲的基础内容，本节我们讲讲索引性能优化，当对大数据进行处理时首先想到的就是索引，一旦遇到这样的问题则手忙脚乱，各种查资料，为何平常不扎实基本功呢，我们由浅入深，简短的内容，深入的理解，而非一上来就把问题给框死，立马给出解决方案，抛出问题，再到解决问题，你GET了没...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/28/weixin_34343000_90134484.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">SQL Server-聚焦移除Bookmark Lookup、RID Lookup、Key Lookup提高SQL查询性能（六）</h1>
+    <p class="post-meta">Nov 28, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:'Helvetica Neue', Arial;">前言</h1> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">前面几节都是讲的基础内容，本节我们讲讲索引性能优化，当对大数据进行处理时首先想到的就是索引，一旦遇到这样的问题则手忙脚乱，各种查资料，为何平常不扎实基本功呢，我们由浅入深，简短的内容，深入的理解，而非一上来就把问题给框死，立马给出解决方案，抛出问题，再到解决问题，你GET了没有。Always to review the basics。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">Bookmark Lookup、RID Lookup、Key Lookup定义</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">一说到这三者，如果对索引研究不深的童鞋估计是懵逼的，什么玩意，我们姑且将上面三者翻译为：标签查找、行ID查找、键查找。标签查找和键查找是一个意思，在SQL 2005之前叫Key Lookup。怎么解释，如何定义呢？首先我们不看定义，直接看下面一步一步解析，如果你实在忍不住，请看园友【<a href="http://www.cnblogs.com/Yahong111/archive/2007/09/13/891641.html" rel="nofollow" style="text-decoration:none;color:rgb(45,161,45);">永红</a>】的见解，解释还是非常到位。我们简短的说明下此三者概念。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(128,128,0);">在查询中，我们对返回的列在查询条件上若建立了非聚集索引，此时将可能尝试使用非聚集索引查找，如果返回的列没有创建非聚集索引，此时会返回到数据页中去获取这些列的数据，即使表中存在聚集索引或者没有，都会返回到表中或者聚集索引中去获取数据。对于以上场景描述，如果表没有创建聚集索引则称为Bookmar Lookup，如果表中没有聚集索引但是存在非聚集索引我们称为RID Lookup。</span>看到这里我们就会想法操作如此耗时，还要返回到基表中去获取数据，所以才有了我们本节来移除以上三者来提高查询性能。接下来我们一起来看看。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">抛出Bookmark Lookup、RID Lookup、Key Lookup问题</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们首先创建如下表</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012 
+GO
+CREATE TABLE Sales.Orders 
+(
+[orderid] INT,
+[shipaddress] VARCHAR(</span><span style="color:rgb(128,0,128);line-height:1.5;">100</span><span style="line-height:1.5;">),
+[shipcity] VARCHAR(</span><span style="color:rgb(128,0,128);line-height:1.5;">100</span><span style="line-height:1.5;">),
+[shipregion] VARCHAR(</span><span style="color:rgb(128,0,128);line-height:1.5;">100</span><span style="line-height:1.5;">))
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">接着进行查询</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT orderid, shipaddress, shipregion
+FROM Sales.Orders
+WHERE shipcity </span>= <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">深圳</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130140959006-36243827.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">这个不用多讲，没添加任何索引，执行查询计划是全表扫描。接下来我们创建在orderid上创建聚集索引如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>CREATE CLUSTERED INDEX idx_cls_orderid ON Sales.Orders(orderid)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们再执行上述查询</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130140911802-1488849588.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们创建了聚集索引，所以此时查询走聚集索引，到这里我们看到情况由全表扫描转换成了索引扫描。我们在查询时一直是带了查询条件的，而对查询条件我们未作任何操作，如果我们此时在查询条件上创建了索引，此时查询的性能又会得到一点改善。我们开始对查询条件创建一个非聚集索引。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>CREATE NONCLUSTERED INDEX idx_nc_shipcity ON Sales.Orders(shipcity) </pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们再接着执行查询</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130141311240-1655975739.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们观察到对查询条件创建了非聚集索引，查询计划会使用非聚集索引查找返回结果，但是对于shipaddress, shipcity, shipregion并不是索引的一部分，此时查询引擎会返回到基表中得到这些数据再返回。这种行为就叫做Bookmark Lookup或者Key Lookup。下面我们就如本文标题一样问题出现来解决问题，移除Bookmark Lookup或者Key Lookup。我们尝试用两种不同的方法来解决。</p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">解决Bookmark Lookup、RID Lookup、Key Lookup问题</h2> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">创建非聚集索引复合索引</h3> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们对查询条件以及检索列创建非聚集索引。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>CREATE NONCLUSTERED INDEX idx_all_cover ON Sales.Orders(shipaddress,orderid,shipcity,shipregion)</pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130181410912-1499914638.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们对检索列创建了非聚集索引，此时将不会再到数据页中获取数据，而是从索引中直接返回，所以到这里我们算是移除了Key Lookup。但是此时触发另外一个问题，执行查询计划走的却是索引扫描，索引到底是什么呢？我们打个比方，一个索引相当于是数据库中一个本书开始的索引，我们需要快速从书中查找到我们所需要的数据，这个时候书就是我们所说的表。索引扫描意味着要读取表中的所有行，然后返回满足条件的所有数据，当执行索引扫描时，所有行上叶子节点上的所有都会被扫描，这也就意味着索引上的所有行都会被检索一遍而不是直接检索表，和表扫描对比的话，表扫描是直接读取表中数据，所以表扫描和索引扫描还是有一点点不同，而索引查找则是依赖于索引页数据来定位满足条件的所有行，索引查找仅仅只影响满足条件以及页上包含这些满足条件的行，所以说索引查找更加高效。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">上述我们稍微讲解了下索引扫描和索引查找，而上述的问题是我们创建了非聚集索引，但是结果执行的查询计划是索引扫描，很是纳闷，对于刚学索引小白的我来说，不知该如何是好，以为是缓存的缘故，清除各种缓存均不好使。于是开始胡思乱想是不是检索列中数据有为NULL引起的，是不是检索列数据重复引起的，尝试了无数次，最终发现某一次居然好使。如下</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">CREATE NONCLUSTERED INDEX idx_cls_cover ON 
+Sales.Orders(shipcity,orderid,shipaddress,shipregion)</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130195514584-1343361658.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时若我们将查询条件进行如下修改。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT orderid, shipaddress, shipregion
+FROM Sales.Orders
+WHERE <span style="color:rgb(255,102,0);line-height:1.5;">shipaddress</span> </span>= <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">深圳</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> 
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130195649834-1160694737.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">到这里我们应该发现了，唯一的区别在于我们创建非聚集索引时的顺序和查询条件不同就会导致索引扫描和索引查找的转换，那么到底什么时候才会执行索引查找呢？我们可以进行如下一般性总结：</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(128,128,0);">索引查找的一般性结论：如果条件中包含WHERE或者ON的话，查询条件必须是位于索引集合列中首位，此时索引查找将会被使用。</span></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">此时我们穿插一点内容，上述我们创建了覆盖索引，我们来比较下覆盖索引和默认情况下聚集索引查找的性能开销。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(255,0,0);">覆盖索引与默认聚集索引性能开销比较</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">FROM Sales.Orders WITH(INDEX([PK_Orders]))
+WHERE orderid</span>&lt;<span style="color:rgb(128,0,128);line-height:1.5;">11072</span><span style="line-height:1.5;">
+go
+SELECT orderid, shipaddress, shipregion
+FROM Sales.Orders WITH(INDEX([idx_noncls_include_exceptorderid]))
+WHERE orderid</span>&lt;<span style="color:rgb(128,0,128);line-height:1.5;">11072</span><span style="line-height:1.5;">
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130225654537-1200812004.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">从上可知，覆盖索引的开销要比默认主键聚集索引性能开销要好一点，同时我们可以看看如下二者IO代价。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130225818115-1857138701.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130225826927-777433520.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">通过上述覆盖索引与默认聚集索引的对比，我们能够有效的减少IO，这一点也是非常明确的，当然下面的INCLUDE索引对比也是另外一种好的方案。</p> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">创建INCLUDE非聚集索引</h3> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+CREATE NONCLUSTERED INDEX [ix_noncls_include] ON [TSQL2012].[Sales].[Orders] (
+ shipcity
+) INCLUDE (shipaddress, shipregion, orderid)</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130174521662-1538204720.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">至此我们用两种方式来移除了Bookmark Lookup、RID Lookup、Key Lookup，通过使用索引和覆盖索引。</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">既然有如上两种方式，我们应该有所取舍，二者谁的性能更好呢？我们接下来比较上述二者的开销差异。</p> 
+   <h3 style="color:rgb(111,168,51);font-size:16px;line-height:1.5;border-left-width:13px;border-left-style:solid;border-left-color:rgb(111,168,51);font-family:'Helvetica Neue', Arial;">比较移除Bookmark Lookup等两种方式差异</h3> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT orderid, shipaddress, shipcity, shipregion
+FROM Sales.Orders WITH(INDEX(idx_all_cover))
+WHERE shipcity </span>= <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">深圳</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">
+GO
+
+SELECT orderid, shipaddress, shipcity, shipregion
+FROM Sales.Orders WITH(INDEX(ix_noncls_include))
+WHERE shipcity </span>= <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">深圳</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130200430724-500376496.png" alt="" style="border:0px;">&nbsp;</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">我们从上所知，二者开销一样，并未有什么区别，当然相信我们更倾向于的是将第二种方式作为解决方案。到这里算是基本结束了，但是还有一个小问题，我们在之前已经创建了orderid的聚集索引，后面在解决方案中我们也添加了orderid的非聚集索引，难道非得添加吗，我们去掉试试看。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">CREATE NONCLUSTERED INDEX idx_noncls_cover_exceptorderid
+ON Sales.Orders(shipcity,shipaddress,shipregion)</span></pre>
+   </div> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">CREATE NONCLUSTERED INDEX idx_noncls_include_exceptorderid
+ON Sales.Orders(shipcity) INCLUDE(shipaddress,shipregion)</span></pre>
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">去除orderid比较二者开销差异：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">USE TSQL2012
+GO
+
+SELECT orderid, shipaddress, shipregion
+FROM Sales.Orders WITH(INDEX([idx_noncls_cover_exceptorderid]))
+WHERE shipaddress </span>= <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">深圳</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> 
+GO
+
+SELECT orderid, shipaddress, shipregion
+FROM Sales.Orders WITH(INDEX([idx_noncls_include_exceptorderid]))
+WHERE shipaddress </span>= <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">深圳</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;"> 
+GO</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(45,161,45);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><img src="https://images2015.cnblogs.com/blog/589642/201611/589642-20161130201412834-1924941043.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">由上知，非聚集索引列不需要包含创建了聚集索引的列，那么事实到底是怎样的呢？</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><span style="color:rgb(128,128,0);">结论：其实对于任何非聚集索引列都不需要包含创建了聚集索引的列，因为创建聚集索引的列是非聚集索引集合列的一部分，也就是说只要一个表上的列创建了聚集索引，那么非聚集索引集合列就包含了这个聚集索引。</span></p> 
+   <h2 style="color:rgb(255,255,255);line-height:1.5;font-size:21px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(111,168,51);">总结</h2> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;">本节我们比较详细就问题的抛出到问题的解决，从而来提高查询性能，好了，到此结束，我们下节再会。简短的内容，深入的理解</p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p style="color:rgb(17,17,17);font-family:'Helvetica Neue', Arial;font-size:13px;line-height:23.4px;"><br></p> 
+   <p><font color="#111111"><span style="font-size:13px;line-height:23.4px;">本文转自Jeffcky博客园博客，原文链接：http://www.cnblogs.com/CreateMyself/p/6117352.html，如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>写个dump_stack【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/uid-27714502-id-3434761.html              简单实现dump_stack              0.首先确保你能写个内核模块:打印"hello kernel"              ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/11/weixin_34218579_90135330.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">写个dump_stack【转】</h1>
+    <p class="post-meta">Oct 11, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://blog.chinaunix.net/uid-27714502-id-3434761.html" rel="nofollow">http://blog.chinaunix.net/uid-27714502-id-3434761.html</a></p> 
+   <div class="Blog_wz1"> 
+    <div>
+     简单实现dump_stack
+    </div> 
+    <div>
+     0.首先确保你能写个内核模块:打印"hello kernel"
+    </div> 
+    <div>
+     &nbsp;&nbsp;如果熟悉dump_stack的话，完全可以绕开此文，或者自己去看dump_stack代码实现之。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     1.dump_stack是什么
+    </div> 
+    <div>
+     经常调试内核一定对这个函数不陌生，因为我们大多数人调试内核的时候都受这个函数的
+    </div> 
+    <div>
+     折磨，不信，那么我们调用下这个函数看看(随意写个内核模块调用dump_stack()，插入内核),
+    </div> 
+    <div>
+     我们来看看输出:
+    </div> 
+    <div>
+     Pid: 9982, comm: insmod Not tainted 2.6.31.5-127.fc12.i686.PAE #1
+    </div> 
+    <div>
+     Call Trace:
+    </div> 
+    <div>
+     &nbsp;[&lt;f7e98008&gt;] init+0x8/0xc [hello]
+    </div> 
+    <div>
+     &nbsp;[&lt;c040305b&gt;] do_one_initcall+0x51/0x13f
+    </div> 
+    <div>
+     &nbsp;[&lt;c0462e2f&gt;] sys_init_module+0xac/0x1bd
+    </div> 
+    <div>
+     &nbsp;[&lt;c0408f7b&gt;] sysenter_do_call+0x12/0x28
+    </div> 
+    <div>
+     看到输出，大家一定很熟悉, 没见过类似输出的，一定没把kernel搞崩过.
+    </div> 
+    <div>
+     (来我教你:*(int *)NULL = 0xdead;)
+    </div> 
+    <div>
+     其实不见得每次内核崩溃都会调用dump_stack，但是看到dump_stack的我们不应该被吓到，
+    </div> 
+    <div>
+     反而应该高兴：内核在临挂前还喘口气给我们提示了宝贵的调试信息
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     2.构造dump_stack第一句
+    </div> 
+    <div>
+     有的人已经不耐烦我这唠叨，自己开始查看代码了,但是为了满足我们小小的虚荣，看懂还不行，
+    </div> 
+    <div>
+     自己也要来写个玩玩,不能老被dump_stack欺负阿。
+    </div> 
+    <div>
+     我们看看dump_stack里面第一句代码：
+    </div> 
+    <div>
+     &nbsp;printk("Pid: %d, comm: %.20s %s %s %.*s\n",
+    </div> 
+    <div>
+     &nbsp;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; current-&gt;pid, current-&gt;comm, print_tainted(),
+    </div> 
+    <div>
+     &nbsp;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; init_utsname()-&gt;release,
+    </div> 
+    <div>
+     &nbsp;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (int)strcspn(init_utsname()-&gt;version, " "),
+    </div> 
+    <div>
+     &nbsp;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; init_utsname()-&gt;version);
+    </div> 
+    <div>
+     这里就不解释printk每个参数了，代码本身就自解释了，剩下的请google，
+    </div> 
+    <div>
+     对于不太理解print_tainted,请看下此函数实现的源码上方的注释：）
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     3.构造dump_stack的call trace
+    </div> 
+    <div>
+     1)先来句printk("Call Trace:\n"),
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     2)接下来就神奇了，当初我就觉得能将函数执行流打印出来实在是很神奇，内核到底用了什么方法呢？
+    </div> 
+    <div>
+     先不说，我们来看一句简单的代码：
+    </div> 
+    <div>
+     <span> printk("[&lt;%p&gt;] %pS\n", &amp;printk, &amp;printk);</span>
+    </div> 
+    <div>
+     观察输出:
+    </div> 
+    <div>
+     <span> [&lt;c0776cf4&gt;] printk+0x0/0x1c</span>
+    </div> 
+    <div>
+     你发现，这个输出结果和dump_stack输出的部分惊人的相似，但是我们传给printk的参数是确确实实的
+    </div> 
+    <div>
+     地址值，原来prink自己能转换地址到相应的函数名，只要用参数"%pS"就可以了。
+    </div> 
+    <div>
+     我相信看到这里的人，估计已经走开自己去实现dump_stack玩了。
+    </div> 
+    <div>
+     但是输出也可能是：
+    </div> 
+    <div>
+     <span> [&lt;c0776cf4&gt;] c0776cf4S</span>
+    </div> 
+    <div>
+     如果你不幸看到这个，那么你还是升级下内核吧，或者仔细阅读下dump_stack代码，完全靠自己去实现
+    </div> 
+    <div>
+     下，那么你收获一定会远超出这篇文章。
+    </div> 
+    <div>
+     printk之所以能够识别函数地址，靠的是kallsyms子系统的帮助，
+    </div> 
+    <div>
+     用过类似grep -w "printk" /proc/kallsyms命令的人，一定要好好谢谢这个子系统，
+    </div> 
+    <div>
+     多亏它我们才能从内核导出symbol
+    </div> 
+    <div>
+     深入研究kallsyms就靠大家了。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     3)在刚刚的惊喜后，我们回到正题，怎么用printk把当前的执行流打印出来？
+    </div> 
+    <div>
+     这里用到x86中堆栈对函数调用的帮助，详细信息请google，我们要知道一点：每次函数调用时候，
+    </div> 
+    <div>
+     都会将函数的返回地址(调用函数指令的下一句指令的地址)压入堆栈，已备函数返回时。
+    </div> 
+    <div>
+     我们就可以靠这个返回地址来帮助打印函数执行流。
+    </div> 
+    <div>
+     但是这个地址并不是一个函数的准确地址呀？
+    </div> 
+    <div>
+     %pS需要的参数不一定是准确的函数地址，在函数内部任意指令地址都可以，这就解释了输出形式是
+    </div> 
+    <div>
+     "printk+0x0/0x1c"，0x0表示参数地址相对于printk地址的偏移，0x1c表示printk函数大小。
+    </div> 
+    <div>
+     你可以尝试下：printk("%pS\n", &amp;printk + 1);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     并且如果函数属于某个模块，还会在输出后面加上模块名称，类似：" [&lt;f8cd40a5&gt;] exit+0xd/0xf [hello]"
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     这里知道地址在堆栈里，那么怎么取堆栈呢?
+    </div> 
+    <div>
+     其实很简单：
+    </div> 
+    <div>
+     int stack_pointer;
+    </div> 
+    <div>
+     我们只要取临时变量地址值 &amp;stack_pointer 就可以了(也可以用内联汇编取esp值)，然后只要循环遍历堆栈上所有值，然后判断该值是否在
+    </div> 
+    <div>
+     内核代码段空间内，如果是那么就用%pS输出。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     那么堆栈的结束地址是什么呢？
+    </div> 
+    <div>
+     就是当前进程的内核态堆栈段，不懂的话请google，一定要搞清除这个。
+    </div> 
+    <div>
+     这里我们记堆栈底为:
+    </div> 
+    <div>
+     bottom = (unsigned int)current_thread_info() + THREAD_SIZE;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     但是怎么判断地址值是否在内核代码段呢？
+    </div> 
+    <div>
+     我们可以用kernel_text_address这个函数就可以了，但是很不幸的是此函数内核没有导出，我们不能使用，
+    </div> 
+    <div>
+     那么我们就自己实现个kernel_text_address吧，但是更不幸的是此函数内部实现所依赖的变量_etext等也没有
+    </div> 
+    <div>
+     被内核导出，其实我也没想到很好的方法，索性就用个笨办法:
+    </div> 
+    <div>
+     手动找出此函数内核中的地址，
+    </div> 
+    <div>
+     # grep kernel_text_address /proc/kallsyms
+    </div> 
+    <div>
+     c044f107 T kernel_text_address
+    </div> 
+    <div>
+     在代码中通过地址值调用kernel_text_address
+    </div> 
+    <div>
+     int (*kernel_text_addressp)(unsigned int) = (int (*)(unsigned int))0xc044f107;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     4)给出个较为完整的代码(在本机上写的：2.6.31.5-127.fc12.i686.PAE, 虚拟机上文档写的麻烦)
+    </div> 
+    <div>
+     #include &lt;linux/init.h&gt;
+    </div> 
+    <div>
+     #include &lt;linux/module.h&gt;
+    </div> 
+    <div>
+     #include &lt;linux/kernel.h&gt;
+    </div> 
+    <div>
+     #include &lt;linux/utsname.h&gt;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     /*&nbsp;
+    </div> 
+    <div>
+     &nbsp;* change the value to real addr of kernel_text_address :
+    </div> 
+    <div>
+     &nbsp;* grep -w kernel_text_address /proc/kallsyms
+    </div> 
+    <div>
+     &nbsp;*/
+    </div> 
+    <div>
+     static int (*kernel_text_addressp)(unsigned int) = (int (*)(unsigned&nbsp;int))0xc044f107;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     void my_dump_stack(void)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     <span> unsigned int stack;</span>
+    </div> 
+    <div>
+     <span> unsigned int bottom;</span>
+    </div> 
+    <div>
+     <span> unsigned int addr;</span>
+    </div> 
+    <div>
+     <span> printk("Pid: %d, comm: %.20s %s %s %.*s\n",</span>
+    </div> 
+    <div>
+     <span> current-&gt;pid, current-&gt;comm, print_tainted(),</span>
+    </div> 
+    <div>
+     <span> init_utsname()-&gt;release,</span>
+    </div> 
+    <div>
+     <span> (int)strcspn(init_utsname()-&gt;version, " "),</span>
+    </div> 
+    <div>
+     <span> init_utsname()-&gt;version);&nbsp;</span>
+    </div> 
+    <div>
+     <span> printk("Call Trace:\n");</span>
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     <span> /* get stack point */</span>
+    </div> 
+    <div>
+     <span> stack = (unsigned int)&amp;stack;</span>
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     <span> /* get stack bottom point */</span>
+    </div> 
+    <div>
+     <span> bottom = (unsigned int)current_thread_info() + THREAD_SIZE;</span>
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     <span> for (; stack &lt; bottom; stack += 4) {</span>
+    </div> 
+    <div>
+     <span> addr = *(unsigned int *)stack;</span>
+    </div> 
+    <div>
+     <span> if (kernel_text_addressp(addr))</span>
+    </div> 
+    <div>
+     <span> printk(" [&lt;%p&gt;] %pS\n", (void *)addr, (void *)addr);</span>
+    </div> 
+    <div>
+     <span> }</span>
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     static int __init init(void)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     <span> /* test */</span>
+    </div> 
+    <div>
+     <span> my_dump_stack();</span>
+    </div> 
+    <div>
+     <span> return 0;</span>
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     static void __exit exit(void)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     <span> /* test */</span>
+    </div> 
+    <div>
+     <span> my_dump_stack();</span>
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     MODULE_LICENSE("GPL");
+    </div> 
+    <div>
+     module_init(init);
+    </div> 
+    <div>
+     module_exit(exit);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     3.改进
+    </div> 
+    <div>
+     1)
+    </div> 
+    <div>
+     如果你还没厌烦的话，这里有个改进的地方。
+    </div> 
+    <div>
+     你会发现内核中的dump_stack会又类似如下输出：
+    </div> 
+    <div>
+     &nbsp;[&lt;c04cf4e6&gt;] ? path_put+0x1a/0x1d
+    </div> 
+    <div>
+     这里有个问号：这个表示堆栈中有确有此值(某个函数内部地址)，但是并不代表此函数被
+    </div> 
+    <div>
+     执行，也许这个值是个临时变量寄存在堆栈中。
+    </div> 
+    <div>
+     要区分这个很容易，只要比较地址值所在堆栈的位置是否紧贴当前函数栈空间底的上方，
+    </div> 
+    <div>
+     可以利用ebp(记录当前堆栈底)指针值来作比较，代码就留给大家写了。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     2)
+    </div> 
+    <div>
+     x86 64 实现要比x86 32复杂(见内核注释)：
+    </div> 
+    <div>
+     /*
+    </div> 
+    <div>
+     &nbsp;* x86-64 can have up to three kernel stacks:
+    </div> 
+    <div>
+     &nbsp;* process stack
+    </div> 
+    <div>
+     &nbsp;* interrupt stack
+    </div> 
+    <div>
+     &nbsp;* severe exception (double fault, nmi, stack fault, debug, mce) hardware stack
+    </div> 
+    <div>
+     &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     4.后记
+    </div> 
+    <div>
+     你可能认为作者在忽悠你，这就整一个dump_stack注释的文章呀，贯上了写dump_stack的头衔！
+    </div> 
+    <div>
+     我只有一句话：
+    </div> 
+    <div>
+     Just for fun！
+    </div> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

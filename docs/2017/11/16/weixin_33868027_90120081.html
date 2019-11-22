@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>EF+MySQL乐观锁控制电商并发下单扣减库存，在高并发下的问题 « NotBeCN</title>
+  <meta name="description" content="             下订单减库存的方式    现在，连农村的大姐都会用手机上淘宝购物了，相信电商对大家已经非常熟悉了，如果熟悉电商开发的同学，就知道在买家下单购买商品的时候，是需要扣减库存的，当然有2种扣减库存的方式，    一种是预扣库存，相当于锁定库存，    一种是直接扣减库存。    我们采用的是预...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/16/weixin_33868027_90120081.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">EF+MySQL乐观锁控制电商并发下单扣减库存，在高并发下的问题</h1>
+    <p class="post-meta">Nov 16, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">下订单减库存的方式</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">现在，连农村的大姐都会用手机上淘宝购物了，相信电商对大家已经非常熟悉了，如果熟悉电商开发的同学，就知道在买家下单购买商品的时候，是需要扣减库存的，当然有2种扣减库存的方式，</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">一种是预扣库存，相当于锁定库存，</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">一种是直接扣减库存。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">我们采用的是预扣库存的方式，预扣库存的时候，在SalesInfo表中，将最大可售数量MaxSalesNum减去购买数量，用一条SQL语句来表示这个业务，就是下面这个样子的：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">update</span> salesinfo <span style="color:rgb(0,0,255);line-height:1.5;">set</span> MaxSalesNum<span style="color:rgb(128,128,128);line-height:1.5;">=</span>MaxSalesNum<span style="color:rgb(128,128,128);line-height:1.5;">-</span><span style="color:rgb(0,128,0);line-height:1.5;">@BuyNum</span> <span style="color:rgb(0,0,255);line-height:1.5;">where</span> Id<span style="color:rgb(128,128,128);line-height:1.5;">=</span><span style="color:rgb(0,128,0);line-height:1.5;">@ID</span></pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;这是SqlServer的SQL语句格式，其它数据库大同小异。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">下面讨论如何在高并发下实现这个扣减库存的问题。</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">初试：EF手工版乐观锁</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">我们用的EF(Entity Framework)+MySQL，很不幸，在 EF&nbsp;中没法直接实现这个效果，它的DbContext数据上下文决定了要完成这种情况下的修改，得先查询到指定的数据到EF缓存，然后修改数据，最后保存数据， 更新可售库存的程序看起来是下面这个样子的（第一版的代码）：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">protected</span> <span style="color:rgb(0,0,255);line-height:1.5;">override</span> <span style="color:rgb(0,0,255);line-height:1.5;">int</span><span style="line-height:1.5;"> ChangeStock(SalesInfo salesInfo, OrderDetail detail)
+{
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">using</span> (<span style="color:rgb(0,0,255);line-height:1.5;">var</span> productdbContext = <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> UnitContextProducts())
+    {
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">using</span> (<span style="color:rgb(0,0,255);line-height:1.5;">var</span> c =<span style="line-height:1.5;"> productdbContext.BeginTransaction(System.Data.IsolationLevel.ReadCommitted))
+        {
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">int</span> retry = <span style="color:rgb(128,0,128);line-height:1.5;">10</span>;<span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">如果出现更新的并发冲突，尝试一定次数</span>
+            <span style="color:rgb(0,0,255);line-height:1.5;">do</span><span style="line-height:1.5;">
+            {
+                        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">查询最新的商品可售数量，由于EF 没法使用更新锁 forupdate,所以需要取时间戳用乐观锁</span>
+                        <span style="color:rgb(0,0,255);line-height:1.5;">var</span> currSalesInfo = (<span style="color:rgb(0,0,255);line-height:1.5;">from</span> p <span style="color:rgb(0,0,255);line-height:1.5;">in</span> productdbContext.Repository&lt;dalProductModel.SalesInfo&gt;<span style="line-height:1.5;">().Entities
+                                             </span><span style="color:rgb(0,0,255);line-height:1.5;">where</span> p.Id ==<span style="line-height:1.5;"> salesInfo.Id
+                                             </span><span style="color:rgb(0,0,255);line-height:1.5;">select</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;">
+                                     {
+                                                 p.ModifiedTime,
+                                                 p.SkuId,
+                                                 p.MaxSalesNum,
+                                                 p.Id
+                                     }).FirstOrDefault();
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (currSalesInfo != <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">)
+                {
+                   </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">重新计算扣减后的库存，但是由于整个订单的处理不在当前事务内，还是有可能出现超买</span>
+                   <span style="color:rgb(0,0,255);line-height:1.5;">int</span> currStock = currSalesInfo.MaxSalesNum -<span style="line-height:1.5;"> detail.Quantity;
+                   </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">加上时间戳进行更新判断，乐观锁，处理扣减库存的并发问题</span>
+                   productdbContext.Repository&lt;dalProductModel.SalesInfo&gt;().Update(p =&gt;<span style="line-height:1.5;">
+                                p.Id </span>== currSalesInfo.Id &amp;&amp;<span style="line-height:1.5;">
+                                p.MaxSalesNum </span>== currSalesInfo.MaxSalesNum &amp;&amp;<span style="line-height:1.5;">
+                                p.ModifiedTime </span>==<span style="line-height:1.5;"> currSalesInfo.ModifiedTime,
+                   p </span>=&gt; <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> dalProductModel.SalesInfo
+                   {
+                               MaxSalesNum </span>=<span style="line-height:1.5;"> currStock,
+                               ModifiedTime </span>=<span style="line-height:1.5;"> DateTime.Now,
+                   });
+                   c.Commit();
+                   </span><span style="color:rgb(0,0,255);line-height:1.5;">int</span> count =<span style="line-height:1.5;"> productdbContext.Commit();
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (count &gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+                    {
+                                salesInfo.MaxSalesNum </span>=<span style="line-height:1.5;"> currStock;
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> count;
+                    }
+                    System.Threading.Thread.Sleep(</span><span style="color:rgb(128,0,128);line-height:1.5;">1000</span><span style="line-height:1.5;">);
+                }
+            }
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">while</span> (--retry &gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">);
+                    
+        }
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">;
+    }
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;上面的程序中，detail.Quantity 表示本次要购买的某个商品数量，currSalesInfo 是当前根据商品ID查询出来的数据，</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">int</span> currStock = currSalesInfo.MaxSalesNum - detail.Quantity;</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><span style="color:rgb(0,0,255);"><span style="color:rgb(0,0,0);"><br> 这个语句表示计算得到的预扣库存后的新库存，Update 方法是我们对EF进行的一个封装，第一个参数是要更新的条件，第二个参数是要更新的数据。</span></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><span style="color:rgb(0,0,255);"><span style="color:rgb(0,0,0);">这里采用商品表的 ModifiedTime&nbsp;字段来表示自上一次查询以后，看本次修改的时候有没有另外一个人先修改了，所以这里用&nbsp;ModifiedTime&nbsp;作修改的附加条件，相当于是一个“乐观锁”。</span></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><span style="color:rgb(0,0,255);"><span style="color:rgb(0,0,0);">但是，经过简单压力测试，上面这个程序会出现“超买”，没有控制到并发修改库存的问题，</span></span>于是尝试用“<strong>EF乐观锁</strong>”来解决这个扣减库存的问题，</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">进阶：EF乐观锁</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br> 参考了2篇文章《<a id="cb_post_title_url" href="http://www.cnblogs.com/faron/articles/3640085.html" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">EF在MySQL中对记录的乐观并发控制(原创)</a>》，《<a href="http://www.cnblogs.com/jlzhou/archive/2013/03/15/2960759.html" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">MySQL 实现 EF Code First TimeStamp/RowVersion 并发控制</a>》，由于我们也是EF CodeFirst，所以着重参考了第二篇文章的做法，并且将ModifiedTime&nbsp;字段改造成Timespan&nbsp;类型，并添加触发器以便每次修改数据的时候自动更新该字段值，与支持EF的乐观锁，具体做法过程请参考第二篇文章内容。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">下面是改写的代码（改写第二版）：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">using (var trans = productdbContext.BeginTransaction(System.Data.IsolationLevel.ReadCommitted))
+            </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">{
+                </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">如果出现更新的并发冲突，尝试一定次数</span>
+                <span style="color:rgb(0,0,255);line-height:1.5;">bool</span> retry = <span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">int</span> retrycount = <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">;
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">do</span><span style="line-height:1.5;">
+                {
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> currSalesInfo = (<span style="color:rgb(0,0,255);line-height:1.5;">from</span> p <span style="color:rgb(0,0,255);line-height:1.5;">in</span> productdbContext.DbContext.Set&lt;dalProductModel.SalesInfo&gt;<span style="line-height:1.5;">()
+                                         </span><span style="color:rgb(0,0,255);line-height:1.5;">where</span> p.Id == salesInfo.Id
+                                         <span style="color:rgb(0,0,255);line-height:1.5;">select</span><span style="line-height:1.5;"> p).FirstOrDefault();
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (currSalesInfo == <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">)
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">throw</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span> Exception(<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">没有找到指定的SalesInfo 记录: </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> +<span style="line-height:1.5;"> salesInfo.Id);
+                    if(currSalesInfo.MaxSalesNum&lt;=0) <span style="color:rgb(51,153,102);line-height:1.5;">//必须判断,否则可能出现超卖</span><br>
+return 0;
+                    </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">重新计算扣减后的库存，但是由于整个订单的处理不在当前事务内，还是有可能出现超买</span>
+                    <span style="color:rgb(0,0,255);line-height:1.5;">int</span> currStock = currSalesInfo.MaxSalesNum -<span style="line-height:1.5;"> detail.Quantity;
+                    currSalesInfo.MaxSalesNum </span>=<span style="line-height:1.5;"> currStock;
+
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">try</span><span style="line-height:1.5;">
+                    {
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">int</span> count =<span style="line-height:1.5;"> productdbContext.DbContext.SaveChanges();
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (count &gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+                        {
+                            </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">trans.Commit();</span>
+                            <span style="color:rgb(51,153,102);line-height:1.5;">//salesInfo.MaxSalesNum =</span><span style="line-height:1.5;"><span style="color:rgb(51,153,102);line-height:1.5;"> currStock; //网友 Ivan 提示要注释这个 </span>                            retry </span>= <span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> count;
+                        }
+                    }
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">catch</span><span style="line-height:1.5;"> (DbUpdateConcurrencyException ex)
+                    {
+                        retry </span>= <span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">;
+                        ex.Entries.Single().Reload(); 
+                    }
+                    retrycount</span>++<span style="line-height:1.5;">;
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (retrycount &gt; <span style="color:rgb(128,0,128);line-height:1.5;">100</span><span style="line-height:1.5;">)
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">break</span><span style="line-height:1.5;">;
+                }
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">while</span><span style="line-height:1.5;"> (retry);
+           </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> }</span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">end using</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">注：为了避免我们对EF封装可能代码的问题，这里完全使用了EF最原始的方式来编写代码。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">满怀希望的开始了测试，在<strong>每秒5次并发</strong>的时候，就出现了多扣减库存的问题。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">结果不令人满意，还是会出现多扣减库存的问题。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">进而反复改进事务的隔离级别，结果发现没有改善。<br> 将代码仔细对比了原来博客文章，还有MSDN关于检测EF并发的文章，确认代码是正确的！</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">无奈：EF的ESQL</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">最后，又去国外技术论坛找了很久，无果，没有看到有这方面的说明，<strong>例子大部分都是SqlServer</strong>的，莫非这个并发功能对MySQL支持不好？</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">无赖之下，只有手写SQL上了，于是用ESQL，改写成下面的代码（第三版）：</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre> <span style="color:rgb(0,0,255);line-height:1.5;">protected</span> <span style="color:rgb(0,0,255);line-height:1.5;">override</span> <span style="color:rgb(0,0,255);line-height:1.5;">int</span><span style="line-height:1.5;"> ChangeStock(SalesInfo salesInfo, OrderDetail detail)
+        {
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> productdbContext = <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> UnitContextProducts();
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">string</span> sql = <span style="color:rgb(0,0,255);line-height:1.5;">string</span>.Format(<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">update salesinfo set MaxSalesNum=MaxSalesNum-{0} where Id={1}</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, detail.Quantity, salesInfo.Id);
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">int</span> count1 =<span style="line-height:1.5;"> productdbContext.DbContext.Database.ExecuteSqlCommand(sql);
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> count1;
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">OK，成功解决问题，原来问题解决起来如此简单，就是一条SQL语句：</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><span style="color:rgb(128,0,0);">update salesinfo set MaxSalesNum=MaxSalesNum-{0} where Id={1}</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">但是EF没有这种更新的时候，字段自增自减的功能。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">问题虽然解决了，发现前面几个版本的代码好臃肿，但这样写，可能会引起新的问题，SQL语句的移植性降低了，不同数据库对表名字段名的格式要求可能会不同，比如Linux上的MySQL严格区分表名大小写，而Windows上的MySQL没有这个要求。</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">品尝 “SOD框架”的小菜</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">如果是SOD 框架，这个问题其实很好解决，用OQL的字段自更新语句即可：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>SalesinfoEntity salesinfo=<span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> SalesinfoEntity()
+{
+  ID</span>=<span style="color:rgb(128,0,128);line-height:1.5;">99</span><span style="line-height:1.5;">,
+  MaxSalesNum</span>=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> <span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">要预扣的库存数</span>
+<span style="line-height:1.5;">};
+</span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> q=<span style="line-height:1.5;">OQL.From(salesinfo)
+  .<strong>UpdateSelf</strong>(</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">-</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">,salesinfo.MaxSalesNum)
+  .Where(salesinfo.ID)
+.END;
+EntityQuery</span>&lt;SalesinfoEntity&gt;.Instance.ExecuteOql(q);<span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">假设只有一个连接字符串配置</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SOD框架式PDF.NET框架的数据开发框架，它简化了各种数据操作，其中的OQL是框架的ORM查询语言，这个字段自更新功能的更多信息，可以查看这篇文章《<a href="http://www.cnblogs.com/bluedoctor/archive/2013/04/01/2992981.html" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">ORM查询语言（OQL）简介--实例篇</a>》 &nbsp;2.1.2，UpdateSelf 字段自更新</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">如果你觉得EF在某些方面束缚了你的拳脚，可以选择SOD框架试试看，相信你选择它没错，尤其在金融和电商领域，目前框架已经有很多成功案例，<a href="http://www.pwmis.com/sqlmap/#yyal" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">请点击链接</a>。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SOD框架已经全面开源，参见《<a id="homepage1_HomePageDays_ctl00_DayList_TitleUrl_0" href="http://www.cnblogs.com/bluedoctor/p/4273610.html" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">[置顶]一年之计在于春，2015开篇：PDF.NET SOD Ver 5.1完全开源</a>》。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><span style="color:rgb(255,0,0);font-size:18px;">补充:</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在网友 上海-Ival的帮助下,他告诉我主要是 默认情况下MySQL DateTime 数据精度不够，需要使用精度更高的 timestamp 类型，并指定数据更新的时候地默认值，采用下面类似的SQL语句修改当前列的类型：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">ALTER</span> <span style="color:rgb(0,0,255);line-height:1.5;">TABLE</span><span style="line-height:1.5;"> `test2`.`salesinfo` 
+CHANGE </span><span style="color:rgb(0,0,255);line-height:1.5;">COLUMN</span><span style="line-height:1.5;"> `ModifiedTime` `ModifiedTime` 
+</span><span style="color:rgb(0,0,255);line-height:1.5;">timestamp</span>(<span style="color:rgb(128,0,0);font-weight:bold;line-height:1.5;">6</span>) <span style="color:rgb(0,0,255);line-height:1.5;">NULL</span> <span style="color:rgb(0,0,255);line-height:1.5;">DEFAULT</span> <span style="color:rgb(255,0,255);line-height:1.5;">CURRENT_TIMESTAMP</span>(<span style="color:rgb(128,0,0);font-weight:bold;line-height:1.5;">6</span>) <span style="color:rgb(0,0,255);line-height:1.5;">ON</span> <span style="color:rgb(0,0,255);line-height:1.5;">UPDATE</span> <span style="color:rgb(255,0,255);line-height:1.5;">CURRENT_TIMESTAMP</span>(<span style="color:rgb(128,0,0);font-weight:bold;line-height:1.5;">6</span>) ;</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">注意要指定精度为6。<br> 实体类属性 ModifiedTime不用修改，仍然使用DateTime 类型。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">但是需要指定属性为并发标记，代码如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre> <span style="color:rgb(0,0,255);line-height:1.5;">public</span><span style="line-height:1.5;"> class ProductdbContext : DbContext
+    {
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span> DbSet<span style="color:rgb(128,128,128);line-height:1.5;">&lt;</span>SalesInfo<span style="color:rgb(128,128,128);line-height:1.5;">&gt;</span> SalesInfoes{get;<span style="color:rgb(0,0,255);line-height:1.5;">set</span><span style="line-height:1.5;">;}
+
+        protected override void OnModelCreating(DbModelBuilder modelBuilder)
+        {
+            base.OnModelCreating(modelBuilder);
+
+            modelBuilder.Entity</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;</span>SalesInfo<span style="color:rgb(128,128,128);line-height:1.5;">&gt;</span><span style="line-height:1.5;">()
+                .Property(p </span><span style="color:rgb(128,128,128);line-height:1.5;">=&gt;</span><span style="line-height:1.5;"> p.ModifiedTime)
+                .IsConcurrencyToken();
+        }
+    }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">经过这样改进后，EF+MySQL终于可以处理并发更新了，非常感谢网友 上海-Ival 的帮助！</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><span style="text-decoration:underline;">PS：虽然解决了本文的问题，但是EF这种并发处理方案，在代码编写上还是略显麻烦，是否使用ESQL或者其它ORM框架，看你的偏好了。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p><font><span style="font-size:15px;">&nbsp; &nbsp; 本文转自深蓝医生博客园博客，原文链接：http://www.cnblogs.com/bluedoctor/p/4294655.html</span></font><span style="font-size:15px;font-family:Verdana, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <div>
+    <br>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

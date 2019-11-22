@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>理解 QEMU/KVM 和 Ceph（2）：QEMU 的 RBD 块驱动（block driver） « NotBeCN</title>
+  <meta name="description" content="             本系列文章会总结 QEMU/KVM 和 Ceph 之间的整合：    （1）QEMU-KVM 和 Ceph RBD 的 缓存机制总结    （2）QEMU 的 RBD 块驱动（block driver）    （3）存储卷挂接和设备名称    &nbsp;    1. QEMU 的 RB...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/18/weixin_33881050_90126046.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">理解 QEMU/KVM 和 Ceph（2）：QEMU 的 RBD 块驱动（block driver）</h1>
+    <p class="post-meta">Nov 18, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">本系列文章会总结 QEMU/KVM 和 Ceph 之间的整合：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://www.cnblogs.com/sammyliu/p/5066895.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（1）QEMU-KVM 和 Ceph RBD 的 缓存机制总结</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://www.cnblogs.com/sammyliu/p/5095976.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（2）QEMU 的 RBD 块驱动（block driver）</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://www.cnblogs.com/sammyliu/p/5325492.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（3）存储卷挂接和设备名称</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">1. QEMU 的 RBD 块驱动</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; QEMU/KVM 虚机中的磁盘（disk drive），可能虚拟自 Hypervisor 上的 qcow2，raw 等格式的镜像文件，也可能来自网络块设备存储系统比如 Ceph 的一个卷等。QEMU 使用一套统一的插件式的块设备驱动架构，它定义了若干需要每种块设备驱动实现的接口。Ceph RBD 作为其中的一种，与其它种类的块设备驱动没有本质区别。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.1 QEMU 存储设备</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">客户机可以拥有的设备和介质：Floppy, CD-ROM, USB stick, SD card,&nbsp;harddisk</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">主机上的存储设备和介质：</span></p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">文件，包括 img，iso，NFS 等</li> 
+    <li style="list-style-type:disc;">CD-ROM (/dev/cdrom)块设备，包括 /dev/sda3, LVM volumes,&nbsp;iSCSI LUNs 等</li> 
+    <li style="list-style-type:disc;">分布式存储，比如 Sheepdog, Ceph 等</li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">客户机中的块设备驱动的定义：qemu -drive &nbsp;file=path/to/img,if=none|ide|virtio|scsi,cache=writethrough|writeback|none|unsafe</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">其中，file 指定主机上的镜像文件或者块设备的路径，if 指定存储接口，cache 指定缓存模式。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">比如：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）使用镜像文件虚拟的 diskdrive</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>-drive file=/var/lib/nova/instances/cc388037-18dc-4159-896c-2b7180e7dd20/disk,if=none,id=drive-virtio-disk0,format=qcow2,cache=none -device virtio-blk-pci,scsi=off,bus=pci.0,addr=0x4,drive=drive-virtio-disk0,id=virtio-disk0,bootindex=1</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）使用 Ceph 卷虚拟的 diskdrive</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>-drive file=rbd:volumes/volume-512c91d8-a4da-4dcf-b5aa-ef43cf25cb3a:id=cinder:key=AQBc4vtV+JywHhAAqX8N+M69PhIJuUzf1mqNAg==:auth_supported=cephx\;none:mon_host=9.115.251.194\:6789\;9.115.251.195\:6789\;9.115.251.218\:6789,if=none,id=drive-virtio-disk1,format=raw,serial=512c91d8-a4da-4dcf-b5aa-ef43cf25cb3a,cache=writeback -device virtio-blk-pci,scsi=off,bus=pci.0,addr=0x6,drive=drive-virtio-disk1,id=virtio-disk1&nbsp;</pre>
+   </div> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.2 QEMU 存储栈</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/697113/201601/697113-20160103104046979-1968698313.jpg" alt="" width="449" height="277" style="border:0px;">&nbsp;<img src="https://images2015.cnblogs.com/blog/697113/201601/697113-20160103104151542-377419474.jpg" alt="" width="418" height="284" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; Virtio 是准虚拟化存储接口，提供较好的性能，其中，virtio_blk 是准虚拟化块设备接口。IDE 是 QEMU 全虚拟化接口，提供最好的兼容性，但是性能最差。SCSI 是新的给特定设备的接口。本文以 virtio 为阐述对象。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; Virtio 的工作流程（更详细的流程，请访问 &nbsp;<a href="http://www.cnblogs.com/sammyliu/p/4543657.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">KVM 介绍（3）：I/O 全虚拟化和准虚拟化</a>）：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;text-align:center;"><img src="https://images2015.cnblogs.com/blog/697113/201601/697113-20160103110457292-591664108.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; 客户机中的应用通过 vfs （linux 虚拟文件系统）访问其由 Ceph image 映射而来的磁盘，该访问通过 virtio 传到 QEMU，它调用响应的块设备驱动来访问该磁盘对应的块存储。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; QEMU 需要支持多种块设备，因此，在其代码中，它定义了一个块设备数据结构（BlockDriver），其中包括各种属性，以及各种块设备驱动需要实现的函数。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.3 QEMU 的&nbsp;Ceph RBD 块设备驱动概述</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">(以 QEMU 2.2 代码为分析目标)</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;text-align:center;"><img src="https://images2015.cnblogs.com/blog/697113/201601/697113-20160103105530385-1083568748.jpg" alt="" width="484" height="261" style="border:0px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; 对 RBD 驱动来说，QEMU 对于通过 virtio 传过来的虚拟磁盘读写请求，会将其转化为通过 librbd 对 Ceph MON 和 OSD 服务的访问。主要操作包括：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">static</span> BlockDriver bdrv_rbd =<span style="line-height:1.5;"> {
+    .format_name        </span>= <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+    .instance_size      </span>= <span style="color:rgb(0,0,255);line-height:1.5;">sizeof</span><span style="line-height:1.5;">(BDRVRBDState),
+    .bdrv_needs_filename </span>= <span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">,
+    .bdrv_file_open     </span>=<span style="line-height:1.5;"> qemu_rbd_open,
+    .bdrv_close         </span>=<span style="line-height:1.5;"> qemu_rbd_close,
+    .bdrv_create        </span>=<span style="line-height:1.5;"> qemu_rbd_create,
+    .bdrv_has_zero_init </span>=<span style="line-height:1.5;"> bdrv_has_zero_init_1,
+    .bdrv_get_info      </span>=<span style="line-height:1.5;"> qemu_rbd_getinfo,
+    .create_opts        </span>= &amp;<span style="line-height:1.5;">qemu_rbd_create_opts,
+    .bdrv_getlength     </span>=<span style="line-height:1.5;"> qemu_rbd_getlength,
+    .bdrv_truncate      </span>=<span style="line-height:1.5;"> qemu_rbd_truncate,
+    .protocol_name      </span>= <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+    .bdrv_aio_readv         </span>=<span style="line-height:1.5;"> qemu_rbd_aio_readv,
+    .bdrv_aio_writev        </span>=<span style="line-height:1.5;"> qemu_rbd_aio_writev,
+#ifdef LIBRBD_SUPPORTS_AIO_FLUSH
+    .bdrv_aio_flush         </span>=<span style="line-height:1.5;"> qemu_rbd_aio_flush,
+</span><span style="color:rgb(0,0,255);line-height:1.5;">#else</span><span style="line-height:1.5;">
+    .bdrv_co_flush_to_disk  </span>=<span style="line-height:1.5;"> qemu_rbd_co_flush,
+</span><span style="color:rgb(0,0,255);line-height:1.5;">#endif</span><span style="line-height:1.5;">
+#ifdef LIBRBD_SUPPORTS_DISCARD
+    .bdrv_aio_discard       </span>=<span style="line-height:1.5;"> qemu_rbd_aio_discard,
+</span><span style="color:rgb(0,0,255);line-height:1.5;">#endif</span><span style="line-height:1.5;">
+    .bdrv_snapshot_create   </span>=<span style="line-height:1.5;"> qemu_rbd_snap_create,
+    .bdrv_snapshot_delete   </span>=<span style="line-height:1.5;"> qemu_rbd_snap_remove,
+    .bdrv_snapshot_list     </span>=<span style="line-height:1.5;"> qemu_rbd_snap_list,
+    .bdrv_snapshot_goto     </span>=<span style="line-height:1.5;"> qemu_rbd_snap_rollback,
+#ifdef LIBRBD_SUPPORTS_INVALIDATE
+    .bdrv_invalidate_cache  </span>=<span style="line-height:1.5;"> qemu_rbd_invalidate_cache,
+</span><span style="color:rgb(0,0,255);line-height:1.5;">#endif</span><span style="line-height:1.5;">
+};</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">其中，在一个 Ceph 卷第一次被连接到虚机，以及虚机启动时，QEMU 都会为它调用 &nbsp;qemu_rbd_open 函数。注意，qemu 是通过动态链接库的方式来使用 librbd 库的。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.4 QEMU 的&nbsp;qemu_rbd_open 函数</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">在虚机中使用一个从 Ceph volume 中虚拟而来的 disk drive 的第一步，是打开这个设备。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">static</span> <span style="color:rgb(0,0,255);line-height:1.5;">int</span> qemu_rbd_open(BlockDriverState *bs, QDict *options, <span style="color:rgb(0,0,255);line-height:1.5;">int</span><span style="line-height:1.5;"> flags, Error </span>**<span style="line-height:1.5;">errp) <span style="color:rgb(0,0,255);line-height:1.5;"># options 参数见下文描述</span>
+{
+    BDRVRBDState </span>*s = bs-&gt;<span style="line-height:1.5;">opaque;
+    </span><span style="line-height:1.5;"><span style="color:rgb(0,0,255);line-height:1.5;">...</span></span><span style="line-height:1.5;">
+    opts </span>= qemu_opts_create(&amp;runtime_opts, NULL, <span style="color:rgb(128,0,128);line-height:1.5;">0</span>, &amp;<span style="line-height:1.5;">error_abort);
+    qemu_opts_absorb_qdict(opts, options, </span>&amp;<span style="line-height:1.5;">local_err);
+    </span><span style="line-height:1.5;"><span style="color:rgb(0,0,255);line-height:1.5;">...</span></span><span style="line-height:1.5;">
+
+    filename </span>= qemu_opt_get(opts, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">filename</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (qemu_rbd_parsename(filename, pool, <span style="color:rgb(0,0,255);line-height:1.5;">sizeof</span><span style="line-height:1.5;">(pool),
+                           snap_buf, </span><span style="color:rgb(0,0,255);line-height:1.5;">sizeof</span><span style="line-height:1.5;">(snap_buf),
+                           s</span>-&gt;name, <span style="color:rgb(0,0,255);line-height:1.5;">sizeof</span>(s-&gt;<span style="line-height:1.5;">name),
+                           conf, </span><span style="color:rgb(0,0,255);line-height:1.5;">sizeof</span>(conf), errp) &lt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">) {
+        r </span>= -<span style="line-height:1.5;">EINVAL;
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">goto</span><span style="line-height:1.5;"> failed_opts;
+    }
+
+    clientname </span>=<span style="line-height:1.5;"> qemu_rbd_parse_clientname(conf, clientname_buf);
+    r </span>= rados_create(&amp;s-&gt;<span style="line-height:1.5;">cluster, clientname); <span style="color:rgb(0,0,255);line-height:1.5;">#创建一个handle，其中，cluster 是保存 handle 的数据结构，clientname 是访问 ceph 的username ...</span></span><span style="line-height:1.5;">
+
+    s</span>-&gt;snap =<span style="line-height:1.5;"> NULL;
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (snap_buf[<span style="color:rgb(128,0,128);line-height:1.5;">0</span>] != <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">\0</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">) {
+        s</span>-&gt;snap =<span style="line-height:1.5;"> g_strdup(snap_buf);
+    }
+
+    </span><span style="color:rgb(0,128,0);line-height:1.5;">/*</span><span style="color:rgb(0,128,0);line-height:1.5;">
+     * Fallback to more conservative semantics if setting cache
+     * options fails. Ignore errors from setting rbd_cache because the
+     * only possible error is that the option does not exist, and
+     * librbd defaults to no caching. If write through caching cannot
+     * be set up, fall back to no caching.
+     </span><span style="color:rgb(0,128,0);line-height:1.5;">*/</span>
+    <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (flags &amp;<span style="line-height:1.5;"> BDRV_O_NOCACHE) { <span style="color:rgb(0,0,255);line-height:1.5;">#当缓存模式为 nocache 时，设置 cluster 中的配置为 '关闭 rbd cache'</span>
+        rados_conf_set(s</span>-&gt;cluster, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">false</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+    } </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;"> { <span style="color:rgb(0,0,255);line-height:1.5;">#其它 cache 模式下，设置 cluster handle 中的配置为 '打开 rbd cache'</span>
+        rados_conf_set(s</span>-&gt;cluster, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">true</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+    }
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (strstr(conf, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">conf=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>) ==<span style="line-height:1.5;"> NULL) { <span style="color:rgb(0,0,255);line-height:1.5;">#当没有制定 ceph 配置文件时，调用 rados_conf_read_file 函数去读取默认的文件来配置 cluster handle。 </span></span><span style="color:rgb(0,128,0);line-height:1.5;">/*</span><span style="color:rgb(0,128,0);line-height:1.5;"> try default location, but ignore failure </span><span style="color:rgb(0,128,0);line-height:1.5;">*/</span><span style="line-height:1.5;">
+        rados_conf_read_file(s</span>-&gt;<span style="line-height:1.5;">cluster, NULL); <span style="color:rgb(0,0,255);line-height:1.5;">#默认文件主要为 </span></span></pre> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;"><span style="color:rgb(0,0,255);line-height:1.5;">/etc/ceph/ceph.conf</span></li>
+    </ul>
+    <pre><span style="line-height:1.5;">    }
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (conf[<span style="color:rgb(128,0,128);line-height:1.5;">0</span>] != <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">\0</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">) { 
+        r </span>= qemu_rbd_set_conf(s-&gt;<span style="line-height:1.5;">cluster, conf, errp); <span style="color:rgb(0,0,255);line-height:1.5;">#继续将配置保存到 handle cluster，如果包含 'conf=‘，则调用 rados_conf_read_file 函数读取该文件并将其内容保存到 cluster handle </span></span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (r &lt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">) {
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">goto</span><span style="line-height:1.5;"> failed_shutdown;
+        }
+    }
+    r </span>= rados_connect(s-&gt;<span style="line-height:1.5;">cluster); <span style="color:rgb(0,0,255);line-height:1.5;">#使用 cluster handle 连接到 ceph 集群，cluster handle 中的配置只有到此时才得到应用，之前一直在准备它。 ...</span></span><span style="line-height:1.5;">
+    r </span>= rados_ioctx_create(s-&gt;cluster, pool, &amp;s-&gt;<span style="line-height:1.5;">io_ctx); <span style="color:rgb(0,0,255);line-height:1.5;">#创建 ioctx ...</span></span><span style="line-height:1.5;">
+    r </span>= rbd_open(s-&gt;io_ctx, s-&gt;name, &amp;s-&gt;image, s-&gt;<span style="line-height:1.5;">snap); <span style="color:rgb(0,0,255);line-height:1.5;">#打开客户机磁盘对应的 Ceph image ...</span></span><span style="line-height:1.5;">
+    bs</span>-&gt;read_only = (s-&gt;snap !=<span style="line-height:1.5;"> NULL); <span style="color:rgb(0,0,255);line-height:1.5;">#如果是 snapshot 的，则只读</span>
+    qemu_opts_del(opts);
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">;
+</span><span style="line-height:1.5;">...
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">static</span> <span style="color:rgb(0,0,255);line-height:1.5;">int</span> qemu_rbd_set_conf(rados_t cluster, <span style="color:rgb(0,0,255);line-height:1.5;">const</span> <span style="color:rgb(0,0,255);line-height:1.5;">char</span> *conf, Error **<span style="line-height:1.5;">errp)
+{
+    </span><span style="line-height:1.5;"><span style="color:rgb(0,0,255);line-height:1.5;">...</span></span><span style="line-height:1.5;">
+    buf </span>=<span style="line-height:1.5;"> g_strdup(conf);
+    p </span>=<span style="line-height:1.5;"> buf;
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">while</span><span style="line-height:1.5;"> (p) {
+        ret </span>= qemu_rbd_next_tok(name, <span style="color:rgb(0,0,255);line-height:1.5;">sizeof</span><span style="line-height:1.5;">(name), p,</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">conf option name</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, &amp;<span style="line-height:1.5;">p, errp);
+        </span><span style="line-height:1.5;"><span style="color:rgb(0,0,255);line-height:1.5;">...</span></span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (strcmp(name, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">conf</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>) == <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">) {
+            ret </span>=<span style="line-height:1.5;"> rados_conf_read_file(cluster, value); <span style="color:rgb(0,0,255);line-height:1.5;">#如果配置中包括 "conf"，则将其内容读取到 cluster handle。可见，如果配置文件中有 rbd cache 的话，则会覆盖qemu之前所做的设置 ...</span></span><span style="line-height:1.5;">
+        } </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span> <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (strcmp(name, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">id</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>) == <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">) {
+            </span><span style="color:rgb(0,128,0);line-height:1.5;">/*</span><span style="color:rgb(0,128,0);line-height:1.5;"> ignore, this is parsed by qemu_rbd_parse_clientname() </span><span style="color:rgb(0,128,0);line-height:1.5;">*/</span><span style="line-height:1.5;">
+        } </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;"> {
+            ret </span>=<span style="line-height:1.5;"> rados_conf_set(cluster, name, value); <span style="color:rgb(0,0,255);line-height:1.5;">#将 conf 中的配置保存到 cluster handle</span>
+           ...</span><span style="line-height:1.5;">
+        }
+    }
+    g_free(buf);
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> ret;
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">说明，</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）options 是在 libvirt xml 中该 driver 的各种参数，比如 file、id、mon_hosts 等。比如&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>file=rbd:volumes/volume-512c91d8-a4da-4dcf-b5aa-ef43cf25cb3a:id=cinder:key=AQBc4vtV+JywHhAAqX8N+M69PhIJuUzf1mqNAg==:auth_supported=cephx\;none:mon_host=9.115.251.194\:6789\;9.115.251.195\:6789\;9.115.251.218\:6789,if=none,id=drive-virtio-disk1,format=raw,serial=512c91d8-a4da-4dcf-b5aa-ef43cf25cb3a,cache=writeback</pre>
+   </div> 
+   <pre>（2）注意，目前 nova 启动的虚机的 options 中，没有使用 ”conf=“ 来指定 Ceph 配置文件。因此，qemu 能否读到，取决于所调用的  rados_conf_read_file(s-&gt;cluster, NULL) 函数能否在默认位置读取到用户放置的文件，包括：</pre> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="line-height:1.5;">$CEPH_CONF (environment variable)
+</span>/etc/ceph/<span style="line-height:1.5;">ceph.conf
+</span>~/.ceph/<span style="line-height:1.5;">config
+ceph.conf (</span><span style="color:rgb(0,0,255);line-height:1.5;">in</span> the current working directory)</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（3）如果在默认位置有ceph.conf 文件，并且设置了 rbd cache，那么根据上面代码的执行顺序，ceph.conf 中的配置将覆盖 QEMU 设置的 rbd cache 的值。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（4）如果在默认位置没有 ceph.conf 文件，那么&nbsp;rados_conf_read_file(s-&gt;cluster, NULL) 将会失败，那么 rbd cache 是否开启将完全由 QEMU 根据 disk drive 的 cache mode 决定。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（5）从配置文件读 RBDCache 配置也是有道理的，因为一个 hypervisor 上的 RBDCache，不管各个客户机上的 disk drive 设置如何，其配置应该是唯一的。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（6）如果只需要支持将 ceph volume 连接到 Nova 虚机，完全只需要在 Hypervisor 节点上的 ceph.conf 中方式 RBDCache 配置参数，而不需其它比如 MON 地址这样的参数。因为，如果 Ceph 支持多个Ceph 集群的话，如果在 Ceph.conf 中放置 MON 地址等参数的话，由于 ceph.conf 会覆盖 QEMU 中 cinder 带来的配置，反而会带来问题。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（7）如果更改了 ceph 配置文件，需要重新挂接磁盘或者重启虚机。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（8）上面的分析是基于 qemu 2.2。但是，qemu 的代码变化很快，似乎在 qemu 2.4 里面行为发生了变化，可以参考&nbsp;<a href="http://my.oschina.net/u/1047616/blog/525156?p=1" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://my.oschina.net/u/1047616/blog/525156?p=1</a>。看起来，cache mode 只要不是 none，qemu 都会打开 rbd cache，不管 rbd cache 在配置文件中是 false 还是 true。因此，调试 qemu + rbd 问题，一定要注意代码版本之间逻辑的差异。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;">/*</span><span style="color:rgb(0,128,0);line-height:1.5;">设置cache的参数</span><span style="color:rgb(0,128,0);line-height:1.5;">*/</span> 
+    <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (flags &amp;<span style="line-height:1.5;"> BDRV_O_NOCACHE) {
+        rados_conf_set(s</span>-&gt;cluster, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">false</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+    } </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;"> {
+        rados_conf_set(s</span>-&gt;cluster, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">true</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+    }
+    r </span>= rados_connect(s-&gt;cluster);     <span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">连接cluster</span><span style="line-height:1.5;font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2. 各种情况下的测试结果</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.1 打开 librbd log 和 admin socket</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">librdb 的日志和 admin socket 是调试 librbd 的重要工具。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(128,0,128);line-height:1.5;">1</span>: 修改 /etc/ceph/ceph.conf，添加 log file 和 admin socket <span style="line-height:1.5;">
+    [</span><span style="color:rgb(0,0,255);line-height:1.5;">global</span><span style="line-height:1.5;">]
+    log file </span>= /<span style="color:rgb(0,0,255);line-height:1.5;">var</span>/log/ceph/<span style="line-height:1.5;">$name.log
+    max open files </span>= <span style="color:rgb(128,0,128);line-height:1.5;">131072</span><span style="line-height:1.5;">
+    auth cluster required </span>=<span style="line-height:1.5;"> none
+    auth service required </span>=<span style="line-height:1.5;"> none
+    auth client required </span>=<span style="line-height:1.5;"> none
+    rbd cache </span>= <span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">
+    debug perfcounter </span>= <span style="color:rgb(128,0,128);line-height:1.5;">20</span><span style="line-height:1.5;">
+    admin socket</span>=/<span style="color:rgb(0,0,255);line-height:1.5;">var</span>/run/ceph/rbd-<span style="line-height:1.5;">$pid.asok
+
+</span><span style="color:rgb(128,0,128);line-height:1.5;">2</span>: 修改 /etc/apparmor.d/abstractions/libvirt-<span style="line-height:1.5;">qemu，添加下列行，使得运行 qemu 的用户有权限读写 log 和 admin socket 文件</span></pre> 
+    <p style="line-height:1.5;"># for rbd<br> capability mknod,</p> 
+    <p style="line-height:1.5;"># for rbd<br> /etc/ceph/ceph.conf r,<br> /var/log/ceph/* rw,<br> /var/run/ceph/** rw,</p> 
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;"><span style="color:rgb(0,0,0);line-height:1.5;">3. 重启 libvirt-bin 和 nova-compute 服务 4. boot 一个新的虚机，或者重启一个已经存在的虚机 5. 使用 admin socket: ceph --admin-daemon /var/run/ceph/rbd-12856.asok perf dump</span><br></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.2 各种 QEMU 和 ceph 缓存配置的测试结果&nbsp;</h3> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2.2.1 测试结果</h4> 
+   <table border="1" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">#</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>host ceph.conf</strong></td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>rbd_cache 配置项</strong></td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>guest cache 配置项</strong></td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>实际 RBDCache 模式</strong></td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>实际客户机 drive cache 模式</strong></td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>结论</strong></td> 
+     </tr>
+     <tr>
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">1 &nbsp;&nbsp;</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">有</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">true</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">writeback</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">打开</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">writeback</td> 
+      <td rowspan="4" valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">&nbsp;</p> <p style="line-height:1.5;">ceph.conf 中<span style="line-height:1.5;color:rgb(255,0,0);">有</span>&nbsp;rbd cache 配置项时，RDBCache 打开还是关闭受该配置项控制；<br> 客户机的磁盘的cache 模式受它自己的配置项控制。其它 RBDCache 参数会从 ceph.conf 中读取。&nbsp;&nbsp;&nbsp;</p> </td> 
+     </tr>
+     <tr>
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">2</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">有</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">true</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">none</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">打开</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">none</td> 
+     </tr>
+     <tr>
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">3</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">有</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">false</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">none</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">关闭</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">none</td> 
+     </tr>
+     <tr>
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">4</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">有</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">false</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">writeback</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">关闭</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">writeback</td> 
+     </tr>
+     <tr>
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">5</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">有</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">不配置</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">none</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">关闭</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">none</td> 
+      <td rowspan="2" valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">ceph.conf 中<span style="line-height:1.5;color:rgb(255,0,0);">没有</span>&nbsp;rbd cache 配置项时，RDBCache 打开还是关闭受磁盘驱动的cache 模式控制：'none' 则关闭RBDCache，‘writeback' 则打开RBDCache。其它 RBDCache 参数会从 ceph.conf 中读取。&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">6</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">有</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">不配置</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">writeback</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">打开</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">writeback</td> 
+     </tr>
+     <tr>
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">7</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">没有</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td valign="top" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;同 #5 情况，RDBCache 打开还是关闭受磁盘驱动的cache 模式控制：'none' 则关闭RBDCache，‘writeback' 则打开RBDCache。其它&nbsp;RBDCache 参数完全使用默认值。</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">以 #1 为例，</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@compute1:/<span style="color:rgb(0,0,255);line-height:1.5;">var</span>/log/ceph# cat /etc/ceph/ceph.conf  | grep <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd cache</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">
+rbd cache </span>= <span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">
+rbd cache writethrough until flush </span>= <span style="color:rgb(0,0,255);line-height:1.5;">true<br></span><span style="line-height:1.5;">
+root@compute1:</span>/<span style="color:rgb(0,0,255);line-height:1.5;">var</span>/log/ceph# virsh dumpxml instance-<span style="color:rgb(128,0,128);line-height:1.5;">00000068</span> |<span style="line-height:1.5;"> grep cache
+      </span>&lt;driver name=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">qemu</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> type=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">qcow2</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> cache=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">none</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> discard=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">unmap</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;
+      &lt;driver name=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">qemu</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> type=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">raw</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> cache=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">writeback</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;<span style="line-height:1.5;">
+
+root@compute1:</span>/<span style="color:rgb(0,0,255);line-height:1.5;">var</span>/log/ceph# ceph --admin-daemon rbd-<span style="color:rgb(128,0,128);line-height:1.5;">10588</span>.asok config show |<span style="line-height:1.5;"> grep rbd_cache
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">true</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache_writethrough_until_flush</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">true</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache_size</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">33554432</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache_max_dirty</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">25165824</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache_target_dirty</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">16777216</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache_max_dirty_age</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache_max_dirty_object</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, <span style="color:rgb(0,0,255);line-height:1.5;">（这是因为 </span></span><span style="color:rgb(0,0,255);line-height:1.5;">rbd cache writethrough until flush = true 而此时 librbd 还没有收到 flush 操作过</span><span style="line-height:1.5;"><span style="color:rgb(0,0,255);line-height:1.5;">）</span><br></span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">rbd_cache_block_writes_upfront</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">false</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>,</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2.2.2 不使用 ceph 配置文件时的行为</h4> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">关于 RBDCache 的默认参数，需要注意不同 librbd 版本中使用的不同值。</span></p> 
+   <p> </p> 
+   <table border="0" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>librbd 版本</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>librbd 使用的默认值</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;"><strong>不使用 ceph 配置文件，而且 qemu drive 的 cache 模式</strong></p> <p style="line-height:1.5;"><strong>为 ’writeback‘ 时的实际 cache 模式</strong></p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>影响&nbsp;</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">0.87 之前，比如 0.80</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">rbd cache = false</p> <p style="line-height:1.5;">rbd cache writethrough until flush = false</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;qemu 设置 rbd cache = true，使用 witeback 模式。</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">当客户机操作系统不支持 barrier 时，writeback 是不安全的。</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;0.87</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp; <p style="line-height:1.5;">rbd cache = true</p> <p style="line-height:1.5;">rbd cache writethrough until flush = true</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;qemu 设置 rbd cache = true，使用&nbsp;rbd cache writethrough until flush 默认值 true。再收到第一个 flush 指令前，使用 writethrough，之后使用 writeback。</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p>&nbsp;安全性得到增强</p> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <font color="#4b4b4b"><span style="font-size:15px;"><br></span></font> 
+   <p><font color="#4b4b4b"><span><span style="font-size:15px;">&nbsp; &nbsp; 本文转自SammyLiu博客园博客，原文链接：</span></span><span style="font-size:15px;">http://www.cnblogs.com/sammyliu/p/5095976.html</span></font><span style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <p><font color="#4b4b4b"><span style="font-size:15px;"><br></span></font></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>对缓存的思考【续】——编写高速缓存友好代码 « NotBeCN</title>
+  <meta name="description" content="             开篇        上一篇博文    对缓存的思考——提高命中率详细介绍了高速缓存的组织结构，并通过实例说详细明了cpu从高速缓存中取数据的过程，对于缓存的工作机制应该有了清晰的认识。这篇博文就来简单讨论以下对于缓存在实际开发中的应用，这里将告诉你如何让你的程序充分利用该缓存，即如何编写...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/05/13/weixin_33708432_90128503.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">对缓存的思考【续】——编写高速缓存友好代码</h1>
+    <p class="post-meta">May 13, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><span style="line-height:1.5;font-size:18pt;font-family:'仿宋';"><strong>开篇</strong></span></p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    上一篇博文
+    <a id="CategoryEntryList1_EntryStoryList_Entries_TitleUrl_0" class="entrylistItemTitle" href="http://www.cnblogs.com/yanlingyin/archive/2012/02/14/2348980.html" rel="nofollow" style="text-decoration:none;font-weight:bold;color:rgb(26,139,200);">对缓存的思考——提高命中率</a>详细介绍了高速缓存的组织结构，并通过实例说详细明了cpu从高速缓存中取数据的过程，对于缓存的工作机制应该有了清晰的认识。这篇博文就来简单讨论以下对于缓存在实际开发中的应用，这里将告诉你如何让你的程序充分利用该缓存，即如何编写高速缓存友好的代码。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    <strong>提示：如果高速缓存的运行机制还没有清晰的认识，请参照前面文章。</strong>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    注1：关于文中提到的局部性的相关知识参照：
+    <a id="CategoryEntryList1_EntryStoryList_Entries_TitleUrl_2" class="entrylistItemTitle" href="http://www.cnblogs.com/yanlingyin/archive/2012/02/11/2347116.html" rel="nofollow" style="text-decoration:none;font-weight:bold;color:rgb(26,139,200);">局部性原理浅析——良好代码的基本素质</a> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    注2：这是一个系列的文章，收录在&nbsp;
+    <a href="http://www.cnblogs.com/yanlingyin/category/353942.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">程序性能优化</a> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    注3：文章知识有些地方不容易理解，所以用心才能看完噢。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    &nbsp;
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><span style="line-height:1.5;font-size:18pt;font-family:'仿宋';"><strong>“用空间换时间”</strong></span></p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    在搞算法的时候经常能听到这种说法，算法研究中通常要考虑算法的时间、空间复杂度。而这里“用空间换时间”说的是通过牺牲一些存储块代码更有效的利用缓存。从而提高程序的运行效率。可见，
+    <span style="line-height:1.5;color:rgb(255,0,0);">高效的代码不仅依赖于良好的算法，编写缓存有好代码也很重要</span>。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    我们将通过下面的例子来认识这一过程
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    注：这里假设高速缓存是直接映射的，即每一组只有一行。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514361154.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    通过”局部性“相关的知识，我们可以看出上面的代码有良好的空间局部性：一维向量 x[ ] 、y[ ] &nbsp;都是对其元素进行步长为1的顺序访问。那么，拥有良好局部性的代码，是否就能有效的利用高速缓存呢。不一定。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    设上面代码运行在拥有直接映射缓存的计算机上。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    为了把问题描述清楚，这里有一些假设
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    1、float 是4 byte，所以数组x[ ]占用空间为32byte，y[ ]也一样
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    2、x[ ]存储在内存中地址0-31的位置，y[ ]紧随其后在地址开始为32的连续位置。（如果觉得牵强你可理解为虚拟地址）
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    3、直接映射高速缓存有两个组，每组的大小为16byte。也就是高速缓存中每组可存储4个元素。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    &nbsp;
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    根据这些假设，每个x[i]、y[i]会被映射到相同的高速缓存组
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    元素和缓存之间的映射关系如下图所示
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514380250.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    图被中间的双线条分为左右两栏，左边是x[ ]的情况，右边y[ ]的情况。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    看左边的一栏，左边的一列代表的x 中的元素，中间的是元素在内存中的地址，第三列是该元素映射在缓存中的组号。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    为什么会是这样分配的呢，其实在上一篇博文中就有提到。（参看前面的博客会有更好的效果）
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    这里还是简单的说一下：
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <span style="line-height:1.5;color:rgb(255,0,0);">主存中的数据是根据地址被映射到缓存的不同位置的，二进制地址的不同位代表不同的信息，一般来说从左到右分别代表：行、组、偏移</span>。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    缓存的每一行是16byte，从而可推断缓存的地址位是4 。因为4个二进制的组合共有16种情况（也即2的4次方是16）。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    下表是它们地址各个位及代表的信息。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    X[ ]:
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514395886.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    注：这里的地址不是元素的真实地址，指的是块地址。x有八个元素，每个元素占四个byte，我们把这四个byte当作一个整体， 那么x[0]就是第一块，x[1]为第二块，以此类推。y的情况相同。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    上图中，阴影部分的为地址的二进制表示形式。每个地址被表示成了四位的二进制数。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    其中：
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    左边一位标记行。因为是直接映射，每组只有一行，所以一位就能表示。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    左边第二位标记组。我们讨论的这个缓存只有两个组，一位就能标记。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    右边两表示偏移。每行中有四个数据块，所以两位能标识。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    可以看出，x[ ]的前四个元素属于同一组，后四个为另一组。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    下面是y[]的情况：
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514405348.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    现在对于刚才那个图（如下）应该有更清楚的认识了把。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514414933.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    x[i]和y[i]有相同的组标记、不同的行标记，这就意味着x[i]和y[i]不能同时存在于缓存中。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    下面模拟一下上述代码的执行过程。我们假设局部变量sum存于cpu寄存器中。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    <span style="line-height:1.5;font-size:16px;"><strong>计算x[0]*y[0]</strong></span>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    <strong>取x[0]</strong>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    刚开始的时候缓存还没预热，每一行的标记为都为不可用。所以取x[0]的时候缓存不命中，缓存从下一级存储中取出包括x[0]的整行，放入缓存第0组中，并返回x[0]给cpu。这时缓存第一组中的元素有x[0]、x[1]、x[2]、x[3]
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    此时缓存的情况如下图所示
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514430157.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    缓存中的元素为蓝色背景的部分
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    组序号为1的行都还没初始化。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    <strong>取y[0]</strong>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    y[0]对应的块地址是8，即1 0 00 组标记是0，行标记1，不命中。于是取出包括y[0]的行，并放入缓存中。此时的缓存情况：
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514435733.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    取x[1]，缓存不命中，当取了x[0]本有x[1]在缓存中，当取y[0]的时候，这一行被覆盖了。所以只能把包括x[1]行的行取出放入缓存（覆盖y行），并返回x[1]。取了x[1]后的缓存情况和取出x[0]的情况一样：
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    当取y[1]的时候，缓存不命中，又把上面x行替换为y行。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    可以推理出，取出x和y 的元素总是不命中。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    <span style="line-height:1.5;font-size:14pt;"><strong>空间换时间</strong></span>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    因为x[i]、y[i]映射到了相同的组，现在的这种情况称为冲突不命中，每次对x和y 的引用都会造成冲突不命中。这一情况用“抖动”来描述。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    简单的说，即使程序有良好的时间局部性，且缓存也有足够大小的空间来缓存，也会发生抖动。因为x[i]、y[i]被映射到了相同的缓存组。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    幸运的是，可以修正这种情况，让x[i],y[i]映射到不同的缓存组。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    一
+    <span style="line-height:1.5;color:rgb(255,0,0);">个简单的方法就是增加x的长度。给x分配12个float大小的空间</span>。这样y的其实地址就是18而不是32
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    如下图所示：
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514445279.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    这样当引用x[0]的时候把x[0]、x[1]、x[2]、x[3]放入组0中，引用y[0]的时候把y[0],y[1],y[2],y[3]放入组1 中。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    于是对引用x[1]~x[3]的引用就就能直接从缓存中获取，同样对y[1]~y[3]的引用也能从缓存中获取
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    相比于刚开始的情况，大大增加了缓存的使利用。同时也提高了程序的性能，特别是当数据量很大的时候。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    实质通过在x的后面追加元素，让y的其实地址后移，让y对应的组号发生改变。当然在x后面追加元素只是占用了一部分空间，那些空间并没有被利用，但是提高了程序的性能。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    所以才说“用空间换时间”
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    &nbsp;
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><span style="line-height:1.5;font-size:18pt;font-family:'仿宋';"><strong>为什么用中间位作为组索引?</strong></span></p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    用中间位作为组索引是有原因的。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514502132.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    &nbsp;
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    如果用最高位做索引
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    情况如上图中的中间所示，连续的块都别映射到了同一个组中（特别的，如果是直接映射高速缓存，连续的块被映射到同一行中）这样的确也能利用缓 存，如上图所示，当引用第一个元素的时候，会把第1、2、3、4个拷贝到缓存的组0中，以后对2、3、4的引用就能直接在缓存中提取。引用第5个元素的时 候，把第5、6、7、8个拷贝到缓存的组1中，同样的，对4、5、6的引用能直接在缓存中提取。后面的情况类似就不再叙述。&nbsp;
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    通过上面的叙述，你可能已经发现一个问题：当对缓存的组1进行操作的时候，缓存中的其它组是没有被利用的，这和缓存中只有一个组其实效果是一样的。对缓存中的其他组没有很好的利用，也就是说，虽然也有缓存的利用，但有最大化。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    改用中间位做索引，如上图中的右图所示，同一组中的块不再是连续的，这样可以保证缓存中的所有组都能被有效的利用。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    引用第1个元素的时候，将把第1、5、9、13放入缓存组1中
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    引用第2个元素的时候， 把第2、6、10、14放入缓存
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    引用第3个，把3、7、11、15放入缓存
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    引用第4个，把4、8、12、16放入缓存
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    这样对前四个元素的引用都不会命中，而而对后面的引用都能命中。这种过程也就是所谓的
+    <span style="line-height:1.5;color:rgb(255,0,0);"><strong>缓存预热</strong></span>。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    &nbsp;
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><span style="line-height:1.5;font-size:18pt;font-family:'仿宋';"><strong>高速缓存友好代码</strong></span></p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    <span style="line-height:1.5;font-size:14pt;"><strong>一维数组</strong></span>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    上面的讨论我们假设了一种特殊的情况，下面将对如何编写高速缓存友好代码做更加泛化的讨论
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    先看下面的代码
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514520795.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    很容易看出，上面的代码有良好的局部性。编译器对代码优化的时候 ，通常会将局部变量用寄存器保存（因为他们在函数结束时就会被释放）。一般来说，如果一个高速缓存块大小为Bbyte，那么在一个步长为k的引中，平均每 次迭代会有min (1; (wordsize k)=B )次缓存不命中。k=1时取最小值。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    Example
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    假设v是块对齐的，字为4个字节，高速缓存块为4个字，高速缓存初始化为空。那么对v的步长为1 的引用情况如下所示
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"> 
+    <p style="line-height:1.5;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514524433.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    图中的m，表示miss，即不命中；h表示hit 表示命中。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    这个例子中，对v[0]的引用不命中，而接下来对v[2]~v[4]的引用命中，
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    对v[5]不命中，接下来对v[6]~v[7]引用命中。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    上面的叙述说明了两个问题:
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    1、对局部变量的反复引用是好的，因为他们存在寄存器中，访问数度很快
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    2、对步长为1的引用是好的，因为存储器结构中将数据存放为连续的块
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    &nbsp;
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    <span style="line-height:1.5;font-size:14pt;"><strong>多维数组</strong></span>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    在对多维数组的操作中，空间局部性尤为重要。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">
+    考虑下面的例子
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514264682.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">c语言以行序为主序的，所以上述代码刚好是对数组a[][]的步长为1的引用，和上一种情况一样，假设刚开始的缓存是冷缓存（刚开始的时候缓存里没有任何数据）。那么对数组a[][]的访问将得到如下图所示的命中和不命中模式：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514294512.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">对缓存有良好的使用。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">然而，对代码做一个微小的改动之后：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514310689.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">这时以步长4对数组a[][]的元素进行引用，这种情况对数组将是一列一列引用而不是一行一行引用的。他们在缓存中的命中情况如下所示</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><img src="https://pic002.cnblogs.com/images/2012/348708/2012021514333547.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">较高的不命中率对程序的运行效率有显著影响，因为从第一层存储中取出数据将花费比缓存中取数据多很多的时钟周期。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><span style="line-height:1.5;font-size:18pt;font-family:'仿宋';"><strong>小结</strong></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">&nbsp;好的程序代码不仅要有好的算法，对计算机硬件的充分利用也是很关键的一步， 前面几篇文章主要只是从缓存角度做了分析。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">在缓存角度，要提高程序运行效率，编写缓存友好代码尤为关键，这也是区分程序员层次的一个标准，要求较高，需要你掌握缓存的工作原理，缓存内部的组 织形式，还需要编译相关的知识，前面还有很多知识等值我们去学习，这里只是总结了自己的学习成果，分享给大家，希望对各位园友有用。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">我觉得写博客不是我的目的，博客只是我学习过程中的副产品而已，对于某些知识，你知道它是一回事，要把它讲出来却非得把它弄透彻不可，我把写博客当作学习的一部分，在总结的过程中提高，还能把成果分享，我想这就是博客最大的价值把，我们都应该享受写博客的这个过程。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">&nbsp;预：下一篇博文中会从缓存角度对《编程之美》中的一道题目做个讨论，里面的算法很巧妙，表面上看性能是提高了，从缓存角度却不然。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">&nbsp;全文完。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">参看资料：computer systems</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;">转自：<a href="http://www.cnblogs.com/yanlingyin/archive/2012/02/15/thinkingincache.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.cnblogs.com/yanlingyin/archive/2012/02/15/thinkingincache.html</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><br></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><br></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><br></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><br></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:13px;"><br></p> 
+   <p style="line-height:1.5;"><font color="#4b4b4b"><span style="font-size:13px;">本文转自夏雪冬日博客园博客，原文链接：http://www.cnblogs.com/heyonggang/archive/2012/12/17/2821593.html，如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

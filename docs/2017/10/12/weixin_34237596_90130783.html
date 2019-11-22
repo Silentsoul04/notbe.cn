@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>C++智能指针的实现 « NotBeCN</title>
+  <meta name="description" content="             说起智能指针，不少人都不陌生。比方auto_ptr、shared_ptr、unique_ptr、weak_ptr。    依据shared_ptr的功能，自己仿造也实现了个。        对于shared_ptr这样的智能指针，有一个共享的引用计数器来控制指针对象的销毁，当引用计数器变...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/12/weixin_34237596_90130783.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">C++智能指针的实现</h1>
+    <p class="post-meta">Oct 12, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;">说起智能指针，不少人都不陌生。比方auto_ptr、shared_ptr、unique_ptr、weak_ptr。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">依据shared_ptr的功能，自己仿造也实现了个。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;"><br></span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;">对于shared_ptr这样的智能指针，有一个共享的引用计数器来控制指针对象的销毁，当引用计数器变为0时。则销毁指针指向的对象。对于多线程安全问题，我在代码中使用的Interlocked系列的原子操作函数。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;"><br></span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;">在学习过程中，渐渐学会了RAII（Resource Acquisition Is Initialization），慢慢领略到了这样的模式的优点。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;">直接上代码：</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;">SmartPtr.hpp</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">#pragma once
+#include "stdafx.h"
+#include &lt;assert.h&gt;
+#include &lt;windows.h&gt;
+
+//#define DEBUG_SMARTPTR
+
+template&lt;typename T&gt;
+class SmartPtr;
+
+template &lt;typename T&gt;
+class RefPtr
+{
+	friend class SmartPtr&lt;T&gt;;
+	explicit RefPtr(T *p) :pointer(p), nUse(0)
+	{	
+		assert(pointer);
+#ifdef DEBUG_SMARTPTR
+		std::cout &lt;&lt; "Create Pointer!" &lt;&lt; std::endl;
+#endif
+	}
+
+	RefPtr(const RefPtr&amp;)
+	{
+
+	}
+
+	RefPtr&amp; operator= (const RefPtr &amp; ref)
+	{
+
+	}
+
+	~RefPtr()
+	{
+#ifdef DEBUG_SMARTPTR
+		std::cout &lt;&lt; "Delete Pointer!" &lt;&lt; std::endl;
+#endif
+		assert(pointer);
+		if (pointer != NULL)
+		{
+			delete pointer;
+			pointer = NULL;
+		}	
+	}
+
+	unsigned int AddRefCount()
+	{
+		return InterlockedIncrement((unsigned int*)&amp;nUse);
+	}
+
+	unsigned int SubRefCount()
+	{
+		return InterlockedDecrement((unsigned int*)&amp;nUse);
+	}
+
+	bool AddRefCount_lock()
+	{
+		for (;;)
+		{
+			unsigned int temp = nUse;
+			if (temp == 0)
+			{
+				return false;
+			}
+			if (InterlockedCompareExchange((unsigned int *)&amp;nUse, temp + 1, temp) == temp)
+			{
+				return true;
+			}
+		}		
+	}
+
+	volatile unsigned int nUse;
+	T *pointer;
+};
+
+template&lt;typename T&gt;
+class SmartPtr
+{
+public:
+	explicit SmartPtr(T *pointer) :ptr(new RefPtr&lt;T&gt;(pointer))
+	{
+		assert(pointer);
+#ifdef DEBUG_SMARTPTR
+		std::cout &lt;&lt; "Create SmartPointer!" &lt;&lt; std::endl;
+#endif
+		ptr-&gt;AddRefCount();
+	}
+
+	explicit SmartPtr(const SmartPtr&lt;T&gt;&amp; sp) :ptr(sp.ptr)
+	{
+#ifdef DEBUG_SMARTPTR
+		std::cout &lt;&lt; "Copy0 SmartPointer!" &lt;&lt; std::endl;
+#endif
+		ptr-&gt;AddRefCount();
+	}
+
+	explicit SmartPtr(const SmartPtr&lt;T&gt;* sp) :ptr(sp-&gt;ptr)
+	{
+#ifdef DEBUG_SMARTPTR
+		std::cout &lt;&lt; "Copy1 SmartPointer!" &lt;&lt; std::endl;
+#endif
+		ptr-&gt;AddRefCount();
+	}
+
+	SmartPtr&amp; operator=(const SmartPtr&lt;T&gt;&amp; sp)
+	{
+		if (sp.ptr != ptr)
+		{
+			//注意先加后减，防止指向同对象析构的问题
+			if (sp.ptr-&gt;AddRefCount_lock())
+			{
+				if (ptr-&gt;SubRefCount() == 0)
+				{
+					delete ptr;
+				}
+				ptr = sp.ptr;
+			}
+		}
+#ifdef DEBUG_SMARTPTR
+		std::cout &lt;&lt; "Copy2 SmartPointer!" &lt;&lt; std::endl;
+#endif
+		return *this;
+	}
+
+	T* operator-&gt;()
+	{
+		return GetPtr();
+	}
+
+	T* operator-&gt;() const
+	{
+		return GetPtr();
+	}
+
+	T&amp; operator*()
+	{
+		return *ptr-&gt;pointer;
+	}
+
+	T&amp; operator*() const
+	{
+		return *ptr-&gt;pointer;
+	}
+
+	bool operator!()
+	{
+		return !ptr;
+	}
+
+	~SmartPtr()
+	{
+		if (ptr-&gt;SubRefCount() == 0)
+		{
+			delete ptr;
+		}
+#ifdef DEBUG_SMARTPTR
+		std::cout &lt;&lt; "Delete SmartPointer!" &lt;&lt; std::endl;
+#endif
+	}
+
+	int GetRefCount() const
+	{
+		return ptr-&gt;nUse;
+	}
+
+	bool isNull()
+	{
+		return ptr-&gt;pointer == NULL;
+	}
+
+	T* GetPtr() const
+	{
+		assert(ptr-&gt;pointer);
+		return ptr-&gt;pointer;
+	}
+
+	//返回对象
+	T GetValue() const
+	{
+		assert(ptr-&gt;pointer);
+		return *ptr-&gt;pointer;
+	}
+
+private:
+	RefPtr&lt;T&gt; *ptr;
+};
+
+//兼容const比較
+template&lt;typename T&gt;
+inline bool operator==(const SmartPtr&lt;T&gt;&amp; a,const SmartPtr&lt;T&gt;&amp; b)
+{
+	return a.GetPtr() == b.GetPtr();
+}
+template&lt;typename T&gt;
+inline bool operator!=(const SmartPtr&lt;T&gt;&amp; a,const SmartPtr&lt;T&gt;&amp; b)
+{
+	return a.GetPtr() != b.GetPtr();
+}</code></pre> 
+   <span style="line-height:1.8;color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:18px;">test.cpp</span>
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;"></span></p> 
+   <pre><code class="language-cpp">#include "SmartPtr.hpp"
+#include &lt;iostream&gt;
+#include &lt;process.h&gt;
+
+
+#define THREADCOUNT 10
+
+typedef struct _PERSON_
+{
+	char szName[20];
+	int nAge;
+	~_PERSON_()
+	{
+		std::cout &lt;&lt; "Person Distructor!"&lt;&lt; std::endl;
+	}
+}PERSON;
+
+SmartPtr&lt;PERSON&gt; g_p(new PERSON{ "g_test", 12 });
+
+unsigned int __stdcall testThread(void *pParam)
+{
+	SmartPtr&lt;PERSON&gt; sp((SmartPtr&lt;PERSON&gt; *)pParam);
+	g_p = sp;
+	std::cout &lt;&lt; sp-&gt;nAge &lt;&lt; std::endl;
+	return 0;
+}
+
+int _tmain(int argc, _TCHAR* argv[])
+{
+	do 
+	{
+		HANDLE hThread[THREADCOUNT];
+		SmartPtr&lt;PERSON&gt; p0(new PERSON{ "Jovi", 12 });
+		SmartPtr&lt;PERSON&gt; p1(new PERSON{ "Solanin", 13 });
+
+		SmartPtr&lt;PERSON&gt; p2(p1);
+		const SmartPtr&lt;PERSON&gt; p3(p1);
+
+		SmartPtr&lt;PERSON&gt; p4(p3);
+		std::cout &lt;&lt; (p3 == p1) &lt;&lt; std::endl;
+		std::cout &lt;&lt; (p2 == p0) &lt;&lt; std::endl;
+		std::cout &lt;&lt; (p3 != p1) &lt;&lt; std::endl;
+		std::cout &lt;&lt; (p2 != p0) &lt;&lt; std::endl;
+		p4 = p0;
+		SmartPtr&lt;PERSON&gt; *p = new SmartPtr&lt;PERSON&gt;(p1);
+		for (int i = 0; i &lt; THREADCOUNT; i++)
+		{
+			hThread[i] = (HANDLE)_beginthreadex(NULL, 0, testThread, (void *)p, 0, 0);
+//			WaitForSingleObject(hThread[i], INFINITE);
+		}
+		WaitForMultipleObjects(THREADCOUNT, hThread, TRUE, INFINITE);
+		delete p;
+	} while (0);
+
+	system("pause");
+	return 0;
+}
+</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">此处的do while(0)仅仅是我想在pause前打印出全部析构函数的输出。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;"><br></span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;">对于基于引用计数器的智能指针，最致命缺点就是循环引用，导致对象被长期占用，无法释放。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;">以上是我对智能指针的实现和个人看法，如有不对的地方，欢迎指出。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;"><br></span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;"><br></span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;"><br></span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:18px;"><br></span></p> 
+   <p><span style="line-height:1.8;"><font color="#333333"><span style="font-size:18px;">本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/5157999.html，如需转载请自行联系原作者</span></font><br></span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

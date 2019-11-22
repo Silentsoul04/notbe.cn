@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>学习OpenStack之 (2)：Cinder LVM 配置 « NotBeCN</title>
+  <meta name="description" content="             0。背景    OpenStack 中的实例是不能持久化的，cinder服务重启，实例消失。如果需要挂载 volume，需要在 volume 中实现持久化。Cinder提供持久的块存储，目前仅供给虚拟机挂载使用。它并没有实现对块设备的管理和实际服务，而是为后端不同的存储结构提供了统一的接...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/11/weixin_34125592_90121743.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">学习OpenStack之 (2)：Cinder LVM 配置</h1>
+    <p class="post-meta">Nov 11, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;text-decoration:underline;"><strong>0。背景</strong></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">OpenStack 中的实例是不能持久化的，cinder服务重启，实例消失。如果需要挂载 volume，需要在 volume 中实现持久化。Cinder提供持久的块存储，目前仅供给虚拟机挂载使用。它并没有实现对块设备的管理和实际服务，而是为后端不同的存储结构提供了统一的接口，不同的块设备服务厂商在 Cinder 中实现其驱动支持以与 OpenStack 进行整合。它通过整合后端多种存储，用API接口为外界提供存储服务。主要核心是对卷的管理，允许都卷、类型和快照进行处理。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Cinder存储分为本地块存储、分布式块存储和SAN存储等多种后端存储类型：<br> 1. 本地存储： 默认通过LVM支持Linux<br> 2. SAN存储：<br> &nbsp; &nbsp; （1）通过NFS协议支持NAS存储，比如Netapp<br> &nbsp; &nbsp; （2）通过添加不同厂商的制定driver来为了支持不同类型和型号的商业存储设备，比如EMC,IBM的存储。 在&nbsp;<a href="https://wiki.openstack.org/wiki/CinderSupportMatrix" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">https://wiki.openstack.org/wiki/CinderSupportMatrix</a>可以看到所支持的厂商存储列表。<br> 3. 分布式系统：支持sheepdog，ceph，和IBM的GPFS等</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">对于本地存储，cinder-volume 默认使用 LVM 驱动，该驱动当前的实现需要在主机上事先用 LVM 命令创建一个的卷组 , 当该主机接受到创建卷请求的时候，cinder-volume 在该卷组 上创建一个逻辑卷, 并且用 openiscsi 将这个卷当作一个 iscsi tgt 给输出.还可以将若干主机的本地存储用 sheepdog 虚拟成一个共享存储，然后使用 sheepdog 驱动。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><strong><span style="line-height:1.5;text-decoration:underline;">1. Cinder LVM配置</span></strong><br> 在cinder配置文件中，默认的backend lvmdriver是通过LVM来使用本地存储：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">[lvmdriver-1]</span><br><span style="line-height:1.5;color:rgb(0,0,255);">volume_group = stack-volumes-lvmdriver-1</span><br><span style="line-height:1.5;color:rgb(0,0,255);">volume_driver = cinder.volume.drivers.lvm.LVMISCSIDriver</span><br><span style="line-height:1.5;color:rgb(0,0,255);">volume_backend_name = lvmdriver-1</span></p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">volume_group 指定Cinder使用的 volume group。在devstack默认安装时其名称是stack-volumes-lvmdriver-1；在实际部署cinder的时候其默认名称是cinder-volumes。</li> 
+    <li style="list-style-type:disc;">volume_driver 指定driver类型. Cinder目前支持两种传输协议，&nbsp;iSCSI and iSER。 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">iSCSI的话，将其值设为&nbsp;cinder.volume.drivers.lvm.LVMISCSIDriver；</li> 
+      <li style="list-style-type:disc;">iSER的话，将其值设为&nbsp;cinder.volume.drivers.lvm.LVMISERDriver。<br>
+       <div>
+        &nbsp;
+       </div> LVM是cinder.volume.drivers.lvm.LVMISCSIDriver</li> 
+     </ul></li> 
+    <li style="list-style-type:disc;">volume_backend_name 是backend name，在创建volume的时候可选择。</li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201412/121008019006884.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">如果名字为stack-volumes-lvmdriver-1的volume group不存在，创建volume后其状态将为error，在cinder c-vol日志中可看到如下错误：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">Exception during message handling: Unexpected error while running command.</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Command: None</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Exit code: -</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Stdout: u'Unexpected error while running command.\nCommand: sudo cinder-rootwrap /etc/cinder/rootwrap.conf lvcreate -n volume-f3aef3b9-1a71-41d4-956e-a00044544b74 stack-volumes-lvmdriver-1 -L 1g\nExit code: 5\nStdout: u\'\'\nStderr: u\' Volume group "stack-volumes-lvmdriver-1" not found\\n\''</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Stderr: None</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">可参考我的博文<a href="http://www.cnblogs.com/sammyliu/p/4157491.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.cnblogs.com/sammyliu/p/4157491.html</a>来配置LVM。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><strong><span style="line-height:1.5;text-decoration:underline;">3. Cinder使用LVM</span></strong></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">成功创建一个Cinder volume后，可以在VG中看到新创建的logical volume：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201412/121035441341106.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">root@dev:/home/s1# lvdisplay /dev/stack-volumes-lvmdriver-1/volume-02f986b0-418f-4f84-a5ec-7af61f5d5293</span><br><span style="line-height:1.5;color:rgb(0,0,255);">--- Logical volume ---</span><br><span style="line-height:1.5;color:rgb(0,0,255);">LV Name /dev/stack-volumes-lvmdriver-1/volume-02f986b0-418f-4f84-a5ec-7af61f5d5293</span><br><span style="line-height:1.5;color:rgb(0,0,255);">VG Name stack-volumes-lvmdriver-1</span><br><span style="line-height:1.5;color:rgb(0,0,255);">LV UUID 9oESr2-4V7f-qp22-F5te-hF2v-DWoy-EshtnN</span><br><span style="line-height:1.5;color:rgb(0,0,255);">LV Write Access read/write</span><br><span style="line-height:1.5;color:rgb(0,0,255);">LV Status available</span><br><span style="line-height:1.5;color:rgb(0,0,255);"># open 0</span><br><span style="line-height:1.5;color:rgb(0,0,255);">LV Size 1.00 GiB</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Current LE 256</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Segments 1</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Allocation inherit</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Read ahead sectors auto</span><br><span style="line-height:1.5;color:rgb(0,0,255);">- currently set to 256</span><br><span style="line-height:1.5;color:rgb(0,0,255);">Block device 252:0</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;text-decoration:underline;"><strong><span style="line-height:1.5;color:rgb(0,0,0);">4. 使用多个backend/添加新的LVM backend</span></strong></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,0);">（1）创建新的volume group vg3</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,0);">（1）修改cinder.conf，添加下面行：</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">enabled_backends=lvmdriver-1,lvmdriver-2</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">[lvmdriver-2]</span><br><span style="line-height:1.5;color:rgb(0,0,255);">volume_group = vg3</span><br><span style="line-height:1.5;color:rgb(0,0,255);">volume_driver = cinder.volume.drivers.lvm.LVMISCSIDriver</span><br><span style="line-height:1.5;color:rgb(0,0,255);">volume_backend_name = lvmdriver4vg3</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,0);">注意： cinder-volume服务不监控该配置文件，除了在启动的时候读取该文件以外。因为在修改该文件后你需要重启该服务：`service cinder-volume restart`.</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,0);">（3）创建新的的volume type type-test</span>&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">s1@dev:~/devstack$ cinder type-create type-test</span><br><span style="line-height:1.5;color:rgb(0,0,255);">+--------------------------------------+---------------+</span><br><span style="line-height:1.5;color:rgb(0,0,255);">| ID | Name |</span><br><span style="line-height:1.5;color:rgb(0,0,255);">+--------------------------------------+---------------+</span><br><span style="line-height:1.5;color:rgb(0,0,255);">| 764480d1-7614-4a63-ba33-924d65765534 | type-test|</span><br><span style="line-height:1.5;color:rgb(0,0,255);">+--------------------------------------+---------------+</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,0);">(4) 设置volume type的backend name</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">cinder type-key type-test set volume_backend_name=lvmdriver4vg3</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);"><span style="line-height:1.5;color:rgb(0,0,0);">注意：</span></span></p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;"><span style="line-height:1.5;color:rgb(0,0,255);"><span style="line-height:1.5;color:rgb(0,0,0);">只有一个backend的时候，除了配置volume group外，不需要添加别的配置信息，创建volume的时候也不需要选择volume type。</span></span></li> 
+    <li style="list-style-type:disc;"><span style="line-height:1.5;color:rgb(0,0,255);"><span style="line-height:1.5;color:rgb(0,0,0);">当有多个backend的时候，你需要使用volume-type来将volume创建到指定的backend中。一个volume-type可以有几个backend，这时候&nbsp;the capacity scheduler 会自动选择合适的backend来创建volume。</span></span></li> 
+    <li style="list-style-type:disc;"><span style="line-height:1.5;color:rgb(0,0,255);"><span style="line-height:1.5;color:rgb(0,0,0);">如果定义了volume type，但是cinder.conf中没有定义volume backend，那么cinder scheduler将找不到有效的host来创建volume了。</span></span></li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,0);">（5）可以在Horizen中选择新的type &nbsp;type-test来创建volume了</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;text-decoration:underline;"><strong>&nbsp;5. 遇到的问题：</strong></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;text-decoration:underline;"><strong>(1) 在选择一个volume type创建volume时失败，</strong></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">症状：日志中有&nbsp;No valid host was found. No weighed hosts available 错误</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">分析：查看volume host：</p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <span style="line-height:1.5;color:rgb(0,0,255);">s1@dev:~/devstack$ cinder-manage service list</span>
+    <br>
+    <span style="line-height:1.5;color:rgb(0,0,255);">STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,TRADITIONAL,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION from (pid=4488) _check_effective_sql_mode /usr/local/lib/python2.7/dist-packages/oslo/db/sqlalchemy/session.py:509</span>
+    <br>
+    <span style="line-height:1.5;color:rgb(0,0,255);">Binary&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Host&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Zone&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Status&nbsp;&nbsp;&nbsp;&nbsp; State Updated At</span>
+    <br>
+    <span style="line-height:1.5;color:rgb(0,0,255);">cinder-scheduler dev&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nova&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; enabled&nbsp;&nbsp;&nbsp; :-)&nbsp;&nbsp; 2014-12-12 16:11:54</span>
+    <br>
+    <span style="line-height:1.5;color:rgb(0,0,255);">cinder-volume&nbsp;&nbsp;&nbsp; dev@lvmdriver-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nova&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; enabled&nbsp;&nbsp;&nbsp; :-)&nbsp;&nbsp; 2014-12-12 16:11:56</span> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <span style="line-height:1.5;color:rgb(0,0,0);">原因：cinder-volume的host少了一个对应第二个vg的一个。应该是添加第二个backend后配置没生效。</span>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <span style="line-height:1.5;color:rgb(0,0,0);">解决：<span style="line-height:1.5;text-decoration:underline;">按照先后顺序</span>重启&nbsp;cinder-scheduler 和 cinder-volume 服务。创建volume错误消失。</span>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <span style="line-height:1.5;color:rgb(0,0,0);">(2) Volume一直处于creating状态。cinder-volume log中有如下错误：</span>
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <p style="line-height:1.5;">Returning exception create_volume() got an unexpected keyword argument 'source_replicaid' to caller</p> 
+    <p style="line-height:1.5;">原因：controller上和storage node上cinder版本不一致。</p> 
+    <p style="line-height:1.5;">解决:在两个node上首先卸载cinder，然后执行命令&nbsp;echo "deb&nbsp;<a href="http://ubuntu-cloud.archive.canonical.com/ubuntu" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://ubuntu-cloud.archive.canonical.com/ubuntu</a>" &nbsp;"trusty-updates/juno main" &gt; /etc/apt/sources.list.d/cloudarchive-juno.list，再安装cinder。确认cinder的版本一致。</p> 
+    <div> 
+     <div class="syntaxhighlighter shell" style="font-size:1em;"> 
+      <table border="0" style="border:1px solid #C0C0C0;border-collapse:collapse;background:none;line-height:1.1em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:12px;">
+       <tbody style="background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+        <tr style="background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+         <td class="gutter" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(175,175,175);background:none;line-height:1.1em;vertical-align:baseline;width:35px;"> 
+          <div class="line number1 index0 alt2" style="background:rgb(244,244,244) none;border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;">
+           1
+          </div> </td> 
+         <td class="code" style="color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;background:none;line-height:1.1em;vertical-align:baseline;"> 
+          <div style="background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <div class="line number1 index0 alt2" style="background:rgb(244,244,244) none;border:0px;line-height:1.8em;vertical-align:baseline;"> 
+            <code class="shell plain" style="background:none;border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);">apt-get </code>
+            <code class="shell functions" style="background:none;border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(255,20,147);">install</code>&nbsp;
+            <code class="shell plain" style="background:none;border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);">package=version 命令。 </code> 
+           </div> 
+          </div> </td> 
+        </tr>
+       </tbody>
+      </table>
+      <br>
+     </div> 
+    </div> 
+    <div class="syntaxhighlighter shell" style="font-size:1em;"> 
+     <div class="syntaxhighlighter shell" style="font-size:1em;">
+      &nbsp; &nbsp;本文转自SammyLiu博客园博客，原文链接：http://www.cnblogs.com/sammyliu/p/4159147.html，如需转载请自行联系原作者
+     </div> 
+     <div>
+      <br>
+     </div> 
+    </div> 
+    <div class="syntaxhighlighter shell" style="font-size:1em;">
+     <br>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

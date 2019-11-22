@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>[To be translated] Nova：libvirt image 的生命周期 « NotBeCN</title>
+  <meta name="description" content="             翻译自：http://www.pixelbeat.org/docs/openstack_libvirt_images/    The main stages of a Virtual Machine disk image as it transfers through OpenStack...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/13/weixin_34295316_90129331.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">[To be translated] Nova：libvirt image 的生命周期</h1>
+    <p class="post-meta">Nov 13, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">翻译自：<a href="http://www.pixelbeat.org/docs/openstack_libvirt_images/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.pixelbeat.org/docs/openstack_libvirt_images/</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">The main stages of a Virtual Machine disk image as it transfers through OpenStack to be booted under libvirt are:</p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <a href="http://www.pixelbeat.org/docs/openstack_libvirt_images/libvirt_images.svg" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;"><img src="http://www.pixelbeat.org/docs/openstack_libvirt_images/openstack-libvirt-images.png" alt="OpenStack libvirt disk image flow" style="border:0px;"></a>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Initially the image is downloaded from glance and cached in libvirt base. We'll consider the options for handling a qcow2 image stored in glance, as that format can be downloaded quite efficiently from glance as it supports compression, and image sparseness can be maintained. This article will focus on the flow and transformations in "libvirt base", which is used to cache, preprocess and optionally back, VM disk images.</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">Configuration</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">First we'll summarize the config variables involved, before presenting the operations associated with each config combination, in each OpenStack release. Note I'm describing upstream OpenStack here, and not my employer's&nbsp;<a href="http://www.redhat.com/openstack/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Red Hat OpenStack</a>&nbsp;which has back-ported enhancements between versions where appropriate.</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <table class="pixelbeat fw" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Config</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Default</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Release</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Description</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">use_cow_images</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">True</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Cactus</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Whether to use&nbsp;CoW&nbsp;images for "libvirt instance disks"</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">force_raw_images</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">True</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Essex</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Allows disabling&nbsp;<a href="https://github.com/openstack/nova/commit/ff9d353b" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">convert to raw</a>&nbsp;in "libvirt base" for&nbsp;<a href="https://bugs.launchpad.net/nova/+bug/932180" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">operational reasons</a> </td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">libvirt_images_type</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">'default'</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Folsom</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Deprecates use_cow_images and allows selecting LVM libvirt images</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">[libvirt]/images_type</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">'default'</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Icehouse</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Deprecates libvirt_images_type in the [DEFAULT] section</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">preallocate_images</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">'none'</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Grizzly</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Instance disks preallocation mode. 'space' =&gt;&nbsp;<a href="http://www.kernel.org/doc/man-pages/online/pages/man2/fallocate.2.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">fallocate</a>&nbsp;images</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">resize_fs_using_block_device</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">False</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Havana</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Allows enabling of direct resize for qcow2 images</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">The main reason that raw images are written in "libvirt base" by default (since Diablo), is to remove possible compression from the qcow2 image received from glance. Note compression in qcow2 images is read only, and so this will impact reads from unwritten portions of the qcow2 image. Users may want to change this option, depending on CPU resources and I/O bandwidth available. For example, systems with slower I/O or less space available, may want to trade the higher CPU requirements of compression, to minimize input bandwidth. Note raw images are used unconditionally with libvirt_images_type=lvm.</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Whether to use CoW images for the "libvirt instance disks" also depends on I/O characteristics of the user's system. Without CoW, more space will be used for common parts of the disk image, but on the flip side depending on the backing store and host caching, there may be better concurrency achieved by having each VM operate on its own copy.</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Enabling preallocation of space for the "libvirt instance disks" can help with both space guarantees and I/O performance. Even when not using CoW instance disks, the copy each VM gets is sparse and so the VM may fail unexpectedly at run time with ENOSPC. By running fallocate(1) on the instance disk images, we immediately and efficiently allocate the space for them in the file system (if supported). Also run time performance should be improved as the file system doesn't have to dynamically allocate blocks at run time, reducing CPU overhead and more importantly file fragmentation.</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">Disk image operations</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">For each release and config combination, here are the created files and associated operations in getting a&nbsp;<strong>qcow2</strong>&nbsp;image from glance through to being booted in a libvirt Virtual Machine.</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Folsom, force_raw_images=True, use_cow_images=True</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">This results in each instance booting from a CoW image, backed by a resized raw image.</p> 
+   <table class="pixelbeat fw" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Nova&nbsp;command</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Source code</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Notes</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">wget http://glance/$image -O&nbsp;<strong>base_</strong>/$hex.part</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L86" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img convert -O raw $hex.part $hex.converted</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L107" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch_to_raw</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Creates sparse file</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">mv $hex.converted $hex;&nbsp;<a href="https://review.openstack.org/#/c/21956/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">rm $hex.part</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L116" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch_to_raw</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/imagebackend.py#L160" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">imagebackend.create_image</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">cp $hex $hex_$size</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/utils.py#L256" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">libvirt.utils.copy_image</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Creates sparse file</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img resize $hex_$size $size</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/disk/api.py#L120" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">resize2fs $hex_size</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/disk/api.py#L103" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://blueprints.launchpad.net/nova/+spec/resize-no-raw" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Unpartitioned ext[234]</a></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img create -f qcow2 -o backing_file=...&nbsp;<strong>$instance_dir</strong>/disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/utils.py#L66" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">libvirt.utils.create_image</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+    </tbody>
+   </table>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Folsom, force_raw_images=True, use_cow_images=False</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">This results in each instance booting from a copy of a resized raw image.</p> 
+   <table class="pixelbeat fw" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Nova&nbsp;command</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Source code</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Notes</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">wget http://glance/$image -O&nbsp;<strong>base_</strong>/$hex.part</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L86" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img convert -O raw $hex.part $hex.converted</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L107" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch_to_raw</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Creates sparse file</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">mv $hex.converted $hex;&nbsp;<a href="https://review.openstack.org/#/c/21956/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">rm $hex.part</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L116" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch_to_raw</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/imagebackend.py#L136" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">imagebackend.create_image</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">cp $hex&nbsp;<strong>$instance_dir</strong>/disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/utils.py#L256" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">libvirt.utils.copy_image</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img resize disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/disk/api.py#L120" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">resize2fs disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/disk/api.py#L103" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://blueprints.launchpad.net/nova/+spec/resize-no-raw" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Unpartitioned ext[234]</a></td> 
+     </tr>
+    </tbody>
+   </table>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Folsom, force_raw_images=False, use_cow_images=False</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">This results in each instance booting from a copy of a resized qcow2 image.</p> 
+   <table class="pixelbeat fw" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Nova&nbsp;command</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Source code</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Notes</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">wget http://glance/$image -O&nbsp;<strong>base_</strong>/$hex.part</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L86" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">mv $hex.part $hex</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L116" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch_to_raw</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/imagebackend.py#L136" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">imagebackend.create_image</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">cp $hex&nbsp;<strong>$instance_dir</strong>/disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/utils.py#L256" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">libvirt.utils.copy_image</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img resize disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/disk/api.py#L120" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">resize2fs disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/disk/api.py#L103" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <a href="https://blueprints.launchpad.net/nova/+spec/resize-no-raw" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ignored for qcow2</a>&nbsp;<a href="http://www.pixelbeat.org/docs/openstack_libvirt_images/#ref1" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">¹</a> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Folsom, force_raw_images=False, use_cow_images=True</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">This results in each instance booting from a CoW image, backed by a resized qcow2 image.</p> 
+   <table class="pixelbeat fw" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Nova&nbsp;command</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Source code</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Notes</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">wget http://glance/$image -O&nbsp;<strong>base_</strong>/$hex.part</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L86" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">mv $hex.part $hex</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/images.py#L116" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch_to_raw</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/imagebackend.py#L136" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">imagebackend.create_image</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">cp $hex $hex_$size</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/utils.py#L256" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">libvirt.utils.copy_image</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img resize $hex_$size $size</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/disk/api.py#L120" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">resize2fs $hex_size</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/disk/api.py#L103" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <a href="https://blueprints.launchpad.net/nova/+spec/resize-no-raw" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ignored for qcow2</a>&nbsp;<a href="http://www.pixelbeat.org/docs/openstack_libvirt_images/#ref1" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">¹</a> </td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img create -f qcow2 -o backing_file=...&nbsp;<strong>$instance_dir</strong>/disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/d5e7f551/nova/virt/libvirt/utils.py#L66" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">libvirt.utils.create_image</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+    </tbody>
+   </table>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Grizzly, force_raw_images=True, use_cow_images=True</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Grizzly&nbsp;<a href="https://github.com/openstack/nova/commit/c82be9f4" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">introduces</a>&nbsp;a change for use_cow_images=<strong>True</strong>, where it will resize in the $instance_dir rather than in base_. So the resize will not be cached, but this is minimal CPU tradeoff per instance boot, for the extra space saved in base_. We'll just present the default config values here which illustrates the only significant change from Folsom.<br> This results in each instance booting from a resized CoW image, backed by a raw image.</p> 
+   <table class="pixelbeat fw" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Nova&nbsp;command</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Source code</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>Notes</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">wget http://glance/$image -O&nbsp;<strong>base_</strong>/$hex.part</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/42d058b2a/nova/virt/images.py#L193" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img convert -O raw $hex.part $hex.converted</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/42d058b2a/nova/virt/images.py#L205" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch_to_raw</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Creates sparse file</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">mv $hex.converted $hex;&nbsp;<a href="https://review.openstack.org/#/c/21956/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">rm $hex.part</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/42d058b2a/nova/virt/images.py#L227" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">images.fetch_to_raw</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><a href="https://github.com/openstack/nova/blob/42d058b2a/nova/virt/libvirt/imagebackend.py#L233" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">imagebackend.create_image</a></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img create -f qcow2 -o backing_file=...&nbsp;<strong>$instance_dir</strong>/disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/42d058b2a/nova/virt/libvirt/utils.py#L147" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">libvirt.utils.create_image</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">qemu-img resize disk $size</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/42d058b2a/nova/virt/disk/api.py#L119" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">resize2fs disk</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;&nbsp;<a href="https://github.com/openstack/nova/blob/42d058b2a/nova/virt/disk/api.py#L100" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">disk.extend</a> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <a href="https://bugs.launchpad.net/nova/+bug/1087031/comments/2" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Grizzly always ignores</a>&nbsp;<a href="http://www.pixelbeat.org/docs/openstack_libvirt_images/#ref2" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">²</a> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">[<span style="line-height:1.5;">²&nbsp;<strong>Update</strong>&nbsp;Sep 2013: Stanislaw Pitucha also noticed that the above referenced Grizzly change introduced a regression where unpartitioned qcow2 images were no longer resized. See the Havana&nbsp;<strong>resize_fs_using_block_device</strong>&nbsp;option below for details.]</span></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Grizzly, preallocate_images='space'</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">Grizzly also has&nbsp;<a href="https://github.com/openstack/nova/commit/24f6c62a" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">new fallocate functionality</a>&nbsp;in this area controlled by the&nbsp;<strong>preallocate_images</strong>&nbsp;config option. If that is set to 'space', then after the operations above, the $instance_dir/ images will be&nbsp;<a href="http://www.kernel.org/doc/man-pages/online/pages/man2/fallocate.2.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">fallocate</a>d to immediately determine if enough space is available, and to possibly improve VM I/O performance due to ongoing allocation avoidance, and better locality of block allocations.</span></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;"><span style="line-height:1.5;">¹ Havana, resize_fs_using_block_device=False</span></h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">As noted in the first Grizzly change above, Stanislaw Pitucha noticed that change introduced a regression where unpartitioned qcow2 images were no longer resized. He supplied a&nbsp;<a href="https://review.openstack.org/#/c/42160/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">fix to resize qcow directly</a>&nbsp;rather than relying on the raw image being available, which would also cater for the force_raw_images=False case that even pre Grizzly did not. This new option can be used to enable this support, but there are some&nbsp;<a href="https://review.openstack.org/#/c/45742/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">large performance and possible security issues</a>&nbsp;so it's not enabled by default. This support will be available in the upcoming&nbsp;<strong>Havana</strong>&nbsp;release.</span></p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">General performance considerations</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">Performance has improved in this area through each OpenStack release, with some of the main topics to consider, for past and future changes being:</span></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Minimize I/O</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">Note these were&nbsp;<a href="https://github.com/openstack/nova/commit/d20b48bd" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">implemented in Essex</a>:</span></p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">Copy images, then resize, rather than vice versa</li> 
+    <li style="list-style-type:disc;">Directly generating images in the $instance_dir/</li> 
+    <li style="list-style-type:disc;">Intelligent reading of sparse input</li> 
+    <li style="list-style-type:disc;">Reproduction of sparse input on output</li> 
+    <li style="list-style-type:disc;">Use compression</li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">Note this was implemented in Folsom:</span></p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">Avoid file sytem overhead by setting libvirt_images_type=lvm. Note file system overhead&nbsp;<a href="https://bugzilla.redhat.com/1059744" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">varies depending on file system</a> </li>
+   </ul>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Minimize storage</h3> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">Use compression</li> 
+    <li style="list-style-type:disc;">Use sparse output/generation</li> 
+    <li style="list-style-type:disc;">Avoid resized copies when not needed</li> 
+    <li style="list-style-type:disc;">Use CoW if appropriate</li> 
+   </ul>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Improve caching</h3> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">Avoid thrashing the page cache with large intermediate images</li> 
+    <li style="list-style-type:disc;">Improve low level caching through better storage allocation</li> 
+   </ul>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">Preprocessing</h3> 
+   <ul style="list-style:none;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li>
+     <ul style="font-size:12px;list-style:none;">
+      <li style="list-style-type:disc;">Preprocessing may be possible on images like&nbsp;<a href="https://blueprints.launchpad.net/nova/+spec/preallocated-images" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">preallocation=metadata</a>&nbsp;which trades off initial CPU cost for possibly much better run time I/O performance</li> 
+      <li style="list-style-type:disc;">Such cost would be some what alleviated by having&nbsp;<a href="https://blueprints.launchpad.net/nova/+spec/nova-image-cache-management-2" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">asynchronous population</a>&nbsp;of the base_ cache</li> 
+     </ul></li>
+   </ul>
+   <div>
+    <font color="#4b4b4b"><span style="font-size:12px;"><br></span></font>
+   </div> 
+   <div> 
+    <font color="#4b4b4b"> </font>
+    <div>
+     <span style="font-size:12px;">&nbsp; &nbsp; 本文转自SammyLiu博客园博客，原文链接：http://www.cnblogs.com/sammyliu/p/4427567.html，如需转载请自行联系原作者</span>
+    </div> 
+    <div style="font-size:12px;">
+     <br>
+    </div> 
+   </div> 
+   <div>
+    <font color="#4b4b4b"><span style="font-size:12px;"><br></span></font>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

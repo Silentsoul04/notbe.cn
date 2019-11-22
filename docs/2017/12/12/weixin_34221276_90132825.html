@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>【expdp/impdp】 ORA-06502、ORA-39077 错误分析与解决方案 « NotBeCN</title>
+  <meta name="description" content="             expdp/impdp操作报错信息如下：    ORA-31626: job does not exist    ORA-31638: cannot attach to job SYS_EXPORT_TABLE_01 for user SYS    ORA-06512: at "SYS....">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/12/weixin_34221276_90132825.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">【expdp/impdp】 ORA-06502、ORA-39077 错误分析与解决方案</h1>
+    <p class="post-meta">Dec 12, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>expdp/impdp操作报错信息如下：</p> 
+   <pre><code class="js">ORA-31626: job does not exist
+
+    ORA-31638: cannot attach to job SYS_EXPORT_TABLE_01 for user SYS
+
+    ORA-06512: at "SYS.DBMS_SYS_ERROR", line 95
+
+    ORA-06512: at "SYS.KUPV$FT_INT", line 428
+
+    ORA-39077: unable to subscribe agent KUPC$A_1_191136568928000 to queue "KUPC$C_1_20140807191136"
+
+    ORA-06512: at "SYS.DBMS_SYS_ERROR", line 95
+
+    ORA-06512: at "SYS.KUPC$QUE_INT", line 250
+
+    ORA-06502: PL/SQL: numeric or value error: character string buffer too small
+</code></pre> 
+   <p>根据报错信息初步分析，可能是datapump组件中sequence数值大于6位数或sequence失效导致。参考mos 文档1550344.1分析，此错误由oracle Bug 16473783 导致,在Oracle 12.2版本中被修复，如果执行脚本重新安装datapump组件可能会引起其它问题。</p> 
+   <p>错误模拟</p> 
+   <p>1.测试导出操作sequence值是否会增加</p> 
+   <p>1.查看datapump组件包含的sequence</p> 
+   <pre><code class="js">SQL&gt; select OBJECT_NAME,OBJECT_TYPE,STATUS from all_objects where owner='SYS' and object_name like '%DATAPUMP%' and object_type='SEQUENCE';
+
+OBJECT_NAME              OBJECT_TYPE    STATUS
+
+------------------------------ ------------------- -------
+
+AQ$_KUPC$DATAPUMP_QUETAB_N     SEQUENCE         VALID
+
+AQ$_KUPC$DATAPUMP_QUETAB_1_N   SEQUENCE        VALID
+</code></pre> 
+   <p>2.查看两个sequence的值</p> 
+   <pre><code class="js">SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_N.nextval from dual;
+
+   NEXTVAL
+
+----------
+
+     1
+
+SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_1_N.nextval from dual;
+
+   NEXTVAL
+
+----------
+
+       361
+</code></pre> 
+   <p>3.执行导出</p> 
+   <pre><code class="js">[oracle@ENMOEDU ~]$ expdp \'/ as sysdba\' directory=MY_DIR dumpfile=test.dmp tables=test.T_TASKDONE
+</code></pre> 
+   <p>4.查看sequence值</p> 
+   <pre><code class="js">SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_N.nextval from dual;
+
+   NEXTVAL
+
+----------
+
+     2
+
+SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_1_N.nextval from dual;
+
+   NEXTVAL
+
+----------
+
+       368
+</code></pre> 
+   <p>说明：导出操作datapump组件中的sequence值会增加</p> 
+   <p>2.测试sequence值超过6位数是否出现此错误</p> 
+   <p>1.通过Increment By来实现修改初始值。序列名称是<code>`</code>js<br>AQ$_KUPC$DATAPUMP_QUETAB_1_N，初始值是368，而现在要设置初始值为999999，Increment By值为:999619(999999-380)</p> 
+   <p>SQL&gt; Alter Sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N Increment By 999619;</p> 
+   <p>Sequence altered.</p> 
+   <p>SQL&gt; Select AQ$_KUPC$DATAPUMP_QUETAB_1_N.NextVal From Dual;</p> 
+   <p>NEXTVAL</p> 
+   <hr>
+   <pre><code>999987
+</code></pre> 
+   <p>SQL&gt; Alter Sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N Increment By 7; </p> 
+   <p>Sequence altered.</p> 
+   <p>SQL&gt; Select AQ$_KUPC$DATAPUMP_QUETAB_1_N.NextVal From Dual;</p> 
+   <p>NEXTVAL</p> 
+   <hr>
+   <pre><code>999994
+</code></pre> 
+   <pre><code>
+2.执行expdp导出操作查看是否报错
+</code></pre> 
+   <p>[oracle@ENMOEDU ~]$ expdp '/ as sysdba' directory=MY_DIR dumpfile=test.dmp logfile=test.log tables=test.T_TASKDONE</p> 
+   <p>Export: Release 11.2.0.3.0 - Production on Thu Aug 7 19:11:36 2014</p> 
+   <p>Copyright (c) 1982, 2011, Oracle and/or its affiliates. All rights reserved.</p> 
+   <p>Connected to: Oracle Database 11g Enterprise Edition Release 11.2.0.3.0 - Production</p> 
+   <p>With the Partitioning, OLAP, Data Mining and Real Application Testing options</p> 
+   <p>ORA-31626: job does not exist</p> 
+   <p>ORA-31638: cannot attach to job SYS_EXPORT_TABLE_01 for user SYS</p> 
+   <p>ORA-06512: at "SYS.DBMS_SYS_ERROR", line 95</p> 
+   <p>ORA-06512: at "SYS.KUPV$FT_INT", line 428</p> 
+   <p>ORA-39077: unable to subscribe agent KUPC$A_1_191136568928000 to queue "KUPC$C_1_20140807191136"</p> 
+   <p>ORA-06512: at "SYS.DBMS_SYS_ERROR", line 95</p> 
+   <p>ORA-06512: at "SYS.KUPC$QUE_INT", line 250</p> 
+   <p>ORA-06502: PL/SQL: numeric or value error: character string buffer too small</p> 
+   <pre><code>说明：成功模拟错误。
+
+手动修复
+
+1.重建sequence
+
+1.重建sequence使用cycle参数限制最大值不超过6位数</code></pre> 
+   <p>SQL&gt; drop sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N ;</p> 
+   <p>Sequence dropped.</p> 
+   <p>SQL&gt; create sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N minvalue 1 maxvalue 999999 start with 1 increment by 1 cache 20 cycle;</p> 
+   <p>Sequence created.</p> 
+   <pre><code>
+ 
+
+2.验证sequence
+
+1.验证sequence值超过6位时是否报错
+</code></pre> 
+   <p>SQL&gt; drop sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N;</p> 
+   <p>Sequence dropped.</p> 
+   <p>SQL&gt; create sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N minvalue 1 maxvalue 999999 start with 999997 increment by 1 cache 20 cycle;</p> 
+   <p>Sequence created.</p> 
+   <p>SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_1_N.nextval from dual;</p> 
+   <p>NEXTVAL</p> 
+   <hr>
+   <pre><code>999998
+</code></pre> 
+   <pre><code>
+ 
+
+2.执行expdp导入操作
+</code></pre> 
+   <p>[oracle@ENMOEDU admin]$ expdp '/ as sysdba' directory=my_dir logfile=test01.log dumpfile=test02.dmp tables=test.T_BASEITEM</p> 
+   <p>Export: Release 11.2.0.3.0 - Production on Fri Aug 8 00:56:10 2014</p> 
+   <p>Copyright (c) 1982, 2011, Oracle and/or its affiliates. All rights reserved.</p> 
+   <p>Connected to: Oracle Database 11g Enterprise Edition Release 11.2.0.3.0 - Production</p> 
+   <p>With the Partitioning, OLAP, Data Mining and Real Application Testing options</p> 
+   <p>Starting "SYS"."SYS_EXPORT_TABLE_01": "/<strong><em><em></em></em></strong> AS SYSDBA" directory=my_dir logfile=test01.log dumpfile=test02.dmp tables=test.T_BASEITEM</p> 
+   <p>Estimate in progress using BLOCKS method...</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE_DATA</p> 
+   <p>Total estimation using BLOCKS method: 6 MB</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/COMMENT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/INDEX</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/CONSTRAINT/CONSTRAINT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/STATISTICS/INDEX_STATISTICS</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/CONSTRAINT/REF_CONSTRAINT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TRIGGER</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/STATISTICS/TABLE_STATISTICS</p> 
+   <p>. . exported "TEST"."T_BASEITEM" 4.470 MB 35322 rows</p> 
+   <p>Master table "SYS"."SYS_EXPORT_TABLE_01" successfully loaded/unloaded</p> 
+   <hr>
+   <p>Dump file set for SYS.SYS_EXPORT_TABLE_01 is:</p> 
+   <p>/home/oracle/dmp/test02.dmp</p> 
+   <p>Job "SYS"."SYS_EXPORT_TABLE_01" successfully completed at 00:56:21</p> 
+   <p>[oracle@ENMOEDU admin]$ expdp '/ as sysdba' directory=my_dir logfile=test01.log dumpfile=test03.dmp tables=test.T_BASEITEM</p> 
+   <p>Export: Release 11.2.0.3.0 - Production on Fri Aug 8 00:56:30 2014</p> 
+   <p>Copyright (c) 1982, 2011, Oracle and/or its affiliates. All rights reserved.</p> 
+   <p>Connected to: Oracle Database 11g Enterprise Edition Release 11.2.0.3.0 - Production</p> 
+   <p>With the Partitioning, OLAP, Data Mining and Real Application Testing options</p> 
+   <p>Starting "SYS"."SYS_EXPORT_TABLE_01": "/<strong><em><em></em></em></strong> AS SYSDBA" directory=my_dir logfile=test01.log dumpfile=test03.dmp tables=test.T_BASEITEM</p> 
+   <p>Estimate in progress using BLOCKS method...</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE_DATA</p> 
+   <p>Total estimation using BLOCKS method: 6 MB</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/COMMENT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/INDEX</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/CONSTRAINT/CONSTRAINT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/STATISTICS/INDEX_STATISTICS</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/CONSTRAINT/REF_CONSTRAINT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TRIGGER</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/STATISTICS/TABLE_STATISTICS</p> 
+   <p>. . exported "TEST"."T_BASEITEM" 4.470 MB 35322 rows</p> 
+   <p>Master table "SYS"."SYS_EXPORT_TABLE_01" successfully loaded/unloaded</p> 
+   <hr>
+   <p>Dump file set for SYS.SYS_EXPORT_TABLE_01 is:</p> 
+   <p>/home/oracle/dmp/test03.dmp</p> 
+   <p>Job "SYS"."SYS_EXPORT_TABLE_01" successfully completed at 00:56:36</p> 
+   <p>[oracle@ENMOEDU admin]$ expdp '/ as sysdba' directory=my_dir logfile=test01.log dumpfile=test04.dmp tables=test.T_BASEITEM</p> 
+   <p>Export: Release 11.2.0.3.0 - Production on Fri Aug 8 00:56:44 2014</p> 
+   <p>Copyright (c) 1982, 2011, Oracle and/or its affiliates. All rights reserved.</p> 
+   <p>Connected to: Oracle Database 11g Enterprise Edition Release 11.2.0.3.0 - Production</p> 
+   <p>With the Partitioning, OLAP, Data Mining and Real Application Testing options</p> 
+   <p>Starting "SYS"."SYS_EXPORT_TABLE_01": "/<strong><em><em></em></em></strong> AS SYSDBA" directory=my_dir logfile=test01.log dumpfile=test04.dmp tables=test.T_BASEITEM</p> 
+   <p>Estimate in progress using BLOCKS method...</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE_DATA</p> 
+   <p>Total estimation using BLOCKS method: 6 MB</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/COMMENT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/INDEX</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/CONSTRAINT/CONSTRAINT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/STATISTICS/INDEX_STATISTICS</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/CONSTRAINT/REF_CONSTRAINT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TRIGGER</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/STATISTICS/TABLE_STATISTICS</p> 
+   <p>. . exported "TEST"."T_BASEITEM" 4.470 MB 35322 rows</p> 
+   <p>Master table "SYS"."SYS_EXPORT_TABLE_01" successfully loaded/unloaded</p> 
+   <hr>
+   <p>Dump file set for SYS.SYS_EXPORT_TABLE_01 is:</p> 
+   <p>/home/oracle/dmp/test04.dmp</p> 
+   <p>Job "SYS"."SYS_EXPORT_TABLE_01" successfully completed at 00:56:50</p> 
+   <pre><code> 
+
+说明：三次expdp导出操作都成功
+
+ 
+
+4.查询sequence已经cycle到40
+</code></pre> 
+   <p>SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_1_N.nextval from dual;</p> 
+   <p>NEXTVAL</p> 
+   <hr>
+   <pre><code>40
+</code></pre> 
+   <pre><code>
+ 
+
+说明：问题可以解决。需要在生产库执行两条sql:
+</code></pre> 
+   <p>SQL&gt; drop sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N ;</p> 
+   <p>SQL&gt; create sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N minvalue 1 maxvalue 999999 start with 1 increment by 1 cache 20 cycle;</p> 
+   <pre><code>
+
+
+MOS解决方案分析
+
+MOS文档1550344.1提供的解决方案
+</code></pre> 
+   <p>SOLUTION<br>To address the issue, use any of below alternatives:<br>o Apply interim Patch 16928674 for the generic platform if available for your Oracle version.</p> 
+   <ul>
+    <li>OR -</li>
+   </ul>
+   <ol>
+    <li>As a workround, execute next scripts to recreate the datapump objects:</li>
+   </ol>
+   <p>@$ORACLE_HOME/rdbms/admin/catdph.sql<br> @$ORACLE_HOME/rdbms/admin/prvtdtde.plb<br> @$ORACLE_HOME/rdbms/admin/catdpb.sql<br> @$ORACLE_HOME/rdbms/admin/dbmspump.sql<br> @$ORACLE_HOME/rdbms/admin/utlrp.sql</p> 
+   <p>Please refer to<br>Note 16473783.8 - Bug 16473783 - expdp encounters ORA-39077 and ORA-31638 - withdrawn<br>Generally speaking, we can recreate the datapump objects in 11g by calling;</p> 
+   <pre><code>1. Catproc.sql</code></pre> 
+   <p>SQL&gt; @$ORACLE_HOME/rdbms/admin/catproc.sql</p> 
+   <pre><code>
+2. To recompile invalid objects, if any</code></pre> 
+   <p>SQL&gt; @$ORACLE_HOME/rdbms/admin/utlrp.sql</p> 
+   <p>This is described in <br>Note 430221.1 - How To Reload Datapump Utility EXPDP/IMPDP</p> 
+   <ul>
+    <li>OR -</li>
+   </ul>
+   <ol>
+    <li>As an alternative to a re-installation of datapump, which would need an instance shutdown/restart, you could recreate the queue table, e.g:</li>
+   </ol>
+   <p>connect / as sysdba<br>exec dbms_aqadm.drop_queue_table(queue_table =&gt; 'SYS.KUPC$DATAPUMP_QUETAB', force =&gt; TRUE);<br>dbms_aqadm.create_queue_table(</p> 
+   <pre><code> queue_table =&gt; 'SYS.KUPC$DATAPUMP_QUETAB',
+  multiple_consumers =&gt; TRUE,
+  queue_payload_type =&gt; 'SYS.KUPC$_MESSAGE',
+ comment =&gt; 'DataPump Queue Table',
+  compatible =&gt; '8.1.3',
+  storage_clause=&gt;'TABLESPACE SYSAUX');      
+</code></pre> 
+   <p>Note that this will cause any running Data Pump jobs on the instance to fail with queue errors. However, they should be restartable.</p> 
+   <pre><code>
+ 
+
+分析：
+
+1.      打Patch 16928674可以修复此bug，可以回退，不用停机风险小。
+
+2.      执行如下脚本，但此方法会引起其它问题，被官方撤回。
+</code></pre> 
+   <p>@$ORACLE_HOME/rdbms/admin/catdph.sql<br> @$ORACLE_HOME/rdbms/admin/prvtdtde.plb<br> @$ORACLE_HOME/rdbms/admin/catdpb.sql<br> @$ORACLE_HOME/rdbms/admin/dbmspump.sql<br> @$ORACLE_HOME/rdbms/admin/utlrp.sql</p> 
+   <p>或者</p> 
+   <p>@$ORACLE_HOME/rdbms/admin/catproc.sql</p> 
+   <p>@$ORACLE_HOME/rdbms/admin/utlrp.sql</p> 
+   <pre><code>
+3.      执行存储过程重新安装datapump组件，需要重启实例。
+</code></pre> 
+   <p>connect / as sysdba<br>exec dbms_aqadm.drop_queue_table(queue_table =&gt; 'SYS.KUPC$DATAPUMP_QUETAB', force =&gt; TRUE);<br>dbms_aqadm.create_queue_table(</p> 
+   <pre><code> queue_table =&gt; 'SYS.KUPC$DATAPUMP_QUETAB',
+  multiple_consumers =&gt; TRUE,
+  queue_payload_type =&gt; 'SYS.KUPC$_MESSAGE',
+ comment =&gt; 'DataPump Queue Table',
+  compatible =&gt; '8.1.3',
+  storage_clause=&gt;'TABLESPACE SYSAUX');</code></pre> 
+   <pre><code>
+
+
+
+验证打path 16928674修复bug
+
+1.错误再现
+
+1.将sequence值设置为999987
+</code></pre> 
+   <p>SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_1_N.nextval from dual;</p> 
+   <p>NEXTVAL</p> 
+   <hr>
+   <pre><code>   321
+</code></pre> 
+   <p>SQL&gt; Alter Sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N Increment By 999666;</p> 
+   <p>Sequence altered.</p> 
+   <p>SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_1_N.nextval from dual;</p> 
+   <p>NEXTVAL</p> 
+   <hr>
+   <pre><code>999987
+</code></pre> 
+   <p>SQL&gt; Alter Sequence AQ$_KUPC$DATAPUMP_QUETAB_1_N Increment By 1;</p> 
+   <p>Sequence altered.</p> 
+   <pre><code>
+2.执行expdp导出
+</code></pre> 
+   <p>[oracle@ENMOEDU dmp]$ expdp test/test directory=MY_DIR dumpfile=d2.dmp tables=T_TASKDONE</p> 
+   <p>Export: Release 11.2.0.3.0 - Production on Fri Aug 8 11:07:03 2014</p> 
+   <p>Copyright (c) 1982, 2011, Oracle and/or its affiliates. All rights reserved.</p> 
+   <p>Connected to: Oracle Database 11g Enterprise Edition Release 11.2.0.3.0 - Production</p> 
+   <p>With the Partitioning, OLAP, Data Mining and Real Application Testing options</p> 
+   <p>ORA-31626: job does not exist</p> 
+   <p>ORA-31638: cannot attach to job SYS_EXPORT_TABLE_01 for user TEST</p> 
+   <p>ORA-06512: at "SYS.DBMS_SYS_ERROR", line 95</p> 
+   <p>ORA-06512: at "SYS.KUPV$FT_INT", line 428</p> 
+   <p>ORA-39077: unable to subscribe agent KUPC$A_1_110703612385000 to queue "KUPC$C_1_20140808110703"</p> 
+   <p>ORA-06512: at "SYS.DBMS_SYS_ERROR", line 95</p> 
+   <p>ORA-06512: at "SYS.KUPC$QUE_INT", line 250</p> 
+   <p>ORA-06502: PL/SQL: numeric or value error: character string buffer too small</p> 
+   <pre><code>
+
+3.执行impdp导入
+</code></pre> 
+   <p>[oracle@ENMOEDU dmp]$ impdp test/test directory=MY_DIR dumpfile=d2.dmp tables=T_TASKDONE</p> 
+   <p>Import: Release 11.2.0.3.0 - Production on Fri Aug 8 11:07:42 2014</p> 
+   <p>Copyright (c) 1982, 2011, Oracle and/or its affiliates. All rights reserved.</p> 
+   <p>Connected to: Oracle Database 11g Enterprise Edition Release 11.2.0.3.0 - Production</p> 
+   <p>With the Partitioning, OLAP, Data Mining and Real Application Testing options</p> 
+   <p>ORA-31626: job does not exist</p> 
+   <p>ORA-31638: cannot attach to job SYS_IMPORT_TABLE_01 for user TEST</p> 
+   <p>ORA-06512: at "SYS.DBMS_SYS_ERROR", line 95</p> 
+   <p>ORA-06512: at "SYS.KUPV$FT_INT", line 428</p> 
+   <p>ORA-39077: unable to subscribe agent KUPC$A_1_110742848594000 to queue "KUPC$C_1_20140808110742"</p> 
+   <p>ORA-06512: at "SYS.DBMS_SYS_ERROR", line 95</p> 
+   <p>ORA-06512: at "SYS.KUPC$QUE_INT", line 250</p> 
+   <p>ORA-06502: PL/SQL: numeric or value error: character string buffer too small</p> 
+   <pre><code>
+ 
+
+说明：expdp导出与impdp导入错误原因相同
+
+
+**2.安装补丁**
+
+1.查看opatch版本
+</code></pre> 
+   <p>[oracle@ENMOEDU dmp]$ cd /u01/app/oracle/product/11.2.0/dbhome_1/OPatch/</p> 
+   <p>[oracle@ENMOEDU OPatch]$ ./opatch version</p> 
+   <p>Invoking OPatch 11.2.0.1.7</p> 
+   <p>OPatch Version: 11.2.0.1.7</p> 
+   <p>OPatch succeeded.</p> 
+   <pre><code>
+2.上传最新Opath到$ORACLE_HOME目录
+</code></pre> 
+   <p>[oracle@ENMOEDU dbhome_1]$ ls -trl</p> 
+   <p>-rw-r--r-- 1 root root 32995358 Aug 8 11:17 p6880880_112000_Linux-x86-64.zip</p> 
+   <pre><code>
+3.备份原Opath目录
+</code></pre> 
+   <p>[oracle@ENMOEDU dbhome_1]$ mv OPatch/ OPatch.bak</p> 
+   <pre><code>
+
+4.解压最新Opath
+</code></pre> 
+   <p>[oracle@ENMOEDU dbhome_1]$ unzip p6880880_112000_Linux-x86-64.zip</p> 
+   <pre><code>
+
+5.查看opatch版本
+</code></pre> 
+   <p>[oracle@ENMOEDU dbhome_1]$ cd OPatch</p> 
+   <p>[oracle@ENMOEDU OPatch]$ ./opatch version</p> 
+   <p>OPatch Version: 11.2.0.3.5</p> 
+   <p>OPatch succeeded.</p> 
+   <pre><code>
+
+6.上传补丁
+</code></pre> 
+   <p>[oracle@ENMOEDU tmp]$ cd /u01/</p> 
+   <p>[oracle@ENMOEDU u01]$ mkdir patch</p> 
+   <p>[oracle@ENMOEDU u01]$ cd patch</p> 
+   <p>[oracle@ENMOEDU patch]$ ls</p> 
+   <p>p16928674_112030_Generic.zip</p> 
+   <pre><code>
+
+7.解压补丁
+</code></pre> 
+   <p>[oracle@ENMOEDU patch]$ unzip p16928674_112030_Generic.zip</p> 
+   <pre><code>
+
+8.检查补丁
+</code></pre> 
+   <p>[oracle@ENMOEDU patch]$ ls</p> 
+   <p>16928674 p16928674_112030_Generic.zip</p> 
+   <p>[oracle@ENMOEDU patch]$ cd 16928674/</p> 
+   <p>[oracle@ENMOEDU 16928674]$ /u01/app/oracle/product/11.2.0/dbhome_1/OPatch/opatch prereq CheckConflictAgainstOHWithDetail -ph ./</p> 
+   <p>Oracle Interim Patch Installer version 11.2.0.3.5</p> 
+   <p>Copyright (c) 2013, Oracle Corporation. All rights reserved.</p> 
+   <p>PREREQ session</p> 
+   <p>Oracle Home : /u01/app/oracle/product/11.2.0/dbhome_1</p> 
+   <p>Central Inventory : /u01/app/oraInventory</p> 
+   <p>from : /u01/app/oracle/product/11.2.0/dbhome_1/oraInst.loc</p> 
+   <p>OPatch version : 11.2.0.3.5</p> 
+   <p>OUI version : 11.2.0.3.0</p> 
+   <p>Log file location : /u01/app/oracle/product/11.2.0/dbhome_1/cfgtoollogs/opatch/opatch2014-08-08_11-26-35AM_1.log</p> 
+   <p>Invoking prereq "checkconflictagainstohwithdetail"</p> 
+   <p>Prereq "checkConflictAgainstOHWithDetail" passed.</p> 
+   <p>OPatch succeeded.</p> 
+   <pre><code>
+
+9.安装补丁
+</code></pre> 
+   <p>[oracle@ENMOEDU 16928674]$ $ORACLE_HOME/OPatch/opatch apply</p> 
+   <p>Oracle Interim Patch Installer version 11.2.0.3.5</p> 
+   <p>Copyright (c) 2013, Oracle Corporation. All rights reserved.</p> 
+   <p>Oracle Home : /u01/app/oracle/product/11.2.0/dbhome_1</p> 
+   <p>Central Inventory : /u01/app/oraInventory</p> 
+   <p>from : /u01/app/oracle/product/11.2.0/dbhome_1/oraInst.loc</p> 
+   <p>OPatch version : 11.2.0.3.5</p> 
+   <p>OUI version : 11.2.0.3.0</p> 
+   <p>Log file location : /u01/app/oracle/product/11.2.0/dbhome_1/cfgtoollogs/opatch/16928674_Aug_08_2014_11_28_27/apply2014-08-08_11-28-27AM_1.log</p> 
+   <p>Applying interim patch '16928674' to OH '/u01/app/oracle/product/11.2.0/dbhome_1'</p> 
+   <p>Verifying environment and performing prerequisite checks...</p> 
+   <p>All checks passed.</p> 
+   <p>Provide your email address to be informed of security issues, install and</p> 
+   <p>initiate Oracle Configuration Manager. Easier for you if you use your My</p> 
+   <p>Oracle Support Email address/User Name.</p> 
+   <p>Visit <a href="http://www.oracle.com/support/policies.html" rel="nofollow">http://www.oracle.com/support/policies.html</a> for details.</p> 
+   <p>Email address/User Name:</p> 
+   <p>You have not provided an email address for notification of security issues.</p> 
+   <p>Do you wish to remain uninformed of security issues ([Y]es, [N]o) [N]: y</p> 
+   <p>Backing up files...</p> 
+   <p>Patching component oracle.rdbms.dbscripts, 11.2.0.3.0...</p> 
+   <p>Verifying the update...</p> 
+   <p>Patch 16928674 successfully applied</p> 
+   <p>Log file location: /u01/app/oracle/product/11.2.0/dbhome_1/cfgtoollogs/opatch/16928674_Aug_08_2014_11_28_27/apply2014-08-08_11-28-27AM_1.log</p> 
+   <p>OPatch succeeded.</p> 
+   <pre><code>
+
+10.检查安装结果
+</code></pre> 
+   <p>[oracle@ENMOEDU 16928674]$ $ORACLE_HOME/OPatch/opatch lsinventory</p> 
+   <p>Oracle Interim Patch Installer version 11.2.0.3.5</p> 
+   <p>Copyright (c) 2013, Oracle Corporation. All rights reserved.</p> 
+   <p>Oracle Home : /u01/app/oracle/product/11.2.0/dbhome_1</p> 
+   <p>Central Inventory : /u01/app/oraInventory</p> 
+   <p>from : /u01/app/oracle/product/11.2.0/dbhome_1/oraInst.loc</p> 
+   <p>OPatch version : 11.2.0.3.5</p> 
+   <p>OUI version : 11.2.0.3.0</p> 
+   <p>Log file location : /u01/app/oracle/product/11.2.0/dbhome_1/cfgtoollogs/opatch/opatch2014-08-08_11-30-08AM_1.log</p> 
+   <p>Lsinventory Output file location : /u01/app/oracle/product/11.2.0/dbhome_1/cfgtoollogs/opatch/lsinv/lsinventory2014-08-08_11-30-08AM.txt</p> 
+   <hr>
+   <p>Installed Top-level Products (1):</p> 
+   <p>Oracle Database 11g 11.2.0.3.0</p> 
+   <p>There are 1 products installed in this Oracle Home.</p> 
+   <p>Interim patches (1) :</p> 
+   <p>Patch 16928674 : applied on Fri Aug 08 11:28:51 CST 2014</p> 
+   <p>Unique Patch ID: 17483843</p> 
+   <p>Created on 2 Apr 2014, 04:20:57 hrs PST8PDT</p> 
+   <p>Bugs fixed:</p> 
+   <pre><code> 16928674
+</code></pre> 
+   <hr>
+   <p>OPatch succeeded.</p> 
+   <pre><code>
+11.查看补丁执行脚本路径
+</code></pre> 
+   <p>[oracle@ENMOEDU 16928674]$ ls</p> 
+   <p>etc files postinstall.sql README.txt</p> 
+   <p>[oracle@ENMOEDU 16928674]$ pwd</p> 
+   <p>/u01/patch/16928674</p> 
+   <pre><code>
+
+12.执行补丁脚本
+</code></pre> 
+   <p>SQL&gt; @/u01/patch/16928674/postinstall</p> 
+   <p>Calling rdbms/admin/prvtbpci.plb on 08-AUG-14 11.34.01.504642 AM +08:00</p> 
+   <p>Package body created.</p> 
+   <p>Package body created.</p> 
+   <pre><code>
+
+**3.测试修复效果**
+
+1.测试expdp和impdp是否可以正常执行
+</code></pre> 
+   <p>[oracle@ENMOEDU ~]$ expdp test/test directory=MY_DIR dumpfile=d3.dmp tables=T_TASKDONE</p> 
+   <p>Export: Release 11.2.0.3.0 - Production on Fri Aug 8 11:34:14 2014</p> 
+   <p>Copyright (c) 1982, 2011, Oracle and/or its affiliates. All rights reserved.</p> 
+   <p>Connected to: Oracle Database 11g Enterprise Edition Release 11.2.0.3.0 - Production</p> 
+   <p>With the Partitioning, OLAP, Data Mining and Real Application Testing options</p> 
+   <p>Starting "TEST"."SYS_EXPORT_TABLE_01": test/<strong><em><em></em></em></strong> directory=MY_DIR dumpfile=d3.dmp tables=T_TASKDONE</p> 
+   <p>Estimate in progress using BLOCKS method...</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE_DATA</p> 
+   <p>Total estimation using BLOCKS method: 280 MB</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/INDEX</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/CONSTRAINT/CONSTRAINT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/STATISTICS/INDEX_STATISTICS</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/STATISTICS/TABLE_STATISTICS</p> 
+   <p>. . exported "TEST"."T_TASKDONE" 26.65 MB 233428 rows</p> 
+   <p>Master table "TEST"."SYS_EXPORT_TABLE_01" successfully loaded/unloaded</p> 
+   <hr>
+   <p>Dump file set for TEST.SYS_EXPORT_TABLE_01 is:</p> 
+   <p>/home/oracle/dmp/d3.dmp</p> 
+   <p>Job "TEST"."SYS_EXPORT_TABLE_01" successfully completed at 11:34:27</p> 
+   <p>[oracle@ENMOEDU ~]$ impdp test/test directory=MY_DIR dumpfile=d3.dmp tables=T_TASKDONE table_exists_action=replace</p> 
+   <p>Import: Release 11.2.0.3.0 - Production on Fri Aug 8 11:41:55 2014</p> 
+   <p>Copyright (c) 1982, 2011, Oracle and/or its affiliates. All rights reserved.</p> 
+   <p>Connected to: Oracle Database 11g Enterprise Edition Release 11.2.0.3.0 - Production</p> 
+   <p>With the Partitioning, OLAP, Data Mining and Real Application Testing options</p> 
+   <p>Master table "TEST"."SYS_IMPORT_TABLE_01" successfully loaded/unloaded</p> 
+   <p>Starting "TEST"."SYS_IMPORT_TABLE_01": test/<strong><em><em></em></em></strong> directory=MY_DIR dumpfile=d3.dmp tables=T_TASKDONE table_exists_action=replace</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/TABLE_DATA</p> 
+   <p>. . imported "TEST"."T_TASKDONE" 26.65 MB 233428 rows</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/INDEX</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/CONSTRAINT/CONSTRAINT</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/INDEX/STATISTICS/INDEX_STATISTICS</p> 
+   <p>Processing object type TABLE_EXPORT/TABLE/STATISTICS/TABLE_STATISTICS</p> 
+   <p>Job "TEST"."SYS_IMPORT_TABLE_01" successfully completed at 11:42:20</p> 
+   <pre><code>
+
+2.查看sequence值
+</code></pre> 
+   <p>SQL&gt; select AQ$_KUPC$DATAPUMP_QUETAB_1_N.nextval from dual;</p> 
+   <p>NEXTVAL</p> 
+   <hr>
+   <pre><code>说明：安装patch后在执行expdp和impdp操作前会验证sequece，如果值大于1000000时，sequence会自动重建。
+  </code></pre> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

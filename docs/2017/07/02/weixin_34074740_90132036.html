@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>如何让你的SQL运行得更快 « NotBeCN</title>
+  <meta name="description" content="                 一、不合理的索引设计     ----例：表record有620000行，试看在不同的索引下，下面几个 SQL的运行情况：     ---- 1.在date上建有一非个群集索引     select count(*) from record where date &gt;    ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/07/02/weixin_34074740_90132036.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">如何让你的SQL运行得更快</h1>
+    <p class="post-meta">Jul 2, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="blogpost-body" style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">
+    一、不合理的索引设计
+    <br> ----例：表record有620000行，试看在不同的索引下，下面几个 SQL的运行情况：
+    <br> ---- 1.在date上建有一非个群集索引
+    <br> select count(*) from record where date &gt;
+    <br> '19991201' and date &lt; '19991214'and amount &gt;
+    <br> 2000 (25秒)
+    <br> select date,sum(amount) from record group by date
+    <br> (55秒)
+    <br> select count(*) from record where date &gt;
+    <br> '19990901' and place in ('BJ','SH') (27秒)
+    <br> ---- 分析：
+    <br> ----date上有大量的重复值，在非群集索引下，数据在物理上随机存放在数据页上，在
+    <br> 范围查找时，必须执行一次表扫描才能找到这一范围内的全部行。
+    <br> ---- 2.在date上的一个群集索引
+    <br> select count(*) from record where date &gt;
+    <br> '19991201' and date &lt; '19991214' and amount &gt;
+    <br> 2000 （14秒）
+    <br> select date,sum(amount) from record group by date
+    <br> （28秒）
+    <br> select count(*) from record where date &gt;
+    <br> '19990901' and place in ('BJ','SH')（14秒）
+    <br> ---- 分析：
+    <br> ---- 在群集索引下，数据在物理上按顺序在数据页上，重复值也排列在一起，因而在范
+    <br> 围查找时，可以先找到这个范围的起末点，且只在这个范围内扫描数据页，避免了大范
+    <br> 围扫描，提高了查询速度。
+    <br> ---- 3.在place，date，amount上的组合索引
+    <br> select count(*) from record where date &gt;
+    <br> '19991201' and date &lt; '19991214' and amount &gt;
+    <br> 2000 （26秒）
+    <br> select date,sum(amount) from record group by date
+    <br> （27秒）
+    <br> select count(*) from record where date &gt;
+    <br> '19990901' and place in ('BJ', 'SH')（&lt; 1秒）
+    <br> ---- 分析：
+    <br> ---- 这是一个不很合理的组合索引，因为它的前导列是place，第一和第二条SQL没有引
+    <br> 用place，因此也没有利用上索引；第三个SQL使用了place，且引用的所有列都包含在组
+    <br> 合索引中，形成了索引覆盖，所以它的速度是非常快的。
+    <br> ---- 4.在date，place，amount上的组合索引
+    <br> select count(*) from record where date &gt;
+    <br> '19991201' and date &lt; '19991214' and amount &gt;
+    <br> 2000(&lt; 1秒)
+    <br> select date,sum(amount) from record group by date
+    <br> （11秒）
+    <br> select count(*) from record where date &gt;
+    <br> '19990901' and place in ('BJ','SH')（&lt; 1秒）
+    <br> ---- 分析：
+    <br> ---- 这是一个合理的组合索引。它将date作为前导列，使每个SQL都可以利用索引，并
+    <br> 且在第一和第三个SQL中形成了索引覆盖，因而性能达到了最优。
+    <br> ---- 5.总结：
+    <br> ---- 缺省情况下建立的索引是非群集索引，但有时它并不是最佳的；合理的索引设计要
+    <br> 建立在对各种查询的分析和预测上。一般来说：
+    <br> ---- ①.有大量重复值、且经常有范围查询
+    <br> （between, &gt;,&lt; ，&gt;=,&lt; =）和order by
+    <br> 、group by发生的列，可考虑建立群集索引；
+    <br> ---- ②.经常同时存取多列，且每列都含有重复值可考虑建立组合索引；
+    <br> ---- ③.组合索引要尽量使关键查询形成索引覆盖，其前导列一定是使用最频繁的列。&nbsp;
+    <br> 二、不充份的连接条件：
+    <br> ---- 例：表card有7896行，在card_no上有一个非聚集索引，表account有191122行，在
+    <br> account_no上有一个非聚集索引，试看在不同的表连接条件下，两个SQL的执行情况：
+    <br>
+    <br> select sum(a.amount) from account a,
+    <br> card b where a.card_no = b.card_no（20秒）
+    <br> ---- 将SQL改为：
+    <br> select sum(a.amount) from account a,
+    <br> card b where a.card_no = b.card_no and a.
+    <br> account_no=b.account_no（&lt; 1秒）
+    <br> ---- 分析：
+    <br> ---- 在第一个连接条件下，最佳查询方案是将account作外层表，card作内层表，利用
+    <br> card上的索引，其I/O次数可由以下公式估算为：
+    <br> ---- 外层表account上的22541页+（外层表account的191122行*内层表card上对应外层
+    <br> 表第一行所要查找的3页）=595907次I/O
+    <br> ---- 在第二个连接条件下，最佳查询方案是将card作外层表，account作内层表，利用
+    <br> account上的索引，其I/O次数可由以下公式估算为：
+    <br> ---- 外层表card上的1944页+（外层表card的7896行*内层表account上对应外层表每一
+    <br> 行所要查找的4页）= 33528次I/O
+    <br> ---- 可见，只有充份的连接条件，真正的最佳方案才会被执行。
+    <br> ---- 总结：
+    <br> ---- 1.多表操作在被实际执行前，查询优化器会根据连接条件，列出几组可能的连接方
+    <br> 案并从中找出系统开销最小的最佳方案。连接条件要充份考虑带有索引的表、行数多的
+    <br> 表；内外表的选择可由公式：外层表中的匹配行数*内层表中每一次查找的次数确定，乘
+    <br> 积最小为最佳方案。
+    <br> ---- 2.查看执行方案的方法-- 用set showplanon，打开showplan选项，就可以看到连
+    <br> 接顺序、使用何种索引的信息；想看更详细的信息，需用sa角色执行dbcc(3604,310,30
+    <br> 2)。
+    <br> 三、不可优化的where子句
+    <br> ---- 1.例：下列SQL条件语句中的列都建有恰当的索引，但执行速度却非常慢：
+    <br> select * from record where
+    <br> substring(card_no,1,4)='5378'(13秒)
+    <br> select * from record where
+    <br> amount/30&lt; 1000（11秒）
+    <br> select * from record where
+    <br> convert(char(10),date,112)='19991201'（10秒）
+    <br> ---- 分析：
+    <br> ---- where子句中对列的任何操作结果都是在SQL运行时逐列计算得到的，因此它不得不
+    <br> 进行表搜索，而没有使用该列上面的索引；如果这些结果在查询编译时就能得到，那么
+    <br> 就可以被SQL优化器优化，使用索引，避免表搜索，因此将SQL重写成下面这样：
+    <br> select * from record where card_no like
+    <br> '5378%'（&lt; 1秒）
+    <br> select * from record where amount
+    <br> &lt; 1000*30（&lt; 1秒）
+    <br> select * from record where date= '1999/12/01'
+    <br> （&lt; 1秒）
+    <br> ---- 你会发现SQL明显快起来！
+    <br> ---- 2.例：表stuff有200000行，id_no上有非群集索引，请看下面这个SQL：
+    <br> select count(*) from stuff where id_no in('0','1')
+    <br> （23秒）
+    <br> ---- 分析：
+    <br> ---- where条件中的'in'在逻辑上相当于'or'，所以语法分析器会将in ('0','1')转化
+    <br> 为id_no ='0' or id_no='1'来执行。我们期望它会根据每个or子句分别查找，再将结果
+    <br> 相加，这样可以利用id_no上的索引；但实际上（根据showplan）,它却采用了"OR策略"
+    <br> ，即先取出满足每个or子句的行，存入临时数据库的工作表中，再建立唯一索引以去掉
+    <br> 重复行，最后从这个临时表中计算结果。因此，实际过程没有利用id_no上索引，并且完
+    <br> 成时间还要受tempdb数据库性能的影响。
+    <br> ---- 实践证明，表的行数越多，工作表的性能就越差，当stuff有620000行时，执行时
+    <br> 间竟达到220秒！还不如将or子句分开：
+    <br> select count(*) from stuff where id_no='0'
+    <br> select count(*) from stuff where id_no='1'
+    <br> ---- 得到两个结果，再作一次加法合算。因为每句都使用了索引，执行时间只有3秒，
+    <br> 在620000行下，时间也只有4秒。或者，用更好的方法，写一个简单的存储过程：
+    <br> create proc count_stuff as
+    <br> declare @a int
+    <br> declare @b int
+    <br> declare @c int
+    <br> declare @d char(10)
+    <br> begin
+    <br> select @a=count(*) from stuff where id_no='0'
+    <br> select @b=count(*) from stuff where id_no='1'
+    <br> end
+    <br> select @c=@a+@b
+    <br> select @d=convert(char(10),@c)
+    <br> print @d
+    <br> ---- 直接算出结果，执行时间同上面一样快！
+    <br> ---- 总结：
+    <br> ---- 可见，所谓优化即where子句利用了索引，不可优化即发生了表扫描或额外开销。
+    <br>
+    <br> ---- 1.任何对列的操作都将导致表扫描，它包括数据库函数、计算表达式等等，查询时
+    <br> 要尽可能将操作移至等号右边。
+    <br> ---- 2.in、or子句常会使用工作表，使索引失效；如果不产生大量重复值，可以考虑把
+    <br> 子句拆开；拆开的子句中应该包含索引。
+    <br> ---- 3.要善于使用存储过程，它使SQL变得更加灵活和高效。
+    <br> ---- 从以上这些例子可以看出，SQL优化的实质就是在结果正确的前提下，用优化器可
+    <br> 以识别的语句，充份利用索引，减少表扫描的I/O次数，尽量避免表搜索的发生。其实S
+    <br> QL的性能优化是一个复杂的过程，上述这些只是在应用层次的一种体现，深入研究还会
+    <br> 涉及数据库层的资源配置、网络层的流量控制以及操作系统层的总体设计。
+    <br>
+    <br>
+    <br> 1．合理使用索引&nbsp;
+    <br> 索引是数据库中重要的数据结构，它的根本目的就是为了提高查询效率。现在大多数的数据库产品都采用IBM最先提出的ISAM索引结构。索引的使用要恰到好处，其使用原则如下：&nbsp;
+    <br> ●在经常进行连接，但是没有指定为外键的列上建立索引，而不经常连接的字段则由优化器自动生成索引。&nbsp;
+    <br> ●在频繁进行排序或分组（即进行group by或order by操作）的列上建立索引。&nbsp;
+    <br> ●在条件表达式中经常用到的不同值较多的列上建立检索，在不同值少的列上不要建立索引。比如在雇员表的“性别”列上只有“男”与“女”两个不同值，因此就无必要建立索引。如果建立索引不但不会提高查询效率，反而会严重降低更新速度。&nbsp;
+    <br> ●如果待排序的列有多个，可以在这些列上建立复合索引（compound index）。&nbsp;
+    <br> ●使用系统工具。如Informix数据库有一个tbcheck工具，可以在可疑的索引上进行检查。在一些数据库服务器上，索引可能失效或者因为频繁操作而使得读取效率降低，如果一个使用索引的查询不明不白地慢下来，可以试着用tbcheck工具检查索引的完整性，必要时进行修复。另外，当数据库表更新大量数据后，删除并重建索引可以提高查询速度。&nbsp;
+    <br>
+    <br> 2．避免或简化排序&nbsp;
+    <br> 应当简化或避免对大型表进行重复的排序。当能够利用索引自动以适当的次序产生输出时，优化器就避免了排序的步骤。以下是一些影响因素：&nbsp;
+    <br> ●索引中不包括一个或几个待排序的列；&nbsp;
+    <br> ●group by或order by子句中列的次序与索引的次序不一样；&nbsp;
+    <br> ●排序的列来自不同的表。&nbsp;
+    <br> 为了避免不必要的排序，就要正确地增建索引，合理地合并数据库表（尽管有时可能影响表的规范化，但相对于效率的提高是值得的）。如果排序不可避免，那么应当试图简化它，如缩小排序的列的范围等。&nbsp;
+    <br>
+    <br> 3．消除对大型表行数据的顺序存取&nbsp;
+    <br> 在嵌套查询中，对表的顺序存取对查询效率可能产生致命的影响。比如采用顺序存取策略，一个嵌套3层的查询，如果每层都查询1000行，那么这个查询就要查询10亿行数据。避免这种情况的主要方法就是对连接的列进行索引。例如，两个表：学生表（学号、姓名、年龄……）和选课表（学号、课程号、成绩）。如果两个表要做连接，就要在“学号”这个连接字段上建立索引。&nbsp;
+    <br> 还可以使用并集来避免顺序存取。尽管在所有的检查列上都有索引，但某些形式的where子句强迫优化器使用顺序存取。下面的查询将强迫对orders表执行顺序操作：&nbsp;
+    <br> SELECT ＊ FROM orders WHERE (customer_num=104 AND order_num&gt;1001) OR order_num=1008&nbsp;
+    <br> 虽然在customer_num和order_num上建有索引，但是在上面的语句中优化器还是使用顺序存取路径扫描整个表。因为这个语句要检索的是分离的行的集合，所以应该改为如下语句：&nbsp;
+    <br> SELECT ＊ FROM orders WHERE customer_num=104 AND order_num&gt;1001&nbsp;
+    <br> UNION&nbsp;
+    <br> SELECT ＊ FROM orders WHERE order_num=1008&nbsp;
+    <br> 这样就能利用索引路径处理查询。&nbsp;
+    <br>
+    <br> 4．避免相关子查询&nbsp;
+    <br> 一个列的标签同时在主查询和where子句中的查询中出现，那么很可能当主查询中的列值改变之后，子查询必须重新查询一次。查询嵌套层次越多，效率越低，因此应当尽量避免子查询。如果子查询不可避免，那么要在子查询中过滤掉尽可能多的行。&nbsp;
+    <br>
+    <br> 5．避免困难的正规表达式&nbsp;
+    <br> MATCHES和LIKE关键字支持通配符匹配，技术上叫正规表达式。但这种匹配特别耗费时间。例如：SELECT ＊ FROM customer WHERE zipcode LIKE “98_ _ _”&nbsp;
+    <br> 即使在zipcode字段上建立了索引，在这种情况下也还是采用顺序扫描的方式。如果把语句改为SELECT ＊ FROM customer WHERE zipcode &gt;“98000”，在执行查询时就会利用索引来查询，显然会大大提高速度。&nbsp;
+    <br> 另外，还要避免非开始的子串。例如语句：SELECT ＊ FROM customer WHERE zipcode[2，3] &gt;“80”，在where子句中采用了非开始子串，因而这个语句也不会使用索引。
+    <br>
+    <br> 6．使用临时表加速查询&nbsp;
+    <br> 把表的一个子集进行排序并创建临时表，有时能加速查询。它有助于避免多重排序操作，而且在其他方面还能简化优化器的工作。例如：&nbsp;
+    <br> SELECT cust.name，rcvbles.balance，……other columns&nbsp;
+    <br> FROM cust，rcvbles&nbsp;
+    <br> WHERE cust.customer_id = rcvlbes.customer_id&nbsp;
+    <br> AND rcvblls.balance&gt;0&nbsp;
+    <br> AND cust.postcode&gt;“98000”&nbsp;
+    <br> ORDER BY cust.name&nbsp;
+    <br> 如果这个查询要被执行多次而不止一次，可以把所有未付款的客户找出来放在一个临时文件中，并按客户的名字进行排序：&nbsp;
+    <br> SELECT cust.name，rcvbles.balance，……other columns&nbsp;
+    <br> FROM cust，rcvbles&nbsp;
+    <br> WHERE cust.customer_id = rcvlbes.customer_id&nbsp;
+    <br> AND rcvblls.balance&gt;0&nbsp;
+    <br> ORDER BY cust.name&nbsp;
+    <br> INTO TEMP cust_with_balance&nbsp;
+    <br> 然后以下面的方式在临时表中查询：&nbsp;
+    <br> SELECT ＊ FROM cust_with_balance&nbsp;
+    <br> WHERE postcode&gt;“98000”&nbsp;
+    <br> 临时表中的行要比主表中的行少，而且物理顺序就是所要求的顺序，减少了磁盘I/O，所以查询工作量可以得到大幅减少。&nbsp;
+    <br> 注意：临时表创建后不会反映主表的修改。在主表中数据频繁修改的情况下，注意不要丢失数据。&nbsp;
+    <br>
+    <br> 7．用排序来取代非顺序存取&nbsp;
+    <br> 非顺序磁盘存取是最慢的操作，表现在磁盘存取臂的来回移动。SQL语句隐藏了这一情况，使得我们在写应用程序时很容易写出要求存取大量非顺序页的查询。&nbsp;
+    <br> 有些时候，用数据库的排序能力来替代非顺序的存取能改进查询。&nbsp;
+    <br>
+    <br> 3.优化 tempdb 性能
+    <br>
+    <br>
+    <br> 对 tempdb 数据库的物理位置和数据库选项设置的一般建议包括：&nbsp;
+    <br> 使 tempdb 数据库得以按需自动扩展。这确保在执行完成前不终止查询，该查询所生成的存储在 tempdb 数据库内的中间结果集比预期大得多。
+    <br>
+    <br> 将 tempdb 数据库文件的初始大小设置为合理的大小，以避免当需要更多空间时文件自动扩展。如果 tempdb 数据库扩展得过于频繁，性能会受不良影响。
+    <br>
+    <br> 将文件增长增量百分比设置为合理的大小，以避免 tempdb 数据库文件按太小的值增长。如果文件增长幅度与写入 tempdb 数据库的数据量相比太小，则 tempdb 数据库可能需要始终扩展，因而将妨害性能。
+    <br>
+    <br> 将 tempdb 数据库放在快速 I/O 子系统上以确保好的性能。在多个磁盘上条带化 tempdb 数据库以获得更好的性能。将 tempdb 数据库放在除用户数据库所使用的磁盘之外的磁盘上。有关更多信息，请参见扩充数据库。
+    <br>
+    <br>
+    <br> 4.优化服务器:
+    <br>
+    <br> 使用内存配置选项优化服务器性能
+    <br> Microsoft&amp;reg; SQL Server™ 2000 的内存管理组件消除了对 SQL Server 可用的内存进行手工管理的需要。SQL Server 在启动时根据操作系统和其它应用程序当前正在使用的内存量，动态确定应分配的内存量。当计算机和SQL Server 上的负荷更改时，分配的内存也随之更改。有关更多信息，请参见内存构架。
+    <br>
+    <br> 下列服务器配置选项可用于配置内存使用并影响服务器性能：&nbsp;
+    <br> min server memory
+    <br> max server memory
+    <br> max worker threads
+    <br> index create memory
+    <br>
+    <br> min memory per query&nbsp;
+    <br> min server memory 服务器配置选项可用于确保 SQL Server 在达到该值后不会释放内存。可以基于 SQL Server 的大小及活动将该配置选项设置为特定的值。如果选择设置此选项，必须为操作系统和其他程序留出足够的内存。如果操作系统没有足够的内存，会向 SQL Server 请求内存，从而导致影响 SQL Server 性能。
+    <br>
+    <br> max server memory 服务器配置选项可用于：在 SQL Server 启动及运行时，指定 SQL Server 可以分配的最大内存量。如果知道有多个应用程序与 SQL Server 同时运行，而且想保障这些应用程序有足够的内存运行，可以将该配置选项设置为特定的值。如果这些其它应用程序（如 Web 服务器或电子邮件服务器）只根据需要请求内存，则 SQL Server 将根据需要给它们释放内存，因此不要设置 max server memory 服务器配置选项。然而，应用程序通常在启动时不假选择地使用可用内存，而如果需要更多内存也不请求。如果有这种行为方式的应用程序与 SQL Server 同时运行在相同的计算机上，则将 max server memory 服务器配置选项设置为特定的值，以保障应用程序所需的内存不由 SQL Server 分配出。
+    <br> 不要将 min server memory 和 max server memory 服务器配置选项设置为相同的值，这样做会使分配给 SQL Server 的内存量固定。动态内存分配可以随时间提供最佳的总体性能。有关更多信息，请参见服务器内存选项。
+    <br>
+    <br> max worker threads 服务器配置选项可用于指定为用户连接到 SQL Server 提供支持的线程数。255 这一默认设置对一些配置可能稍微偏高，这要具体取决于并发用户数。由于每个工作线程都已分配，因此即使线程没有正在使用（因为并发连接比分配的工作线程少），可由其它操作（如高速缓冲存储器）更好地利用的内存资源也可能是未使用的。一般情况下，应将该配置值设置为并发连接数，但不能超过 32727。并发连接与用户登录连接不同。SQL Server 实例的工作线程池只需要足够大，以便为同时正在该实例中执行批处理的用户连接提供服务。如果增加工作线程的数量超过默认值，会降低服务器性能。有关更多信息，请参见max worker threads 选项。
+    <br> 说明 当 SQL Server 运行在 Microsoft Windows&amp;reg; 98 上时，最大工作线程服务器配置选项不起作用。
+    <br>
+    <br> index create memory 服务器配置选项控制创建索引时排序操作所使用的内存量。在生产系统上创建索引通常是不常执行的任务，通常调度为在非峰值时间执行的作业。因此，不常创建索引且在非峰值时间时，增加该值可提高索引创建的性能。不过，最好将 min memory per query 配置选项保持在一个较低的值，这样即使所有请求的内存都不可用，索引创建作业仍能开始。有关更多信息，请参见 index create memory 选项。
+    <br> min memory per query 服务器配置选项可用于指定分配给查询执行的最小内存量。当系统内有许多查询并发执行时，增大 min memory per query 的值有助于提高消耗大量内存的查询（如大型排序和哈希操作）的性能。不过，不要将 min memory per query 服务器配置选项设置得太高，尤其是在很忙的系统上，因为查询将不得不等到能确保占有请求的最小内存、或等到超过 query wait 服务器配置选项内所指定的值。如果可用内存比执行查询所需的指定最小内存多，则只要查询能对多出的内存加以有效的利用，就可以使用多出的内存。有关更多信息，请参见 min memory per query 选项和 query wait 选项。
+    <br>
+    <br> 使用 I/O 配置选项优化服务器性能
+    <br> 下列服务器配置选项可用于配置 I/O 的使用并影响服务器性能：&nbsp;
+    <br>
+    <br> recovery interval&nbsp;
+    <br> recovery interval 服务器配置选项控制 Microsoft&amp;reg; SQL Server™ 2000 在每个数据库内发出检查点的时间。默认情况下，SQL Server 确定执行检查点操作的最佳时间。然而，若要确定这是否为适当的设置，需要使用 Windows NT 性能监视器监视数据库文件上的磁盘写入活动。导致磁盘利用率达到 100% 的活动尖峰值会妨害性能。若更改该参数以使检查点进程较少出现，通常可以提高这种情况下的总体性能。但仍须继续监视性能以确定新值是否已对性能产生正面影响。有关更多信息，请参见recovery interval 选项。
+    <br>
+   </div> 
+   <div class="clear" style="clear:both;font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"></div> 
+   <div> 
+    <div style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">
+     分类:&nbsp;
+     <a href="http://www.cnblogs.com/happyday56/category/111248.html" rel="nofollow" style="color:rgb(7,93,179);">SqlServer</a> 
+    </div> 
+    <div style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">
+     <br>
+    </div> 
+    <div> 
+     <font><span style="font-size:13px;">本文转自快乐就好博客园博客，原文链接：http://www.cnblogs.com/happyday56/archive/2008/01/23/1049934.html，如需转载请自行联系原作者</span></font>
+     <br>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

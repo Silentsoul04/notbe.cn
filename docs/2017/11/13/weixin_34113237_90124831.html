@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>理解 OpenStack + Ceph （4）：Ceph 的基础数据结构 [Pool, Image, Snapshot, Clone] « NotBeCN</title>
+  <meta name="description" content="                  本系列文章会深入研究 Ceph 以及 Ceph 和 OpenStack 的集成：     （1）安装和部署     （2）Ceph RBD 接口和工具     （3）Ceph 物理和逻辑结构     （4）Ceph 的基础数据结构     （5）Ceph 与 OpenStack...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/13/weixin_34113237_90124831.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">理解 OpenStack + Ceph （4）：Ceph 的基础数据结构 [Pool, Image, Snapshot, Clone]</h1>
+    <p class="post-meta">Nov 13, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <p style="line-height:1.5;">本系列文章会深入研究 Ceph 以及 Ceph 和 OpenStack 的集成：</p> 
+    <p style="line-height:1.5;">（1）<a href="http://www.cnblogs.com/sammyliu/p/4804037.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">安装和部署</a></p> 
+    <p style="line-height:1.5;">（2）<a href="http://www.cnblogs.com/sammyliu/p/4838139.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph RBD 接口和工具</a></p> 
+    <p style="line-height:1.5;">（3）<a href="http://www.cnblogs.com/sammyliu/p/4836014.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph 物理和逻辑结构</a></p> 
+    <p style="line-height:1.5;">（4）<a href="http://www.cnblogs.com/sammyliu/p/4843812.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph 的基础数据结构</a></p> 
+    <p style="line-height:1.5;">（5）<a href="http://www.cnblogs.com/sammyliu/p/4838138.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph 与 OpenStack 集成的实现</a></p> 
+    <p style="line-height:1.5;">（6）<a href="http://www.cnblogs.com/sammyliu/p/5066895.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">QEMU-KVM 和 Ceph RBD 的 缓存机制总结</a></p> 
+    <p style="line-height:1.5;">（7）<a href="http://www.cnblogs.com/sammyliu/p/5555218.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph 的基本操作和常见故障排除方法</a></p> 
+    <h2 style="font-size:21px;line-height:1.5;"><span style="line-height:1.5;font-size:1.17em;">1 Pool（池）</span></h2> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Pool 的概念前面讲过了，Ceph 支持丰富的对 Pool 的操作，主要的包括：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">列表、创建和删除 pool
+ceph osd pool create {pool-name} {pg-num} [{pgp-num}] [replicated] [crush-ruleset-name]
+ceph osd pool create {pool-name} {pg-num} {pgp-num} erasure [erasure-code-profile] [crush-ruleset-name]
+ceph osd pool delete {pool-name} [{pool-name} --yes-i-really-really-mean-it]
+QoS 支持：
+ceph osd pool set-quota {pool-name} [max_objects {obj-count}] [max_bytes {bytes}]
+快照创建和删除：
+ceph osd pool mksnap {pool-name} {snap-name}
+ceph osd pool rmsnap {pool-name} {snap-name}
+元数据修改
+ceph osd pool set {pool-name} {key} {value}
+设置对象拷贝份数（注意该份数包括对象自身）
+ceph osd pool set {poolname} size {num-replicas}
+在 degraded 模式下的拷贝份数
+ceph osd pool set data min_size 2</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2 卷（image）</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.1 image 之用户所见</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Image 对应于 LVM 的 Logical Volume，它将被条带化为 N 个子数据块，每个数据块将会被以对象（object）形式保存在 RADOS 对象存储中的简单块设备（simple block devicees）。比如：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>#创建 100 MB 大小的名字为 ‘myimage’ 的 RBD Image，默认情况下，它被条带化为 4MB 大小的 25<span style="line-height:1.5;"> 个对象 （注意 rdb create 命令的 size 参数的单位为 MB）
+rbd create mypool/myimage --size 100<span style="line-height:1.5;"> #同样是 100MB 大小的 RBD Image，但是它被被条带化为 8MB 大小的13 个对象 rbd create mypool/myimage --size 100 --order 23<br><br> #将 image mount 到linux 主机称为一个 deivce /dev/rbd1<br> rbd map mypool/myimage<br><span style="line-height:1.5;"><br> #向 /dev/rbd1 写入数据<br> dd if=/dev/zero of=/dev/rbd1 bs=1047586 count=4 #删除 image rbd rm mypool/myimage</span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.2 image 之 ceph 系统所见</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">接下来我们来看看 image 的一些内部信息。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）创建新的对象</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">首先在一个空的 pool 中创建一个 100 GB 的 image&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@ceph1:~# rbd create -p pool100 image1 --size 102400 --image-format 2<span style="line-height:1.5;">
+root@ceph1:~<span style="line-height:1.5;"># rbd list pool100 image1</span></span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">这时候在 pool 中看到多了一些对象：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@ceph1:~# rados -<span style="line-height:1.5;">p pool100 ls
+rbd_directory
+rbd_id.image1
+rbd_header.a89c2ae8944a</span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">从名字也能看出来，这些 object 存放的不是 image 的数据，而是 ID，header 之类的元数据信息。其中，rbd_directory 中保存了pool内所有image的 ID 和 name 信息：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph1:~# rados -<span style="line-height:1.5;">p pool100 listomapvals rbd_directory
+id_a89c2ae8944a
+value: (10<span style="line-height:1.5;"> bytes) : 0000 : 06 00 00 00 69 6d 61 67 65 31<span style="line-height:1.5;"> : ....image1 name_image1 value: (16<span style="line-height:1.5;"> bytes) : 0000 : 0c 00 00 00 61 38 39 63 32 61 65 38 39 34 34 61 : ....a89c2ae8944a</span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">而 rbd_header 保存的是一个 RBD 镜像的元数据：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph1:~# rados -<span style="line-height:1.5;">p pool100 listomapvals rbd_header.a89c2ae8944a
+features
+value: (8<span style="line-height:1.5;"> bytes) : 0000 : 01 00 00 00 00 00 00 00<span style="line-height:1.5;"> : ........ object_prefix value: (25<span style="line-height:1.5;"> bytes) : 0000 : 15 00 00 00 72 62 64 5f 64 61 74 61 2e 61 38 39<span style="line-height:1.5;"> : ....rbd_data.a89 0010 : 63 32 61 65 38 39 34 34 61<span style="line-height:1.5;"> : c2ae8944a order value: (1<span style="line-height:1.5;"> bytes) : 0000 : 16<span style="line-height:1.5;"> : . size value: (8<span style="line-height:1.5;"> bytes) : 0000 : 00 00 00 00 19 00 00 00<span style="line-height:1.5;"> : ........ snap_seq value: (8<span style="line-height:1.5;"> bytes) : 0000 : 00 00 00 00 00 00 00 00 : ........</span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">这些信息正是下面命令的信息来源：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph1:~# rbd -<span style="line-height:1.5;">p pool100 info image1
+rbd image 'image1'<span style="line-height:1.5;">: size 102400 MB <span style="line-height:1.5;">in 25600<span style="line-height:1.5;"> objects order 22 (4096<span style="line-height:1.5;"> kB objects) block_name_prefix: rbd_data.a89c2ae8944a format: 2<span style="line-height:1.5;"> features: layering</span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">同时还能看出来，该 image 的数据对象的名称前缀是&nbsp;rbd_header.a89c2ae8944a。而对于一个新建的 image，因为没有数据对象，其实际占用的存储空间只是元数据对象所占的非常小的空间。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）向该对象中写入数据 8MB 的数据（该 pool 中一个 object 是 4MB）</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph1:~# rbd map pool100/<span style="line-height:1.5;">image1
+root@ceph1:~<span style="line-height:1.5;"># rbd showmapped id pool image snap device 1 pool100 image1 - /dev/<span style="line-height:1.5;">rbd1 <br><span style="line-height:1.5;">root@ceph1:~# dd if=/dev/zero of=/dev/rbd1 bs=1048576 count=8 8+0 records in 8+0 records out 8388608 bytes (8.4 MB) copied, 0.316369 s, 26.5 MB/s</span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">在来看看 pool 中的对象：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph1:~# rados -<span style="line-height:1.5;">p pool100 ls
+rbd_directory
+rbd_id.image1
+<span style="color:rgb(0,0,255);line-height:1.5;">rbd_data.a89c2ae8944a.0000000000000000 rbd_data.a89c2ae8944a.0000000000000001</span><span style="line-height:1.5;"> rbd_header.a89c2ae8944a</span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">可以看出来多了 2 个 4MB 的 object。继续看第一个对象所在的 OSD：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@ceph1:~# ceph osd map pool100 rbd_data.a89c2ae8944a.0000000000000000<span style="line-height:1.5;">
+osdmap e81 pool 'pool100' (7) <span style="line-height:1.5;">object 'rbd_data.a89c2ae8944a.0000000000000000' -&gt; pg 7.df059252 (7.52) -&gt; up ([8,6,7], p8) acting ([8,6,7], p8)</span></span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">PG 的 ID 是 7.52，主 OSD 是 8，从 OSD 是 6 和 7。从 OSD 树中可以获知 OSD 8 所在的节点为 ceph3：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph3:/data/osd2/current/7<span style="line-height:1.5;">.52_head# ceph osd tree
+# id    weight    type name    up/<span style="line-height:1.5;">down reweight -1 0.1399 root default -4 0.03998<span style="line-height:1.5;"> host ceph3 5 0.01999 osd.5 up 1 8 0.01999 osd.8 up 1</span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">登录 ceph3，查看&nbsp;/var/lib/ceph/osd 目录，能看到 ceph-8 目录：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@ceph3:/var/lib/ceph/osd# ls -<span style="line-height:1.5;">l
+total 0<span style="line-height:1.5;"> lrwxrwxrwx 1 root root 9 Sep 18 02:59 ceph-5 -&gt; /data/<span style="line-height:1.5;">osd lrwxrwxrwx 1 root root 10 Sep 18 08:22 ceph-8 -&gt; /data/osd2</span></span></span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">查看 7.52 开头的目录，可以看到两个数据文件：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@ceph3:/data/osd2/current# find . -name '*a89c2ae8944a*'<span style="line-height:1.5;">
+./7.5c_head/<span style="line-height:1.5;">rbd\uheader.a89c2ae8944a__head_36B2DADC__7 ./7.52_head/<span style="line-height:1.5;">rbd\udata.a89c2ae8944a.0000000000000001__head_9C6139D2__7<span style="line-height:1.5;"> ./7.52_head/rbd\udata.a89c2ae8944a.0000000000000000__head_DF059252__7</span></span></span></span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">可见：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）RBD image 是简单的块设备，可以直接被 mount 到主机，成为一个 device，用户可以直接写入二进制数据。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）image 的数据被保存为若干在 RADOS 对象存储中的对象。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（3）image 的数据空间是 thin provision 的，意味着ceph 不预分配空间，而是等到实际写入数据时按照 object 分配空间。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（4）每个 data object 被保存为多份。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（5）pool 将 RBD 镜像的ID和name等基本信息保存在&nbsp;rbd_directory 中，这样，rbd ls 命令就可以快速返回一个pool中所有的 RBD 镜像了。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（6）每个 RBD 镜像的元数据将保存在一个对象中，命名为&nbsp;rbd_header.&lt;image id&gt;。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（7）RBD 镜像保存在多个对象中，这些对象的命名为&nbsp;rbd_data.&lt;image id&gt;.&lt;顺序编号序列&gt;。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（8）RADOS 对象以 OSD 文件系统上的文件形式被保存，其文件名为&nbsp;udata&lt;image id&gt;.&lt;顺序编号序列&gt;.&lt;其它字符串&gt;。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">3 快照 （snapshot）</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.1 snapshot 之用户所见</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; RBD image 的快照（snapshot）是该 image 在特定时刻的状态的一份只读拷贝 （A snapshot is a read-only copy of the state of an image at a particular point in time.）。需要注意的是，在做 snapshot 之前，需要停止 I/O；如果 image 中包含文件系统，系统确保文件系统是处于连续状态。&nbsp;&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp;用户可以使用 rbd 工具或者其它 API 操作 snapshot：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>rbd create -p pool101 --size 102400 image1 --format 2 #创建 image<br><span style="line-height:1.5;">rbd snap create pool101/image1@snap1 #创建snapshot
+<span style="line-height:1.5;">rbd snap ls pool101/image1 #列表 <span style="line-height:1.5;">rbd snap protect pool101/image1@snap1 #保护 <span style="line-height:1.5;">rbd snap unprotect pool101/image1@snap1 #去保护 <span style="line-height:1.5;">rbd snap rollback pool101/image1@snap1 #回滚snapshot 到 image。注意这是个耗时操作，rbd 会显示进度条 rbd snap rm pool101/image1@snap1 #删除<br> rbd snap purge pool101/image1 #删除 image 的所有snapshot<br> rbd clone pool101/image1@snap1 image1snap1clone1 #创建 clone<br> rbd children pool101/image1@snap1 #列表它的所有 clone</span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.2 snapshot 之 Ceph 系统所见</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">我们也来看看 snapshot 的内部原理。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）创建 image1，写入 4MB 的数据，然后创建一个 snapshot:&nbsp;rbd snap create pool100/image1@snap1</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）Ceph 在该 pool 中没有创建新的的对象，也就是说这时候并没有分配存储空间来给 snap1&nbsp;创建 data objects。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <p style="line-height:1.5;">root@ceph1:~# rbd map pool101/image1<br> root@ceph1:~# rbd showmapped<br> id pool image snap device<br> 1 pool100 image1 - /dev/rbd1<br> 2 pool101 image1 - /dev/rbd2</p> 
+    <p style="line-height:1.5;">root@ceph1:~# dd if=/dev/sda1 of=/dev/rbd2 bs=1048576 count=4<br> 4+0 records in<br> 4+0 records out<br> 4194304 bytes (4.2 MB) copied, 0.123617 s, 33.9 MB/s<br> root@ceph1:~# rados -p pool101 ls<br> rbd_directory<br> rb.0.fc9d.238e1f29.000000000000<br> image1.rbd</p> 
+    <p style="line-height:1.5;">root@ceph1:~# rbd snap create pool101/image1@snap1</p> 
+    <p style="line-height:1.5;">root@ceph1:~# rbd snap ls pool101/image1<br> SNAPID NAME SIZE<br> 10 snap1 102400 MB</p> 
+    <p style="line-height:1.5;">root@ceph1:~# rados -p pool101 ls<br> rbd_directory<br> rb.0.fc9d.238e1f29.000000000000<br> image1.rbd</p> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（3）Ceph 而是将 snapshot 的信息增加到了 rbd_header.{image_id} 对象中</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <p style="line-height:1.5;">root@ceph1:~# rados -p pool101 listomapvals rbd_header.a9262ae8944a<br> snapshot_0000000000000006</p> 
+    <p style="line-height:1.5;">value: (74 bytes) :<br> 0000 : 03 01 44 00 00 00 06 00 00 00 00 00 00 00 05 00 : ..D.............<br> 0010 : 00 00 73 6e 61 70 31 00 00 00 00 19 00 00 00 01 : ..snap1.........<br> 0020 : 00 00 00 00 00 00 00 01 01 1c 00 00 00 ff ff ff : ................<br> 0030 : ff ff ff ff ff 00 00 00 00 fe ff ff ff ff ff ff : ................<br> 0040 : ff 00 00 00 00 00 00 00 00 00 : ..........</p> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（4）再向 image1 中写入 4MB 数据（其实是覆盖第一个 object 中的数据），发现数据目录中多了一个 4MB 的文件：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <p style="line-height:1.5;">root@ceph3:/data/osd2/current/8.2c_head# ls /data/osd/current/8.3e_head/ -l<br> total 8200<br> -rw-r--r-- 1 root root 4194304 Sep 28 03:25 rb.0.fc9d.238e1f29.000000000000__a_AE14D5BE__8<br> -rw-r--r-- 1 root root 4194304 Sep 28 03:25 rb.0.fc9d.238e1f29.000000000000__head_AE14D5BE__8</p> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">可见 Ceph 使用 COW （copy on write）方式实现 snapshot：在写入object 之前，将其拷贝出来，作为 snapshot 的 data object，然后继续修改 object 中的数据。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（5）再执行命令&nbsp;dd if=/dev/sda1 of=/dev/rdb1 bs=1048576 seek=4 count=4&nbsp;向 image 写入 [4MB，8MB）的数据。该操作创建了第二个 data object。因为这是在做 snapshot 之后创建的，所有它和 snapshot 没有关系。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（6）再创建一个snapshot，然后修改第二个 data object，这时候第二个 data object 所在的文件夹中多出了 snapshot 的一个 data object 文件：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph3:/data/osd2/current/8.2c_head# ls /data/osd/current/8.a_head/ -<span style="line-height:1.5;">l
+total 4100
+-rw-r--r-- 1 root root 4194304 Sep 28 03:31 rb.0<span style="line-height:1.5;">.fc9d.238e1f29.000000000001__head_9C84738A__8 root@ceph3:/data/osd2/current/8.2c_head# ls /data/osd/current/8.a_head/ -<span style="line-height:1.5;">l total 8200 -rw-r--r-- 1 root root 4194304 Sep 28 03:35 rb.0.fc9d.238e1f29.000000000001__b_9C84738A__8 -rw-r--r-- 1 root root 4194304 Sep 28 03:35 rb.0.fc9d.238e1f29.000000000001__head_9C84738A__8</span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">因此，</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）snapshot 的 data objects 是和 image 的 data objects 保存在同一个目录中。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）snapshot 的粒度不是整个 image，而是RADOS 中的 data object。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（3）当 snapshot 创建时，只是在 image 的元数据对象中增加少量字节的元数据；当 image 的 data objects 被修改（write）时，变修改的 objects 会被拷贝（copy）出来，作为 snapshot 的 data objects。这就是 COW 的含义。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/697113/201509/697113-20150928105351277-1952697925.jpg" alt="" style="border:0px;"></p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">4 克隆（clone）</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; 创建 Clone 是将 image 的某一个 Snapshot 的状态复制变成一个 image。如 imageA 有一个 Snapshot-1，clone 是根据 ImageA 的 Snapshot-1 克隆得到 imageB。imageB 此时的状态与Snapshot-1完全一致，并且拥有 image 的相应能力，其区别在于 ImageB 此时可写。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">4.1 Clone 之 用户所见</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; 从用户角度来看，一个 clone 和别的 RBD image 完全一样。你可以对它做 snapshot、读/写、改变大小 等等，总之从用户角度来说没什么限制。同时，创建速度很快，这是因为 Ceph 只允许从 snapshot 创建 clone，而 snapshot 一直是只读的。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>rbd clone pool101/<span style="line-height:1.5;">image1@snap1 image1snap1clon3
+root@ceph1:~<span style="line-height:1.5;"># rbd info image1snap1clon3 rbd image 'image1snap1clon3'<span style="line-height:1.5;">: size 102400 MB in 25600<span style="line-height:1.5;"> objects order 22 (4096<span style="line-height:1.5;"> kB objects) block_name_prefix: rbd_data.a8f63d1b58ba format: 2<span style="line-height:1.5;"> features: layering parent: pool101/<span style="line-height:1.5;">image1@snap1 overlap: 102400 MB</span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">4.2 Clone 之 Ceph 系统所见</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp;从系统角度，clone 也是使用 COW 技术，现在来通过下面的步骤具体了解一下：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）创建一个 clone （创建之前，需要 protect snapshot）。你会发现 RADOS 中多了三个object：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <p style="line-height:1.5;">root@ceph1:~# rbd clone pool101/image1@snap1 pool101/image1snap1clone1<br> root@ceph1:~# rbd ls -p pool101<br> image1<br> image1snap1clone1<br> root@ceph1:~# rados -p pool101 ls<br> rbd_header.89903d1b58ba<br> rbd_directory<br> rbd_id.image1snap1clone1<br> rbd_id.image1<br> rbd_children<br> rbd_header.a9532ae8944a<br> rbd_data.a9532ae8944a.0000000000000000</p> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">其中，rbd_children 记录了父子关系：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <p style="line-height:1.5;">root@ceph1:~# rados -p pool101 listomapvals rbd_children<br> key: (32 bytes):<br> 0000 : 08 00 00 00 00 00 00 00 0c 00 00 00 61 39 35 33 : ............a953<br> 0010 : 32 61 65 38 39 34 34 61 0e 00 00 00 00 00 00 00 : 2ae8944a........</p> 
+    <p style="line-height:1.5;">value: (20 bytes) :<br> 0000 : 01 00 00 00 0c 00 00 00 38 39 39 30 33 64 31 62 : ........89903d1b<br> 0010 : 35 38 62 61 : 58ba</p> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">相比 rbd_header.a9532ae8944a，rbd_header.89903d1b58ba 只是多了 partent 信息：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <p style="line-height:1.5;">parent<br> value: (46 bytes) :<br> 0000 : 01 01 28 00 00 00 08 00 00 00 00 00 00 00 0c 00 : ..(.............<br> 0010 : 00 00 61 39 35 33 32 61 65 38 39 34 34 61 0e 00 : ..a9532ae8944a..<br> 0020 : 00 00 00 00 00 00 00 00 00 00 19 00 00 00 : ..............</p> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">这里父子关系和 rbd children 结果的来源：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@ceph1:~# rbd children pool101/<span style="line-height:1.5;">image1@snap1
+pool101/image1snap1clone1</span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">可见，Clone 也是对 snapshot 使用 COW 方式实现的。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/697113/201509/697113-20150927171502850-1037278864.jpg" alt="" style="border:0px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）从 clone 读数据</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; 从本质上是 clone 的 RBD image 中读数据，对于不是它自己的 data objects，ceph 会从它的 parent snapshot 上读，如果它也没有，继续找它的parent image，直到一个 data object 存在。从这个过程也看得出来，该过程是缺乏效率的。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（3）向 clone 中的 object 写数据</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Ceph 会首先检查该 clone image 上的 data object 是否存在。如果不存在，则从 parent snapshot 或者 image 上拷贝该 data object，然后执行数据写入操作。这时候，clone 就有自己的 data object 了。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@ceph2:/data/osd3/current/8.32_head# ls -<span style="line-height:1.5;">l
+total 4100
+-rw-r--r-- 1 root root 4194304 Sep 28 05:14 rbd\udata.89903d1b58ba.0000000000000000__head_CEDDC1B2__8</span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;这是增加了 clone 后的各对象之间的关系：&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/697113/201509/697113-20150928122916371-593512241.jpg" alt="" style="border:0px;"></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">4.3 Flatten clone</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; 从上面的分析我们知道，克隆操作本质上复制了一个 metadata object，而 data objects 是不存在的。因此在每次读操作时会先向本卷可能的 data object 访问。在返回对象不存在错误后会向父卷访问对应的对象最终决定这块数据是否存在。因此当存在多个层级的克隆链后，读操作需要更多的损耗去读上级卷的 data objects。只有当本卷的 data object 存在后(也就是写操作后)，才不需要访问上级卷。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; 为了防止父子层数过多，Ceph 提供了 flattern 函数将 clone 与 parent snapshot 共享的 data objects 复制到 clone，并删除父子关系。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; rbd 工具的 flatten 方法：&nbsp;&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>rbd&nbsp;flatten &lt;image-name&gt;： fill clone （image-name） with data of parent (make it independent)<br><span style="line-height:1.5;">如果一个 image 是个 clone，从它的 parent snapshot 拷贝所有共享的 blocks （data objects），删除与其 parent 的依赖关系。此时，其 parent snapshot 可以被去保护（unprotected），如果没有其它的 clone 的话，它是允许被删除的。 该功能要求 image 为 format 2 格式。</span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">注意这是一个非常耗时的操作。Flatten 之后，clone 与原来的父 snapshot 之间也不再有关系了，真正成为一个独立的 image：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph1:~<span style="line-height:1.5;"># rbd flatten image1snap1clon2
+Image flatten: 100%<span style="line-height:1.5;"> complete...done. root@ceph1:~<span style="line-height:1.5;"># rbd info image1snap1clon2 rbd image 'image1snap1clon2'<span style="line-height:1.5;">: size 102400 MB in 25600<span style="line-height:1.5;"> objects order 22 (4096<span style="line-height:1.5;"> kB objects) block_name_prefix: rbd_data.fb173d1b58ba format: 2<span style="line-height:1.5;"> features: layering</span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">令人奇怪的是，该操作在parent image 和 clone 产生的 image 的目录中产生了大量空的文件：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph1:/data/osd/current# ls /data/osd/current/8.7f_head/ -<span style="line-height:1.5;">l
+total 788
+-rw-r--r-- 1 root root 0 Sep 28 05:33<span style="line-height:1.5;"> rbd\udata.89903d1b58ba.000000000000014f__head_17C7607F__8 -rw-r--r-- 1 root root 0 Sep 28 05:33<span style="line-height:1.5;"> rbd\udata.89903d1b58ba.0000000000000232__head_96D143FF__8 -rw-r--r-- 1 root root 0 Sep 28 05:33<span style="line-height:1.5;"> rbd\udata.89903d1b58ba.0000000000000399__head_4D4E557F__8 -rw-r--r-- 1 root root 0 Sep 28 05:33<span style="line-height:1.5;"> rbd\udata.89903d1b58ba.00000000000003ae__head_CE165DFF__8 -rw-r--r-- 1 root root 0 Sep 28 05:33<span style="line-height:1.5;"> rbd\udata.89903d1b58ba.00000000000003e1__head_42EA8A7F__8 -rw-r--r-- 1 root root 0 Sep 28 05:33 rbd\udata.89903d1b58ba.0000000000000445__head_701607FF__8</span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;判断父子关系层数，达到一定数目后 flatten clone，在删除 snapshot 的伪代码：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>img = self.rbd.Image(client.ioctx, img_name)&nbsp;#根据输入的 img_name 获得其 RBD Image 对象<br>
+_pool, parent, snap =<span style="line-height:1.5;"> self._get_clone_info(img_name) #当 name 为 img_name 的 RBD image 是个 clone 时，通过递归，获取它的 parent image 和 parent snapshot
+img.flatten() # 将 parent snapshot 的 data 拷贝到该 clone 中
+parent_volume =<span style="line-height:1.5;"> self.rbd.Image(client.ioctx, parent) #获取 parent image parent_volume.unprotect_snap(snap) #将 snap 去保护 parent_volume.remove_snap(snap) #如果snapshot 没有其它的 clone，将其删除</span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">5. 小结</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">RBD image 的 head，object，snapshot 以及 与 client 和 parent 之间的关系：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;<img src="https://images2015.cnblogs.com/blog/697113/201601/697113-20160110223629371-2029478815.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">参考链接：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://www.wzxue.com/ceph-librbd-block-library/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.wzxue.com/ceph-librbd-block-library/</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://docs.ceph.com/docs/master/architecture/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://docs.ceph.com/docs/master/architecture/</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="https://www.ustack.com/blog/ceph_infra/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">&nbsp;https://www.ustack.com/blog/ceph_infra/</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="https://hustcat.github.io/rbd-image-internal-in-ceph/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">https://hustcat.github.io/rbd-image-internal-in-ceph/</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://www.wzxue.com/category/ceph-2/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.wzxue.com/category/ceph-2/</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="line-height:1.5;"><font color="#4b4b4b"><span style="font-size:15px;">&nbsp; &nbsp; 本文转自SammyLiu博客园博客，原文链接：http://www.cnblogs.com/sammyliu/p/4843812.html</span></font><span style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

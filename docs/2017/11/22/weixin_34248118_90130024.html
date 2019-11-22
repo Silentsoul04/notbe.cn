@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>在Ceph创建虚拟机的过程改进分析 « NotBeCN</title>
+  <meta name="description" content="             作为个人学习笔记分享。有不论什么问题欢迎交流！             近期在Gerrit中看到一个change：https://review.openstack.org/#/c/94295/&nbsp;，&nbsp;它主要是对当前在Ceph中创建虚拟机的流程的改进。假设glance的b...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/22/weixin_34248118_90130024.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">在Ceph创建虚拟机的过程改进分析</h1>
+    <p class="post-meta">Nov 22, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="line-height:26px;font-size:28px;font-family:Arial;"><span style="line-height:1.8;font-size:12px;"><span style="line-height:17.9875px;color:rgb(255,0,0);font-family:'新宋体';font-size:13.6px;">作为个人学习笔记分享。有不论什么问题欢迎交流！ </span></span></h1> 
+   <p></p> 
+   <p></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">近期在<span style="line-height:1.8;font-family:'Times New Roman';">Gerrit</span><span style="line-height:1.8;font-family:'宋体';">中看到一个</span><span style="line-height:1.8;font-family:'Times New Roman';">change</span>：<a href="https://review.openstack.org/#/c/94295/" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);"><span style="line-height:1.8;color:rgb(0,0,255);">https://review.openstack.org/#/c/94295/</span></a>&nbsp;，&nbsp;它主要是对当前在Ceph中创建虚拟机的流程的改进。假设glance的backend是ceph,&nbsp;则nova创建虚拟机到RBD的流程是这种：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">通过glance从ceph中下载image&nbsp;--&gt;&nbsp;本地&nbsp;--&gt;&nbsp;复制image到rbd</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">这个change的目的就是：不须要下载到本地。直接在rbd中复制image,以提高虚拟机创建的速度。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">曾经仅仅知道nova从glance下载image,作为虚拟机的base,却没有细致的了解过这个过程，正好借这个机会。看一看nova创建虚拟机到rbd过程中关于image的部分。</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">1&nbsp;nova<span style="line-height:1.8;font-family:'黑体';">创建</span><span style="line-height:1.8;font-family:Arial;">VM</span><span style="line-height:1.8;font-family:'黑体';">时</span><span style="line-height:1.8;font-family:Arial;">image</span><span style="line-height:1.8;font-family:'黑体';">的流程</span> </h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;经过<span style="line-height:1.8;font-family:'Times New Roman';">nova-scheduler</span><span style="line-height:1.8;font-family:'宋体';">选择节点后，创建</span><span style="line-height:1.8;font-family:'Times New Roman';">VM</span><span style="line-height:1.8;font-family:'宋体';">的请求到达了</span><span style="line-height:1.8;font-family:'Times New Roman';">nova-compute</span><span style="line-height:1.8;font-family:'宋体';">。即</span><span style="line-height:1.8;font-family:'Times New Roman';">nova/compute/manager.py</span><span style="line-height:1.8;font-family:'宋体';">：</span><span style="line-height:1.8;font-family:'Times New Roman';">ComputeManager._run_instance()</span><span style="line-height:1.8;font-family:'宋体';">：</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python">def _run_instance(self, context, request_spec,
+                      filter_properties, requested_networks, injected_files,
+                      admin_password, is_first_time, node, instance,
+                      legacy_bdm_in_spec):
+ </code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">关于镜像的元数据就保存在request_spec。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python">image_meta = request_spec['image']</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">取得元数据后就開始build_instance()了。可是以下的过程与image没太大关系，所以从简带过。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python">def _build_instance(self, context, request_spec, filter_properties,
+            requested_networks, injected_files, admin_password,   is_first_time,
+node, instance, image_meta, legacy_bdm_in_spec)
+----&gt;
+def _spawn(self, context, instance, image_meta, network_info,
+               block_device_info, injected_files, admin_password,
+               set_access_ip=False)
+----&gt;
+ 
+self.driver.spawn(context, instance, image_meta,
+                              injected_files, admin_password,
+                              network_info,
+                              block_device_info)</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">这里的driver就是你用的Hypervioser,&nbsp;我用的是KVM，所以这个driver.spawn=nova/virt/libvirt/driver.py:LibvirtDriver.spawn()：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python">def spawn(self, context, instance, image_meta, injected_files,
+              admin_password,network_info=None,  block_device_info=None)：
+       disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance,
+                                            block_device_info,
+                                            image_meta)
+        self._create_image(context, instance,
+                           disk_info['mapping'],
+                           network_info=network_info,
+                           block_device_info=block_device_info,
+                           files=injected_files,
+                           admin_pass=admin_password)</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">那么这个disk_info['mapping']是什么呢？这里有一个方法，我们能够从test_libvirt_blockinfo.py里找到答案，所以结合測试用例来看代码真的非常实用。在Nova/tests/virt/libvirt/test_libvirt_blockinfo.py:</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">LibvirtBlockInfoTest.test_get_disk_mapping_simple_swap()里能够看到：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python">      expect = {
+            'disk': {'bus': 'virtio', 'dev': 'vda',
+                     'type': 'disk', 'boot_index': '1'},
+            'disk.local': {'bus': 'virtio', 'dev': 'vdb', 'type': 'disk'},
+            'root': {'bus': 'virtio', 'dev': 'vda',
+                     'type': 'disk', 'boot_index': '1'}
+            }</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">Expect就是期望disk_info['mapping']的样子。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">以下就開始创建VM的image了：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python">    def _create_image(self, context, instance,
+                      disk_mapping, suffix='',
+                      disk_images=None, network_info=None,
+                      block_device_info=None, files=None,
+                      admin_pass=None, inject_files=True):
+#以下这个函数就是返回VM image格式的相关类，位于 #libvirt/imagebackend.py中，这里image是rbd, 返回的就是Rbd    #类。
+</code></pre> 
+   <p></p> 
+   <p> def image(fname, image_type=CONF.libvirt.images_type): return self.image_backend.image(instance, fname + suffix, image_type) ...... if not booted_from_volume: root_fname = imagecache.get_cache_fname(disk_images, 'image_id')#以image id作为文件名称 size = instance['root_gb'] * units.Gi if size == 0 or suffix == '.rescue': size = None #这里有点复杂，用到了回调函数fetch_image，这里的cache是Rbd的父类#Image类的cache（），主要功能是从模板，也就是glance的image。 为VM创建一个image. image('disk').cache(fetch_func=libvirt_utils.fetch_image, context=context, filename=root_fname, size=size, image_id=disk_images['image_id'], user_id=instance['user_id'], project_id=instance['project_id']) #能够在cache()中看到： if not self.check_image_exists() or not os.path.exists(base): self.create_image(fetch_func_sync, base, size, *args, **kwargs)</p> 
+   <br style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">那么如今到class&nbsp;Rbd下能够找到create_image():</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python"> def create_image(self, prepare_template, base, size, *args, **kwargs):
+        if self.rbd is None:
+            raise RuntimeError(_('rbd python libraries not found'))
+ 
+        if not os.path.exists(base):
+            prepare_template(target=base, max_size=size, *args, **kwargs)##这里的prepare_temple()就是 libvirt_utils.fetch_image啦。
+</code></pre> 
+   <p></p> 
+   <p> </p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">libvirt_utils.fetch_image=nova/virt/libvirt/utils.fetch_image()：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python">def fetch_image(context, target, image_id, user_id, project_id, max_size=0):
+    """Grab image."""
+    images.fetch_to_raw(context, image_id, target, user_id, project_id,
+                        max_size=max_size)
+---&gt;
+ 
+def fetch_to_raw(context, image_href, path, user_id, project_id, max_size=0):
+    path_tmp = "%s.part" % path
+    fetch(context, image_href, path_tmp, user_id, project_id,
+          max_size=max_size)
+ 
+----&gt;
+def fetch(context, image_href, path, _user_id, _project_id, max_size=0):
+(image_service, image_id) = glance.get_remote_image_service(
+context, image_href)#从glance获取image
+with fileutils.remove_path_on_error(path):
+        #这里就是把image_id的数据download到path了。
+</code></pre> 
+   <p></p> 
+   <p>Download()位于 #nova/image/glance.py。</p> 
+   <p> image_service.download(context, image_id, dst_path=path)</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">回到class&nbsp;Rbd的create_image()中。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">libvirt_utils.import_rbd_image(*args)把path的image数据写入rbd,至此，整个流程就到这里结束了。</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">2&nbsp;Change<span style="line-height:1.8;font-family:'黑体';">中的改进</span> </h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">如今回到文章開始中提到的那个change,&nbsp;看看它是怎么实现的。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">首先它在fetch_to_raw中增加了一个推断。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-python">def fetch_to_raw(context, image_href, path, user_id, project_id,  max_size=0):
+#推断backend是否具有‘direct_fetch’的属性，假设有，则直接返回#direct_fetch（）
+    if backend and hasattr(backend, 'direct_fetch'):
+        try:
+            return backend.direct_fetch(context, image_href)
+        except exception.ImageUnacceptable:
+            LOG.debug(_('could not fetch directly, falling back to download'))</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">给Rbd类加入了一个属性：<br></p> 
+   <pre><code class="language-python">    def direct_fetch(self, context, image_href):
+#推断driver是否支持layering（分层
+#http://ceph.com/docs/firefly/dev/rbd-layering/ ，指的是块设备
+#的cow克隆。支持高速创建image）
+        if not self.driver.supports_layering():
+            reason = _('installed version of librbd does not support cloning')
+            raise exception.ImageUnacceptable(image_id=image_href,
+                                              reason=reason)
+ 
+        image_meta, locations = images.get_meta(context, image_href)
+        LOG.debug(_('Image locations are: %(locs)s') % {'locs': locations})
+ 
+        if image_meta.get('disk_format') not in ['raw', 'iso']:
+            reason = _('Image is not raw format')
+            raise exception.ImageUnacceptable(image_id=image_href,
+                                              reason=reason)
+#克隆镜像（http://ceph.com/docs/master/rbd/librbdpy/）
+        for location in locations:
+            if self.driver.is_cloneable(location, image_meta):
+                return self.driver.clone(location, self.rbd_name)
+ 
+        reason = _('No image locations are accessible')
+        raise exception.ImageUnacceptable(image_id=image_href, reason=reason)</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">这样就不须要想1中的那样先把image下载到local, 在写到rbd中。直接在rbd中克隆，从而提高了虚拟机的创建速度。</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">3<span style="line-height:1.8;font-family:'黑体';">总结</span> </h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">借这个机会既熟悉了创建VM时的image流程。又熟悉了ceph的使用方法国，同时学习大师们是如何实现的功能，看起来review是啊大大受益。:)</p> 
+   <div> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;">版权声明：本文博客原创文章，博客，未经同意，不得转载。</p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p><font color="#333333"><span style="font-size:12px;">本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/4742554.html，如需转载请自行联系原作者</span></font></p> 
+    <div style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+     <br>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

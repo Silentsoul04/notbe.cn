@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>理解 QEMU/KVM 和 Ceph（3）：存储卷挂接和设备名称 « NotBeCN</title>
+  <meta name="description" content="             本系列文章会总结 QEMU/KVM 和 Ceph 之间的整合：    （1）QEMU-KVM 和 Ceph RBD 的 缓存机制总结    （2）QEMU 的 RBD 块驱动（block driver）    （3）存储卷挂接和设备名称    &nbsp;    这篇文章分析一下一个 C...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/17/weixin_33725515_90126878.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">理解 QEMU/KVM 和 Ceph（3）：存储卷挂接和设备名称</h1>
+    <p class="post-meta">Nov 17, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">本系列文章会总结 QEMU/KVM 和 Ceph 之间的整合：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://www.cnblogs.com/sammyliu/p/5066895.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（1）QEMU-KVM 和 Ceph RBD 的 缓存机制总结</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://www.cnblogs.com/sammyliu/p/5095976.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（2）QEMU 的 RBD 块驱动（block driver）</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><a href="http://www.cnblogs.com/sammyliu/p/5325492.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（3）存储卷挂接和设备名称</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">这篇文章分析一下一个 Ceph RBD 卷是如何被映射到一个 QEMU/KVM 客户机的，以及客户机中设备的命名问题。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">1. 遇到的设备命名问题</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;"><span style="line-height:1.5;">1.1 通过 Nova 和 Cinder 做 Ceph RDB 卷挂接和卸载步骤</span></h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">挂接一个卷：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">#运行nova-attach 命令</span><br>
+nova volume-attach INSTANCE_ID VOLUME_ID auto<br><br><span style="color:rgb(0,0,255);line-height:1.5;">#在虚机中操作</span><br>
+vm$ ls /dev/disk/by-id/<span style="line-height:1.5;">
+virtio</span>-15a9f901-ba9d-45e1-<span style="color:rgb(128,0,128);line-height:1.5;">8</span><span style="line-height:1.5;">
+vm$ mkfs.ext4 </span>/dev/disk/by-id/virtio-15a9f901-ba9d-45e1-<span style="color:rgb(128,0,128);line-height:1.5;">8</span><span style="line-height:1.5;">
+vm$ mkdir </span>-p /mnt/<span style="line-height:1.5;">volume
+vm$ mount </span>/dev/disk/by-id/virtio-15a9f901-ba9d-45e1-<span style="color:rgb(128,0,128);line-height:1.5;">8</span> /mnt/<span style="line-height:1.5;">volume
+vm$ echo </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">Hello OpenStack</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> &gt; /mnt/volume/test.txt</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">卸载一个卷：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">#在虚机中操作</span><br>
+vm$ umount /mnt/<span style="line-height:1.5;">volume<br><br><span style="color:rgb(0,0,255);line-height:1.5;">#运行 Nova 命令</span>
+$ nova volume</span>-detach &lt;instanceid&gt; &lt;volumeid&gt;</pre>
+   </div> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.2 两个问题</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Nova 的 volume-attach 命令为：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@hkg02kvm004ccz023:~# nova help volume-<span style="line-height:1.5;">attach
+usage: nova volume</span>-attach &lt;server&gt; &lt;volume&gt; [&lt;device&gt;<span style="line-height:1.5;">]
+
+Attach a volume to a server.
+Positional arguments:
+  </span>&lt;server&gt;<span style="line-height:1.5;">  Name or ID of server.
+  </span>&lt;volume&gt;<span style="line-height:1.5;">  ID of the volume to attach.
+  </span>&lt;device&gt;  Name of the device e.g. /dev/vdb. Use <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">auto</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> <span style="color:rgb(0,0,255);line-height:1.5;">for</span> autoassign (<span style="color:rgb(0,0,255);line-height:1.5;">if </span><span style="line-height:1.5;">supported). Libvirt driver will use </span><span style="color:rgb(0,0,255);line-height:1.5;">default</span> device name.</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;"><span style="line-height:1.5;">1.2.1 在 KVM 环境中，nova 的 volume-attach 命令中的 device 和 虚机中该设备的 device name 不一致</span></h4> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">命令：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@hkg02kvm004ccz023:~# nova volume-attach ap-uplthyfxulbx 8a309ad1-369c-483b-9a95-e4f330bb104e /dev/<span style="line-height:1.5;">vdh
+</span>+----------+--------------------------------------+
+| Property | Value                                |
++----------+--------------------------------------+
+| device   | <span style="color:rgb(0,0,255);line-height:1.5;">/dev/vdh</span>                             |</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">虚机中：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>[root@ap-4oe4-4rz25pvadal7-cs7nmsu4izfy-server-uplthyfxulbx rules.d]# fdisk -<span style="line-height:1.5;">l
+
+Disk </span>/dev/vda: <span style="color:rgb(128,0,128);line-height:1.5;">42.9</span> GB, <span style="color:rgb(128,0,128);line-height:1.5;">42949672960</span><span style="line-height:1.5;"> bytes
+...</span><span style="line-height:1.5;">
+Disk </span>/dev/vdb: <span style="color:rgb(128,0,128);line-height:1.5;">1073</span> MB, <span style="color:rgb(128,0,128);line-height:1.5;">1073741824</span><span style="line-height:1.5;"> bytes
+...
+Disk </span>/dev/vdc: <span style="color:rgb(128,0,128);line-height:1.5;">2147</span> MB, <span style="color:rgb(128,0,128);line-height:1.5;">2147483648</span><span style="line-height:1.5;"> bytes
+...
+<span style="color:rgb(0,0,255);line-height:1.5;">Disk </span></span><span style="color:rgb(0,0,255);line-height:1.5;">/dev/vdd: 3221 MB, 3221225472 bytes
+</span><span style="color:rgb(128,0,128);line-height:1.5;">...</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;"><span style="line-height:1.5;">1.2.2 虚机中设备的 device name 在虚机重启后发生改变</span></h4> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">比如通过以下步骤来重现：</span></p> 
+   <ol style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <li style="list-style-type:decimal;"><span style="line-height:1.5;">挂接 volume1 到 /dev/vda，挂接 volume2 到 /dev/vdb</span></li> 
+    <li style="list-style-type:decimal;"><span style="line-height:1.5;">将 volume1 下载</span></li> 
+    <li style="list-style-type:decimal;"><span style="line-height:1.5;">重新启动虚机</span></li> 
+    <li style="list-style-type:decimal;"><span style="line-height:1.5;">发现 volume2 的设备名称变为了 /dev/vda&nbsp;</span></li> 
+   </ol>
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2. 原因分析</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.1 QEMU/KVM Linux 客户机中的 virtio-blk 设备</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images2015.cnblogs.com/blog/697113/201603/697113-20160327141443042-893746175.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">整个过程涉及到以下一些模块：</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">QEMU/KVM 的 virtio-blk 的几个模块，这在前两篇文章中都有提到</li> 
+    <li style="list-style-type:disc;">udv 和 udev rules，下面会提到</li> 
+    <li style="list-style-type:disc;">/dev 目录</li> 
+   </ul>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.2 Linux udev 和&nbsp;udev rules</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">udev 是 Linux 内核的设备管理器（device manager），它主要是负责管理 /dev 目录中的设备节点（device nodes）和 /dev/disk 子目录中的与设备 ID 相关的的符号连接文件。当新的硬件设备（hardware devices）加入系统或者从系统删除时，Linux 内核通过 netlink socket 通知 udev，然后 udev 根据存在的 udev rules 来做相应的处理，默认地，它会在 /dev 目录中创建或者删除设备节点。</p> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2.2.1 一个 virtio-blk 设备的示例</h4> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">从下面的输出可以看出，内核分配的 device name 为 vdb，它是一个 block 设备，其父设备为 virtio，驱动为 virtio-blk，它属于 pci 设备类别。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>[root@ap-4oe4-4rz25pvadal7-cs7nmsu4izfy-server-uplthyfxulbx ibmcloud]# udevadm info -a -n /dev/<span style="line-height:1.5;">vdb</span><span style="line-height:1.5;">
+
+  looking at device </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">/devices/pci0000:00/0000:00:07.0/virtio3/block/vdb</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">:
+    KERNEL</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">vdb</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    SUBSYSTEM</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">block</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    DRIVER</span>==<span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">
+    ...</span><span style="line-height:1.5;">
+  looking at parent device </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">/devices/pci0000:00/0000:00:07.0/virtio3</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">:
+    KERNELS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">virtio3</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    SUBSYSTEMS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">virtio</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    DRIVERS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">virtio_blk</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    ...</span><span style="line-height:1.5;">
+  looking at parent device </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">/devices/pci0000:00/0000:00:07.0</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">:
+    KERNELS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0000:00:07.0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    SUBSYSTEMS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">pci</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    DRIVERS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">virtio-pci</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    ...</span><span style="line-height:1.5;">
+  looking at parent device </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">/devices/pci0000:00</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">:
+    KERNELS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">pci0000:00</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    SUBSYSTEMS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">
+    DRIVERS</span>==<span style="color:rgb(128,0,0);line-height:1.5;">""</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2.2.2 udev rules</h4> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">udev rules 由在&nbsp;/lib/udev/rules.d 目录中的文件来定义。通过这些文件，你可以做到：</p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">修改一个 devide node 的名称 （Rename a device node from the default name to something else）</li> 
+     <li style="list-style-type:disc;">Provide an alternative/persistent name for a device node by creating a symbolic link to the default device node</li> 
+     <li style="list-style-type:disc;">Name a device node based on the output of a program</li> 
+     <li style="list-style-type:disc;">修改权限和所有权（Change permissions and ownership of a device node）</li> 
+     <li style="list-style-type:disc;">启动一个脚本（Launch a script when a device node is created or deleted (typically when a device is attached or unplugged)）</li> 
+     <li style="list-style-type:disc;">修改网卡名称（Rename network interfaces）</li> 
+    </ul>
+    <p style="line-height:1.5;">可见，udev 在收到 linux 内核发来的消息后，首先会查找 udev rules：如果存在，则执行其中定义的操作；如果不存在，则执行默认的操作，即使用 linux kernel 分配的默认名称来创建一个 device node。</p> 
+    <p style="line-height:1.5;">关于 udev rules 的详细信息，以及如何创建新的 rules，可以参考&nbsp;<a href="http://www.reactivated.net/writing_udev_rules.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.reactivated.net/writing_udev_rules.html</a>。</p> 
+    <h4 style="font-size:14px;">2.2.3 udev 从 linux 内核收到的消息</h4> 
+    <p style="line-height:1.5;">步骤：</p> 
+    <ol>
+     <li style="list-style-type:decimal;">在虚机中运行&nbsp;udevadm monitor 命令</li> 
+     <li style="list-style-type:decimal;">在 OpenStack 中运行 nova attach-volume 和 detach-volume 命令</li> 
+     <li style="list-style-type:decimal;">在虚机的console 中就可以看到下面的输出</li> 
+    </ol>
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre><span style="color:rgb(0,0,255);line-height:1.5;">#删除设备时</span><br>
+KERNEL[<span style="color:rgb(128,0,128);line-height:1.5;">1458809817.791365</span>] remove   /devices/<span style="color:rgb(136,136,136);line-height:1.5;">virtual</span>/bdi/<span style="color:rgb(128,0,128);line-height:1.5;">252</span>:<span style="color:rgb(128,0,128);line-height:1.5;">48</span><span style="line-height:1.5;"> (bdi)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.791426</span>] remove   /devices/<span style="color:rgb(136,136,136);line-height:1.5;">virtual</span>/bdi/<span style="color:rgb(128,0,128);line-height:1.5;">252</span>:<span style="color:rgb(128,0,128);line-height:1.5;">48</span><span style="line-height:1.5;"> (bdi)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.791447</span>] remove   /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0a.<span style="color:rgb(128,0,128);line-height:1.5;">0</span>/virtio5/block/<span style="line-height:1.5;">vdd (block)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.791485</span>] remove   /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0a.<span style="color:rgb(128,0,128);line-height:1.5;">0</span>/virtio5/block/<span style="line-height:1.5;">vdd (block)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.795016</span>] remove   /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0a.<span style="color:rgb(128,0,128);line-height:1.5;">0</span>/<span style="line-height:1.5;">virtio5 (virtio)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.796617</span>] remove   /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0a.<span style="color:rgb(128,0,128);line-height:1.5;">0</span>/<span style="line-height:1.5;">virtio5 (virtio)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.796695</span>] remove   /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0a.<span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> (pci)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.796871</span>] remove   /devices/LNXSYSTM:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/LNXSYBUS:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/PNP0A03:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/device:<span style="color:rgb(128,0,128);line-height:1.5;">24</span><span style="line-height:1.5;"> (acpi)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.797283</span>] remove   /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0a.<span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> (pci)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809817.797301</span>] remove   /devices/LNXSYSTM:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/LNXSYBUS:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/PNP0A03:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/device:<span style="color:rgb(128,0,128);line-height:1.5;">24</span><span style="line-height:1.5;"> (acpi)
+
+<span style="color:rgb(0,0,255);line-height:1.5;">#添加设备时</span>
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.181538</span>] remove   /devices/LNXSYSTM:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/LNXSYBUS:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/PNP0A03:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="line-height:1.5;">device:0c (acpi)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.182088</span>] add      /devices/LNXSYSTM:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/LNXSYBUS:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/PNP0A03:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/device:<span style="color:rgb(128,0,128);line-height:1.5;">25</span><span style="line-height:1.5;"> (acpi)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.182104</span>] remove   /devices/LNXSYSTM:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/LNXSYBUS:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/PNP0A03:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="line-height:1.5;">device:0c (acpi)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.186103</span>] add      /devices/LNXSYSTM:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/LNXSYBUS:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/PNP0A03:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/device:<span style="color:rgb(128,0,128);line-height:1.5;">25</span><span style="line-height:1.5;"> (acpi)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.234695</span>] add      /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0b.<span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> (pci)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.238377</span>] add      /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0b.<span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> (pci)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.241057</span>] add      /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0b.<span style="color:rgb(128,0,128);line-height:1.5;">0</span>/<span style="line-height:1.5;">virtio5 (virtio)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.241358</span>] add      /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0b.<span style="color:rgb(128,0,128);line-height:1.5;">0</span>/<span style="line-height:1.5;">virtio5 (virtio)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.242006</span>] add      /devices/<span style="color:rgb(128,0,0);line-height:1.5;">virtual</span>/bdi/<span style="color:rgb(128,0,128);line-height:1.5;">252</span>:<span style="color:rgb(128,0,128);line-height:1.5;">48</span><span style="line-height:1.5;"> (bdi)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.242370</span>] add      /devices/<span style="line-height:1.5;">virtual</span>/bdi/<span style="color:rgb(128,0,128);line-height:1.5;">252</span>:<span style="color:rgb(128,0,128);line-height:1.5;">48</span><span style="line-height:1.5;"> (bdi)
+KERNEL[</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.243944</span>] add      /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0b.<span style="color:rgb(128,0,128);line-height:1.5;">0</span>/virtio5/block/<span style="line-height:1.5;"><span style="color:rgb(255,0,0);line-height:1.5;">vdd</span> (block)
+UDEV  [</span><span style="color:rgb(128,0,128);line-height:1.5;">1458809874.258996</span>] add      /devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:0b.<span style="color:rgb(128,0,128);line-height:1.5;">0</span>/virtio5/block/<span style="color:rgb(0,0,255);line-height:1.5;">vdd</span> (block)</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <p style="line-height:1.5;">也可以看出，Linux 内核向 udev 传入了该 device 所使用的 device name。</p> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.3 virtio-blk 驱动模块</h3> 
+    <p style="line-height:1.5;">那现在要看的是，客户机的 linux 内核传给 udev 的device name 是它自己产生的，还是由 QEMU/KVM 传入的。</p> 
+    <h4 style="font-size:14px;">2.3.1 虚机的 libvirt xml 文件中确实指定了 taget device name</h4> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre>   &lt;disk type=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">network</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> device=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">disk</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>&gt;
+      &lt;driver name=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">qemu</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> type=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">raw</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> cache=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">writeback</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;<span style="line-height:1.5;">
+      ...
+      </span><span style="color:rgb(0,0,255);line-height:1.5;">&lt;target dev='vdb' bus='virtio'/&gt;</span>
+      &lt;serial&gt;6e5424e4-4e4c-<span style="color:rgb(128,0,128);line-height:1.5;">4178</span>-a4cc-e63698716e9b&lt;/serial&gt;
+      &lt;alias name=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">virtio-disk1</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;
+      &lt;address type=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">pci</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> domain=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">0x0000</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> bus=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">0x00</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> slot=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">0x06</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> function=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">0x0</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;
+    &lt;/disk&gt;</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <h4 style="font-size:14px;">2.3.2 虚机的 qemu 进程中没有该 dev 参数</h4> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">
+     <pre><span style="color:rgb(0,0,255);line-height:1.5;">-drive</span> file=rbd:<span style="color:rgb(0,0,255);line-height:1.5;">default</span>/volume-6e5424e4-4e4c-<span style="color:rgb(128,0,128);line-height:1.5;">4178</span>-a4cc-e63698716e9b:id=cinder:key=AQBM+qVWdTNYKhAAMwULMEcH7TOIcVNyKjIaIg==:<br>
+auth_supported=cephx\;none:mon_host=<span style="color:rgb(128,0,128);line-height:1.5;">10.110</span>.<span style="color:rgb(128,0,128);line-height:1.5;">156.54</span>\:<span style="color:rgb(128,0,128);line-height:1.5;">6789</span>\;<span style="color:rgb(128,0,128);line-height:1.5;">10.110</span>.<span style="color:rgb(128,0,128);line-height:1.5;">156.55</span>\:<span style="color:rgb(128,0,128);line-height:1.5;">6789</span>\;<span style="color:rgb(128,0,128);line-height:1.5;">10.110</span>.<span style="color:rgb(128,0,128);line-height:1.5;">156.56</span>\:<span style="color:rgb(128,0,128);line-height:1.5;">6789</span>,<span style="color:rgb(0,0,255);line-height:1.5;">if</span>=none,id=drive-virtio-disk1,<br>
+format=raw,serial=6e5424e4-4e4c-<span style="color:rgb(128,0,128);line-height:1.5;">4178</span>-a4cc-e63698716e9b,cache=writeback <span style="color:rgb(0,0,255);line-height:1.5;">-device virtio-blk-pci,scsi=off,bus=pci.0,addr=0x6,</span><br><span style="color:rgb(0,0,255);line-height:1.5;">drive=drive-virtio-disk1,id=virtio-disk1</span> </pre>
+    </div> 
+    <p style="line-height:1.5;">其中，选项 '-device' 指定了前端的设备类型，而 '-drive' 选项定义了后端存储，并且通过设备的'drive'属性把设备和存储关联起来。</p> 
+    <p style="line-height:1.5;">这里没有看到 dev ='vdb' 相关的设置，初步推断，KVM 目前不支持执行虚机中的 device name（是不是结论，还需要进一步研究）。</p> 
+    <h4 style="font-size:14px;">2.4 客户机linux 内核分配 device name 的方法</h4> 
+    <h4 style="font-size:14px;">2.4.1 major number 和 minor number</h4> 
+    <p style="line-height:1.5;">Linux 中，每个磁盘由一个 major number 和 一个 minor number 共同组成其 device name 来唯一标识它。以下图为例，/dev/vd{a,b,c,d}表示四个磁盘，/dev/vda1 表示磁盘 /dev/vda 的第一个分区。</p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre>[root@ap-4oe4-4rz25pvadal7-cs7nmsu4izfy-server-uplthyfxulbx rules.d]# fdisk -<span style="line-height:1.5;">l
+
+Disk </span>/dev/vda: <span style="color:rgb(128,0,128);line-height:1.5;">42.9</span> GB, <span style="color:rgb(128,0,128);line-height:1.5;">42949672960</span><span style="line-height:1.5;"> bytes
+</span><span style="line-height:1.5;">...
+   Device Boot      Start         End      Blocks   Id  System
+</span>/dev/vda1   *           <span style="color:rgb(128,0,128);line-height:1.5;">6</span>      <span style="color:rgb(128,0,128);line-height:1.5;">238312</span>    <span style="color:rgb(128,0,128);line-height:1.5;">41941888</span>   <span style="color:rgb(128,0,128);line-height:1.5;">83</span><span style="line-height:1.5;">  Linux
+
+Disk </span>/dev/vdb: <span style="color:rgb(128,0,128);line-height:1.5;">1073</span> MB, <span style="color:rgb(128,0,128);line-height:1.5;">1073741824</span><span style="line-height:1.5;"> bytes
+</span><span style="line-height:1.5;"><span style="color:rgb(128,0,128);line-height:1.5;">...</span></span><span style="line-height:1.5;">
+
+Disk </span>/dev/vdc: <span style="color:rgb(128,0,128);line-height:1.5;">2147</span> MB, <span style="color:rgb(128,0,128);line-height:1.5;">2147483648</span><span style="line-height:1.5;"> bytes
+</span><span style="line-height:1.5;"><span style="color:rgb(128,0,128);line-height:1.5;">...</span></span><span style="line-height:1.5;">
+
+Disk </span>/dev/vdd: <span style="color:rgb(128,0,128);line-height:1.5;">3221</span> MB, <span style="color:rgb(128,0,128);line-height:1.5;">3221225472</span><span style="line-height:1.5;"> bytes
+</span><span style="color:rgb(128,0,128);line-height:1.5;">...</span></pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <p style="line-height:1.5;">vda 设备的属性如下，其中可以看到 major number 和 minor number，以及 device name：</p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre>[ibmcloud@ap-4oe4-4rz25pvadal7-cs7nmsu4izfy-server-uplthyfxulbx rules.d]$ sudo udevadm info --query=all --name=/dev/<span style="line-height:1.5;">vda
+P: </span>/devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">04.0</span>/virtio1/block/<span style="line-height:1.5;">vda
+N: vda
+W: </span><span style="color:rgb(128,0,128);line-height:1.5;">4</span><span style="color:rgb(255,0,0);line-height:1.5;">
+S: block/252:0</span><span style="line-height:1.5;">
+S: disk</span>/by-path/pci-<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">04.0</span>-virtio-pci-<span style="line-height:1.5;">virtio1
+E: UDEV_LOG</span>=<span style="color:rgb(128,0,128);line-height:1.5;">3</span><span style="line-height:1.5;">
+E: DEVPATH</span>=/devices/pci0000:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>/<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">04.0</span>/virtio1/block/<span style="line-height:1.5;"><span style="color:rgb(255,0,0);line-height:1.5;">vda</span>
+<span style="color:rgb(255,0,0);line-height:1.5;">E: MAJOR</span></span><span style="color:rgb(255,0,0);line-height:1.5;">=252
+E: MINOR=0
+E: DEVNAME=/dev/</span><span style="line-height:1.5;"><span style="color:rgb(255,0,0);line-height:1.5;">vda</span>
+E: DEVTYPE</span>=<span style="line-height:1.5;">disk
+E: SUBSYSTEM</span>=<span style="line-height:1.5;">block
+E: ID_PATH</span>=pci-<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">04.0</span>-virtio-pci-<span style="line-height:1.5;">virtio1
+E: ID_PART_TABLE_TYPE</span>=<span style="line-height:1.5;">dos
+E: LVM_SBIN_PATH</span>=/<span style="line-height:1.5;">sbin
+E: DEVLINKS</span>=/dev/block/<span style="color:rgb(128,0,128);line-height:1.5;">252</span>:<span style="color:rgb(128,0,128);line-height:1.5;">0</span> /dev/disk/by-path/pci-<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">04.0</span>-virtio-pci-virtio1</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <p style="line-height:1.5;"><span style="line-height:1.5;">而 Linux 内核是在检测到每一个磁盘的时候来分配这两个数字的，包括系统启动和新设备加入以后，DEVNAME 和这两个数字是直接相关的。因此，每个disk 的 device name 不是持久的 （persistent），而是可变的。</span></p> 
+   </div> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">3. 解决办法</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.1 在 KVM 环境中，在 nova attach-volume 命令中使用 ‘auto’，在一般情况下，会解决device name 不一致的问题</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">比如&nbsp;nova volume-attach 9ca18b9e-aeef-44ff-81ba-87a59a0c8eec 8a309ad1-369c-483b-9a95-e4f330bb104e&nbsp;<span style="line-height:1.5;color:rgb(255,0,0);">auto</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,0);">当使用 ‘auto’时，nova 会调用下面的方法来分配一个最小的可用 device name。因为它的分配方法和 linux 内核的分配方式一致，因此，当一个虚机的所有 device 都由 nova 来管理时，cinder 看到的 device name 和 虚机中的 device name 将是一致的。当然了，如果通过别的方法给虚机在挂接volume，两者又会出现不一致。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);"><img src="https://images2015.cnblogs.com/blog/697113/201603/697113-20160328125114535-2112668585.jpg" alt="" style="border:0px;"></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">最后的函数，会从 nova 自己维护的 device mapping list 中通过从头开始遍历来分配一个未使用的 device name：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">def find_disk_dev_for_disk_bus(mapping, bus,
+                               last_device</span>=<span style="line-height:1.5;">False,
+                               assigned_devices</span>=<span style="line-height:1.5;">None):
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"""</span><span style="color:rgb(128,0,0);line-height:1.5;">Identify a free disk dev name for a bus.</span>
+       Determines the possible disk dev names <span style="color:rgb(0,0,255);line-height:1.5;">for</span><span style="line-height:1.5;">
+       the bus, and then checks them </span><span style="color:rgb(0,0,255);line-height:1.5;">in</span><span style="line-height:1.5;"> order until
+       it identifies one that </span><span style="color:rgb(0,0,255);line-height:1.5;">is</span> not yet used <span style="color:rgb(0,0,255);line-height:1.5;">in</span><span style="line-height:1.5;"> the
+       disk mapping. If </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">last_device</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> <span style="color:rgb(0,0,255);line-height:1.5;">is</span> <span style="color:rgb(0,0,255);line-height:1.5;">set</span><span style="line-height:1.5;">, it will
+       only consider the last available disk dev name.
+       Returns the chosen disk_dev name, or raises an
+       exception </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> none <span style="color:rgb(0,0,255);line-height:1.5;">is</span><span style="line-height:1.5;"> available.
+    </span><span style="color:rgb(128,0,0);line-height:1.5;">"""
+</span><span style="line-height:1.5;">
+    dev_prefix </span>=<span style="line-height:1.5;"> get_dev_prefix_for_disk_bus(bus)
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> dev_prefix <span style="color:rgb(0,0,255);line-height:1.5;">is</span><span style="line-height:1.5;"> None:
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> None
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> assigned_devices <span style="color:rgb(0,0,255);line-height:1.5;">is</span><span style="line-height:1.5;"> None:
+        assigned_devices </span>=<span style="line-height:1.5;"> []
+
+    max_dev </span>=<span style="line-height:1.5;"> get_dev_count_for_disk_bus(bus)
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span><span style="line-height:1.5;"> last_device:
+        devs </span>= [max_dev - <span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">]
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">:
+        devs </span>=<span style="line-height:1.5;"> range(max_dev)
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">for</span> idx <span style="color:rgb(0,0,255);line-height:1.5;">in</span><span style="line-height:1.5;"> devs:
+        disk_dev </span>= dev_prefix + chr(ord(<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">a</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>) +<span style="line-height:1.5;"> idx)
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span><span style="line-height:1.5;"> not has_disk_dev(mapping, disk_dev):
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> disk_dev not <span style="color:rgb(0,0,255);line-height:1.5;">in</span><span style="line-height:1.5;"> assigned_devices:
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> disk_dev</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">可以看出，nova 还是做了不少事情来尽量保证 device name 的一致性，它已经做了它该做的了，只是由于 KVM 不支持，它无法做到完美。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.2 自定义 udev rules，来根据 device 的属性来命名一个 device</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">udevadm info 命令输出的各个参数，都可以作为 udev rules 的过滤条件来定位到某一个 device，并给它命名为一个非默认名字。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.3 不使用 device name，而使用 device ID</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Linux 系统中，udev 负责根据 udev rules 维护如下几个目录中的系统连接符：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>[ibmcloud@ap-4oe4-4rz25pvadal7-cs7nmsu4izfy-server-uplthyfxulbx ~]$ ls -l /dev/<span style="line-height:1.5;">disk
+total </span><span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">
+drwxr</span>-xr-x <span style="color:rgb(128,0,128);line-height:1.5;">2</span> root root <span style="color:rgb(128,0,128);line-height:1.5;">100</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> by-<span style="line-height:1.5;">id
+drwxr</span>-xr-x <span style="color:rgb(128,0,128);line-height:1.5;">2</span> root root <span style="color:rgb(128,0,128);line-height:1.5;">140</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> by-<span style="line-height:1.5;">path
+drwxr</span>-xr-x <span style="color:rgb(128,0,128);line-height:1.5;">2</span> root root  <span style="color:rgb(128,0,128);line-height:1.5;">80</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> by-uuid</pre>
+   </div> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">3.3.1 UUID</h4> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>[ibmcloud@ap-4oe4-4rz25pvadal7-cs7nmsu4izfy-server-uplthyfxulbx ~]$ ls -l /dev/disk/by-uuid/<span style="line-height:1.5;">
+total </span><span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">
+lrwxrwxrwx </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span> root root <span style="color:rgb(128,0,128);line-height:1.5;">10</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> 002f642d-f277-49fd-b5ff-47a652b63fe3 -&gt; ../../<span style="line-height:1.5;">vda1
+lrwxrwxrwx </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span> root root  <span style="color:rgb(128,0,128);line-height:1.5;">9</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> 1655a8ca-<span style="color:rgb(128,0,128);line-height:1.5;">9627</span>-4a81-acca-79fec66e1131 -&gt; ../../vdb</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">UUID 是给每一个文件系统分配一个唯一标识符的机制。这些标识符是被文件系统工具在分区被格式化的时候产生的，比如 mkfs.*。</span></p> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;"><span style="line-height:1.5;">3.3.2 ID</span></h4> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <p style="line-height:1.5;">[ibmcloud@ap-4oe4-4rz25pvadal7-cs7nmsu4izfy-server-uplthyfxulbx ~]$ ls -l /dev/disk/by-id/<br> total 0<br> lrwxrwxrwx 1 root root 9 Mar 27 07:16 virtio-<span style="color:rgb(255,0,0);line-height:1.5;font-size:12px;">6e5424e4-4e4c-4178-a</span>&nbsp;-&gt; ../../vdb<br> lrwxrwxrwx 1 root root 9 Mar 27 07:16 virtio-8a309ad1-369c-483b-9 -&gt; ../../vdd<br> lrwxrwxrwx 1 root root 9 Mar 27 07:16 virtio-e4585a93-9a90-4967-8 -&gt; ../../vdc</p> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">ID 是依赖于硬件的序列号（hardware serial number）产生的。该 ID 是持久的、与系统无关的、SCSI 标准强制要求的、与设备而不是其中保存的数据比如文件系统相关的 ID。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">当该设备是由 cinder volume 挂接而来时，可以看出 device id 和 volume id 的映射关系：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@hkg02kvm004ccz023:~#  cinder list | grep <span style="color:rgb(255,0,0);line-height:1.5;">6e5424e4-4e4c-4178-a
+</span>| <span style="color:rgb(255,0,0);line-height:1.5;">6e5424e4-4e4c-4178-a</span>4cc-e63698716e9b |      <span style="color:rgb(0,0,255);line-height:1.5;">in</span>-use     |                      sammyvol3                      |  <span style="color:rgb(128,0,128);line-height:1.5;">2</span>   |      None     |  <span style="color:rgb(0,0,255);line-height:1.5;">false</span>   | 9ca18b9e-aeef-44ff-81ba-87a59a0c8eec |</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">这也证明了 ID 只和 device （volume）相关。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">查看&nbsp;/lib/udev/rules.d/60-persistent-storage.rules 文件中的 virtio-blk 部分：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre># virtio-<span style="line-height:1.5;">blk
+KERNEL</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">vd*[!0-9]</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, ATTRS{serial}==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">?*</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, ENV{ID_SERIAL}=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$attr{serial}</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, SYMLINK+=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">disk/by-id/virtio-$env{ID_SERIAL}</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+KERNEL</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">vd*[0-9]</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, ATTRS{serial}==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">?*</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, ENV{ID_SERIAL}=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$attr{serial}</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, SYMLINK+=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">disk/by-id/virtio-$env{ID_SERIAL}-part%n</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">比较奇怪的是，vda 怎么没出现在列表中。vda 是宿主机上一个镜像文件挂接而来的：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>&lt;disk type=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">file</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> device=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">disk</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>&gt;
+      &lt;driver name=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">qemu</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> type=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">qcow2</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> cache=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">none</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;
+      &lt;source file=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">/opt/stack/data/nova/instances/9ca18b9e-aeef-44ff-81ba-87a59a0c8eec/disk</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;
+      &lt;target dev=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">vda</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> bus=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">virtio</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;
+      &lt;alias name=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">virtio-disk0</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;
+      &lt;address type=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">pci</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> domain=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">0x0000</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> bus=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">0x00</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> slot=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">0x04</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> function=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">0x0</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>/&gt;
+    &lt;/disk&gt;</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">它的 udev 属性中 ID_SERIAL 的值为空 （ATTR{serial}==""） （sudo udevadm info --query=all --name=/dev/vda）。这是为什么呢？需要进一步研究。</p> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">3.3.3 path</h4> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>[ibmcloud@ap-4oe4-4rz25pvadal7-cs7nmsu4izfy-server-uplthyfxulbx ~]$ ls -l /dev/disk/by-path/<span style="line-height:1.5;">
+total </span><span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">
+lrwxrwxrwx </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span> root root  <span style="color:rgb(128,0,128);line-height:1.5;">9</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> pci-<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">04.0</span>-virtio-pci-virtio1 -&gt; ../../<span style="line-height:1.5;">vda
+lrwxrwxrwx </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span> root root <span style="color:rgb(128,0,128);line-height:1.5;">10</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> pci-<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">04.0</span>-virtio-pci-virtio1-part1 -&gt; ../../<span style="line-height:1.5;">vda1
+lrwxrwxrwx </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span> root root  <span style="color:rgb(128,0,128);line-height:1.5;">9</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> pci-<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">06.0</span>-virtio-pci-virtio3 -&gt; ../../<span style="line-height:1.5;">vdb
+lrwxrwxrwx </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span> root root  <span style="color:rgb(128,0,128);line-height:1.5;">9</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> pci-<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">07.0</span>-virtio-pci-virtio4 -&gt; ../../<span style="line-height:1.5;">vdc
+lrwxrwxrwx </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span> root root  <span style="color:rgb(128,0,128);line-height:1.5;">9</span> Mar <span style="color:rgb(128,0,128);line-height:1.5;">27</span> <span style="color:rgb(128,0,128);line-height:1.5;">07</span>:<span style="color:rgb(128,0,128);line-height:1.5;">16</span> pci-<span style="color:rgb(128,0,128);line-height:1.5;">0000</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00</span>:<span style="color:rgb(128,0,128);line-height:1.5;">08.0</span>-virtio-pci-virtio5 -&gt; ../../vdd</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">该 path 和设备的最短物理访问路径（shortest physical path）有关，包括 SCSI host, channel, target, LUN numbers 以及可能得 partition number.等。需要注意的是，这里的硬件访问路径有可能变化，比如 pci slot 改变后。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">看看 path 相关的 udev rules：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);"> 
+    <pre># by-<span style="line-height:1.5;">path (parent device path)
+ENV{DEVTYPE}</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">disk</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, ENV{ID_PATH}==<span style="color:rgb(128,0,0);line-height:1.5;">""</span>, IMPORT{program}=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">path_id %p</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+ENV{DEVTYPE}</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">disk</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, ENV{ID_PATH}==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">?*</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, SYMLINK+=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">disk/by-path/$env{ID_PATH}</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+ENV{DEVTYPE}</span>==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">partition</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, ENV{ID_PATH}==<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">?*</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, SYMLINK+=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">disk/by-path/$env{ID_PATH}-part%n</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span></pre> 
+    <pre><span style="color:rgb(128,0,0);line-height:1.5;"><br></span></pre> 
+    <pre><span style="color:rgb(128,0,0);line-height:1.5;"><br></span></pre> 
+    <pre><span style="line-height:1.5;"></span>，如需转载请自行联系原作者</pre> 
+    <pre><span style="color:rgb(128,0,0);line-height:1.5;"><br></span></pre> 
+    <pre><span style="color:rgb(128,0,0);line-height:1.5;"><br></span></pre> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

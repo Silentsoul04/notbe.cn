@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>正确openvSwitch不同种类port认识 « NotBeCN</title>
+  <meta name="description" content="                                                    同一主机上的OVS中能够创建多个网桥（即多个datapath实例），每一个bridge能够通过patch ports互联，而netdev ports是OVS对底层物理port的抽象封装。internal 类型的...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_34380781_90124477.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">正确openvSwitch不同种类port认识</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div>
+    <br>
+   </div> 
+   <div> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;"><img src="https://uzshare.com/_p?https://img-blog.csdn.net/20141010184458931?%3C/p%3E%3Cp%3Ewatermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdm9uemhvdWZ6/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+    <div style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"> 
+     <div style="font-family:'微软雅黑';"> 
+      <span style="line-height:1.8;"></span>同一主机上的OVS中能够创建多个网桥（即多个datapath实例），每一个bridge能够通过patch ports互联，而netdev ports是OVS对底层物理port的抽象封装。internal 类型的port比較不好理解，能够看做每一个OVS交换机有个能够用来处理数据报的本地port。能够
+      <span style="line-height:24px;">为这个网络设备配置 IP 地址(比方在把eth0增加某个bridge的时候，它的IP地址就失效了。能够把IP地址赋给br，这就是internal port的地址)等等。 </span>
+      <p></p> 
+      <p></p> 
+     </div> 
+     <div style="font-family:'微软雅黑';">
+      <span style="line-height:24px;">&nbsp; &nbsp; &nbsp;以下列出vport相关的数据结构，尽管前面的文章有涉及。可是不够集中全面。</span>
+     </div> 
+    </div> 
+    <pre><code class="language-cpp">/**
+ * struct vport抽象的是datapath中的每一个端口，
+ */
+struct vport {
+	struct rcu_head rcu; //RCU callback head for deferred destruction.
+	u16 port_no;		//端口号是dp中ports数组的索引。
+	struct datapath	*dp; //这个端口所属的datapath。
+	struct kobject kobj;  // Represents /sys/class/net/&lt;devname&gt;/brport
+	char linkname[IFNAMSIZ]; 
+	u32 upcall_portid;   //在这个端口收到的包假设匹配流表失败会通过这个netlink port传至用户空间。
+
+	struct hlist_node hash_node; //  vport.c中的哈希表dev_table使用；
+	struct hlist_node dp_hash_node; //是结构体datapath-&gt;ports中的构成元素，将全部vport连接起来。
+	const struct vport_ops *ops;   //核心，定义vport的类型（能做的操作）。
+
+	struct vport_percpu_stats __percpu *percpu_stats;  //指向每一个CPU的统计信息；
+
+	spinlock_t stats_lock;      //自旋锁，保护以下俩字段的訪问；
+	struct vport_err_stats err_stats; //错误的统计信息；
+	struct ovs_vport_stats offset_stats;  //过时了；
+};
+</code></pre> 
+    <pre><code class="language-cpp">/**
+ * struct vport_parms - parameters for creating a new vport
+ * 端口參数。当创建一个新的vport端口是要传入的參数
+ */
+struct vport_parms {
+	const char *name;
+	enum ovs_vport_type type; //端口的类型
+	struct nlattr *options; //保存从netlink msg中得到的属性
+
+	/* For ovs_vport_alloc(). */
+	struct datapath *dp; //端口属于哪个datapath（网桥）
+	u16 port_no;   //端口号
+	u32 upcall_portid;  //和用户空间通信的netlink 端口
+};
+
+/**
+ * struct vport_ops -定义虚拟端口的类型（能做的操作）
+ */
+struct vport_ops {
+	enum ovs_vport_type type; // 类型值，OVS_VPORT_TYPE_*。
+	u32 flags;			// VPORT_F_*，影响通用虚拟端口层怎样处理这个vport。
+
+	/* Called at module init and exit respectively. */
+	int (*init)(void);		// 模块初始化；假设设置了标识VPORT_F_REQUIRED，那么该函数运行失败后
+							//停止模块载入。否则仅仅是导致不创建这种类型的vport。
+</code></pre> 
+    <p></p> 
+    <p> void (*exit)(void); //模块卸载之时。 /* Called with RTNL lock. */ struct vport *(*create)(const struct vport_parms *); //依据运行參数来创建一个新的vport，失败则返回相应的 ERR_PTR() 值； void (*destroy)(struct vport *); // 销毁这个vport，必须调用vport_free()释放（由于利用的是RCU。所以等到 RCU grace period之后实际运行） int (*set_options)(struct vport *, struct nlattr *); //配置这个vport，假设不支持改动，就把该函数指针置为Null。 int (*get_options)(const struct vport *, struct sk_buff *);//获得这个vport相关的配置属性到sk_buff中； int (*set_addr)(struct vport *, const unsigned char *);//设置MAC地址； /* Called with rcu_read_lock or RTNL lock. */ const char *(*get_name)(const struct vport *); // 设备名 const unsigned char *(*get_addr)(const struct vport *); void (*get_config)(const struct vport *, void *); struct kobject *(*get_kobj)(const struct vport *);//获得这个设备关联的kobj对象； unsigned (*get_dev_flags)(const struct vport *);//设备标志； int (*is_running)(const struct vport *); unsigned char (*get_operstate)(const struct vport *); //设备的工作状态 int (*get_ifindex)(const struct vport *);//和这个设备关联的接口号（system interface index ） int (*get_mtu)(const struct vport *);//设备的MTU，假设像tunnel这种就没有MTU，返回null； int (*send)(struct vport *, struct sk_buff *); //在该设备上发送一个packet，返回发送的长度； }; /* List of statically compiled vport implementations. Don't forget to also * add yours to the list at the top of vport.c. */ extern const struct vport_ops ovs_netdev_vport_ops; extern const struct vport_ops ovs_internal_vport_ops; extern const struct vport_ops ovs_patch_vport_ops;</p> 
+    <br style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+    <br style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+    <div> 
+     <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;">版权声明：本文博客原创文章，博客，未经同意，不得转载。</p> 
+     <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+     <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+     <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+     <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+     <p><font color="#333333"><span style="font-size:12px;">本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/4737648.html，如需转载请自行联系原作者</span></font></p> 
+     <div style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+      <br>
+     </div> 
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux中断申请之request_threaded_irq【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=21977330&amp;id=3755609    在linux里，中断处理分为顶半（top half），底半(bottom half)，在顶半里处理优先级比较...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/17/weixin_33804990_90123014.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux中断申请之request_threaded_irq【转】</h1>
+    <p class="post-meta">Nov 17, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=21977330&amp;id=3755609" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=21977330&amp;id=3755609</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在linux里，中断处理分为顶半（top half），底半(bottom half)，在顶半里处理优先级比较高的事情，要求占用中断时间尽量的短，在处理完成后，就激活底半，有底半处理其余任务。底半的处理方式主要有soft_irq, tasklet, workqueue三种，他们在使用方式和适用情况上各有不同。soft_irq用在对底半执行时间要求比较紧急或者非常重要的场合，主要为一些subsystem用，一般driver基本上用不上。 tasklet和work queue在普通的driver里用的相对较多，主要区别是tasklet是在中断上下文执行,而work queue是在process上下文，因此可以执行可能sleep的操作。<br><br><span class="long_text">request_threaded_irq()是Linux kernel 2.6.30 之后新加的irq handler API&nbsp;<br><br> 如何<span>确定可以用到 request_threaded_irq() ?&nbsp;<br><span>Linux kernel config 需要定义CONFIG_GENERIC_HARDIQS&nbsp;<br> kernel config 才有支援<span>threaded irq&nbsp;<br><span><br><span>&nbsp;&nbsp;&nbsp;&nbsp;<span>Moving interrupts to threads 介绍request_threaded_irq() 的由来&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>http://lwn.net/Articles/302043/&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>从realtime tree 移植而来，为了减少kernel 因为要等待每一个硬件中断处理的时间&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>，就另外交给kernel thread 处理中断后续工作。&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>优点：&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span>1 减少 kernel 延迟时间&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span>2 避免处理中断时要分辨是在硬体中断或软体中断？&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span>3 更容易为kernel 中断处理除错，可能可完全取代tasklet&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>原本的中断处理分上半部(硬体中断处理，必须关闭中断无法处理新的中断)跟下半部(&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>软体中断处理)，因此上半部的硬体中断处理必须尽可能简短，让系统反应速度更快。&nbsp;<br><br> &nbsp;&nbsp;&nbsp;&nbsp;<span>request_threaded_irq 是在将上半部的硬件中断处理缩短为只确定硬体中断来&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>自我们要处理的装置，唤醒kernel thread 执行后续中断任务。<span><br><span><br> &nbsp;&nbsp;&nbsp;&nbsp;<span>缺点：&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>对于非irq 中断的kernel threads ，需要在原本task_struct 新增struct&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>irqaction 多占 4/8 bytes 记忆体空间&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>linux kernel 2.6.29 之后(2.6.30)加入request_threaded_irq&nbsp;<br><br><span><br> &nbsp;&nbsp;&nbsp;&nbsp;<span>跟传统top/bottom havles 的差异是threaded_irq 受Linux kernel system&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>的 process scheduling 控制，<span>不会因为写错的bottom half 代码造成整个系统&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>延迟的问题。&nbsp;<br><br> &nbsp;&nbsp;&nbsp;&nbsp;<span>也可以透过RT/non RT 跟nice 等工具调整各个thread 优先权，丢给使用率较低的&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>cpu 以及受惠于kernel 原本可以对threads 做的各种控制，包括但不限于sleep,&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>lock, allocate 新的记忆体区块。&nbsp;<br><br> &nbsp;&nbsp;&nbsp;&nbsp;<span>受惠最大的是shared irq line 的多个中断处理。<span>除了可以加速共享中断造成的延迟&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>，threaded_irq 也可以降低在同一段程式码处理多个装置中断的复杂度。&nbsp;<br><br> &nbsp;&nbsp;&nbsp;&nbsp;<span>threaded irq 在使用性上也比tasklet(接着top half 直接执行，无法sleep)&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>/workqueue(kernel context?) 等需要在top half 增加跟bottom half 连结与沟通&nbsp;<br> &nbsp;&nbsp;&nbsp;&nbsp;<span>的麻烦。&nbsp;<br><br> int&nbsp;<a href="http://lxr.linux.no/linux+*/+code=request_threaded_irq" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">request_threaded_irq</a>(unsigned int&nbsp;<a href="http://lxr.linux.no/linux+*/+code=irq" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">irq</a>,&nbsp;<a href="http://lxr.linux.no/linux+*/+code=irq_handler_t" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">irq_handler_t</a>&nbsp;<a href="http://lxr.linux.no/linux+*/+code=handler" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">handler</a>,&nbsp;<a name="L874" href="http://lxr.linux.no/linux+*/kernel/irq/manage.c#L874" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"></a><a href="http://lxr.linux.no/linux+*/+code=irq_handler_t" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">irq_handler_t</a>&nbsp;<a href="http://lxr.linux.no/linux+*/+code=thread_fn" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">thread_fn</a>, unsigned long&nbsp;<a href="http://lxr.linux.no/linux+*/+code=irqflags" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">irqflags</a>,&nbsp;<a name="L875" href="http://lxr.linux.no/linux+*/kernel/irq/manage.c#L875" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"></a>const char *<a href="http://lxr.linux.no/linux+*/+code=devname" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">devname</a>, void *<a href="http://lxr.linux.no/linux+*/+code=dev_id" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">dev_id</a>)&nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">IRQF_SHARED 共享中断时，dev_id不能为空，因为释放irq时要区分哪个共享中断<br> irq：中断号<br> handler：发生中断时首先要执行的硬中断处理函数，这个函数可以通过返回 IRQ_WAKE_THREADED唤醒中断线程，也可<br> 返回IRQ_HANDLE不执行中断线程<br> thread_fn : 中断线程，类似于中断下半部<br> 后三个参数与request_irq中的一致</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text">关于IRQF_ONESHOT, 直到线程函数执行完毕才会开启该中断<br></span></p> 
+   <pre class="content"><strong><em>IRQF_ONESHOT:Interrupt is not reenabled after the hardirq handler finished. &nbsp;&nbsp;&nbsp; Used by threaded interrupts which need to keep the irq line disabled until the threaded handler has been run. </em></strong>这里linus在邮件列表里指明IRQF_ONESHOT 的原因
+Making the IRQF_ONESHOT explicit does two things:
+ - it makes people who read the code *aware* of things
+ - if/when you have irq conflicts and two drivers want to attach to
+the same interrupt, at least you can see directly from the source what
+flags they used (and again, not have to even *think* about it).
+
+IRQF_ONESHOT 与 IRQF_SHARED 不能同时使用
+当多个设备共享中断时，由于IRQF_ONESHOT会关闭中断线程的中断，而线程一般执行时间会比较长，所以是不允许的
+当hardirq函数为NULL时，必须声明IRQF_ONESHOT, 表示threadirq线程中关闭该中断,在某些情况下，这个标志会非常有用
+例如：设备是低电平产生中断，而硬中断函数为NULL，如果不使用IRQF_ONESHOT,就会一直产生中断执行NULL函数，中断线程
+得不到执行，声明IRQF_ONESHOT后，会执行完线程才使能该中断 &nbsp;</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"> 
+    <div class="codeheads"> 
+     <p>点击(此处)折叠或打开</p> 
+    </div> 
+    <div class="codeText"> 
+     <ol>
+      <li style="list-style:decimal;">/*&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;*&nbsp;gpio_irqTest.c&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;*&nbsp;PB27 receive this signal as IRQ&nbsp;and&nbsp;make the LED linking&nbsp;on&nbsp;PB17 turn&nbsp;on&nbsp;or&nbsp;turn off&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;*&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;*/&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/types.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/kernel.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/module.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/init.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/platform_device.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/cdev.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/ioctl.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/fs.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/gpio.h&gt;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/delay.h&gt;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/cdev.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;linux/interrupt.h&gt;</li> 
+      <li style="list-style:decimal;"> </li>
+      <li style="list-style:decimal;">#include&nbsp;&lt;asm/io.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;asm/io.h&gt;</li> 
+      <li style="list-style:decimal;"> </li>
+      <li style="list-style:decimal;">#include&nbsp;&lt;mach/gpio.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;mach/hardware.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;mach/board.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;mach/gpio.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;mach/at91_pio.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;mach/at91_aic.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;">#include&nbsp;&lt;mach/at91_pmc.h&gt;&nbsp;</li> 
+      <li style="list-style:decimal;"> </li>
+      <li style="list-style:decimal;">void led_on()&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">//&nbsp;at91_set_gpio_output(AT91_PIN_PB17,1);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;printk("led on\n");</li> 
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">void led_off()&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">//&nbsp;at91_set_gpio_output(AT91_PIN_PB17&nbsp;,0);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;printk("led off.\n");</li> 
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">struct light_dev&nbsp;*light_devp;&nbsp;</li> 
+      <li style="list-style:decimal;">int&nbsp;light_major&nbsp;=&nbsp;200;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">struct light_dev&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct cdev cdev;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;unsigned char value;&nbsp;</li> 
+      <li style="list-style:decimal;">};&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;"> </li>
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">static void io_init(void)&nbsp;</li> 
+      <li style="list-style:decimal;">{</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;at91_set_GPIO_periph(AT91_PIN_PB27,&nbsp;0);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;at91_set_gpio_input(AT91_PIN_PB27,&nbsp;1);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;at91_set_deglitch(AT91_PIN_PB27,&nbsp;1);&nbsp;</li> 
+      <li style="list-style:decimal;"> </li>
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">struct gpio_irq_desc&nbsp;</li> 
+      <li style="list-style:decimal;">{</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;pin;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;irq;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;unsigned long flags;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;char&nbsp;*name;&nbsp;</li> 
+      <li style="list-style:decimal;">};&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">static struct gpio_irq_desc gpio_irq={AT91_PIN_PB27,&nbsp;AT91_PIN_PB27,IRQF_TRIGGER_FALLING|IRQF_TRIGGER_RISING|IRQF_ONESHOT,"PB27"};</li> 
+      <li style="list-style:decimal;">static irqreturn_t gpio_irqhandler(int&nbsp;irq,&nbsp;void&nbsp;*dev_id)</li> 
+      <li style="list-style:decimal;">{</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_INFO&nbsp;"In hard irq handler.\n");</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return IRQ_WAKE_THREAD;</li> 
+      <li style="list-style:decimal;">}</li> 
+      <li style="list-style:decimal;"> </li>
+      <li style="list-style:decimal;">static irqreturn_t gpio_threadhandler(int&nbsp;irq,&nbsp;void&nbsp;*dev_id)&nbsp;</li> 
+      <li style="list-style:decimal;">{</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;rst;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;rst&nbsp;=&nbsp;at91_get_gpio_value(gpio_irq.pin);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_INFO&nbsp;"gpio stat: %d\n",&nbsp;rst);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;if(rst&nbsp;==&nbsp;0){</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;led_on();</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}else{</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;led_off();</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_INFO&nbsp;"sleep 3000ms\n");</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;msleep(3000);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_INFO&nbsp;"awake after sleep\n");</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return IRQ_HANDLED;</li> 
+      <li style="list-style:decimal;">}</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">int&nbsp;light_open(struct inode&nbsp;*inode,struct file&nbsp;*filp)&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;err;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct light_dev&nbsp;*dev;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;dev&nbsp;=&nbsp;container_of(inode-&gt;i_cdev,struct light_dev,cdev);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;filp-&gt;private_data&nbsp;=&nbsp;dev;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_DEBUG&nbsp;"%s",&nbsp;__FUNCTION__);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;io_init();&nbsp;</li> 
+      <li style="list-style:decimal;">//&nbsp;err&nbsp;=&nbsp;request_threaded_irq(gpio_irq.irq,gpio_irqhandler,gpio_threadhandler,gpio_irq.flags,gpio_irq.name,(void*)0);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;err&nbsp;=&nbsp;request_threaded_irq(gpio_irq.irq,NULL,gpio_threadhandler,gpio_irq.flags,gpio_irq.name,(void*)0);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;if(err)&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;{&nbsp;</li> 
+      <li style="list-style:decimal;">//&nbsp;free_irq(gpio_irq.irq,(void*)0);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_DEBUG&nbsp;"request irq failed.\n");</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;-EBUSY;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return 0;&nbsp;</li> 
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">int&nbsp;light_release(struct inode&nbsp;*inode,struct file&nbsp;*filp)&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;free_irq(gpio_irq.irq,(void*)0);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return 0;&nbsp;</li> 
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">int&nbsp;light_ioctl(struct inode&nbsp;*inode,struct file&nbsp;*filp,unsigned&nbsp;int&nbsp;cmd,&nbsp;unsigned long arg)</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;struct light_dev&nbsp;*dev&nbsp;=&nbsp;filp-&gt;private_data;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;switch(cmd)&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;case&nbsp;0:&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;at91_set_gpio_output(AT91_PIN_PB19,0);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;case&nbsp;1:&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;at91_set_gpio_output(AT91_PIN_PB19,1);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;led_off();&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;default:&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;-ENOTTY;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;break;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return 0;</li> 
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">struct file_operations light_fops&nbsp;=&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;.owner&nbsp;=&nbsp;THIS_MODULE,</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;.open&nbsp;=&nbsp;light_open,</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;.release&nbsp;=&nbsp;light_release,</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;.unlocked_ioctl&nbsp;=&nbsp;light_ioctl,</li> 
+      <li style="list-style:decimal;">};&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">static void light_setup_cdev(struct light_dev&nbsp;*dev,int&nbsp;index)&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;err,devno&nbsp;=&nbsp;MKDEV(light_major,index);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;cdev_init(&amp;dev-&gt;cdev,&amp;light_fops);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;dev-&gt;cdev.owner&nbsp;=&nbsp;THIS_MODULE;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;dev-&gt;cdev.ops&nbsp;=&nbsp;&amp;light_fops;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;err&nbsp;=&nbsp;cdev_add(&amp;dev-&gt;cdev,devno,1);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;if(err)&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_NOTICE&nbsp;"Error %d adding LED%d",err,index);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">int&nbsp;__init light_init(void)&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;result;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;dev_t dev&nbsp;=&nbsp;MKDEV(light_major,0);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;if(light_major)&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;result&nbsp;=&nbsp;register_chrdev_region(dev,1,"gpio");&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;if(result&nbsp;&lt;&nbsp;0)&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;{</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_DEBUG&nbsp;"%s: register char dev failed.\n",&nbsp;__FUNCTION__);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return result;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;light_devp&nbsp;=&nbsp;kmalloc(sizeof(struct light_dev),GFP_KERNEL);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;if(!light_devp)&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;result&nbsp;=&nbsp;-&nbsp;ENOMEM;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto fail_malloc;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;memset(light_devp,0,sizeof(struct light_dev));&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;light_setup_cdev(light_devp,0);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_DEBUG&nbsp;"%s done\n",&nbsp;__FUNCTION__);</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return 0;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;fail_malloc:unregister_chrdev_region(dev,light_devp);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;return result;&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">void __exit light_cleanup(void)&nbsp;</li> 
+      <li style="list-style:decimal;">{&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;cdev_del(&amp;light_devp-&gt;cdev);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;kfree(light_devp);&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;&nbsp;&nbsp;unregister_chrdev_region(MKDEV(light_major,0),1);&nbsp;</li> 
+      <li style="list-style:decimal;">}&nbsp;</li> 
+      <li style="list-style:decimal;">&nbsp;&nbsp;</li> 
+      <li style="list-style:decimal;">module_init(light_init);&nbsp;</li> 
+      <li style="list-style:decimal;">module_exit(light_cleanup);</li> 
+      <li style="list-style:decimal;"> </li>
+      <li style="list-style:decimal;">MODULE_AUTHOR("Enzo Fang");&nbsp;</li> 
+      <li style="list-style:decimal;">MODULE_LICENSE("Dual BSD/GPL");</li> 
+     </ol>
+    </div> 
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br> 结论：<br> 使用<br> request_threaded_irq(gpio_irq.irq,gpio_irqhandler,gpio_threadhandler,gpio_irq.flags,gpio_irq.name,(void*)0);<br> hardirq和thread_fn同时出现时，处理thread_fn时该中断是打开的<br><br> &nbsp; err = request_threaded_irq(gpio_irq.irq,NULL,gpio_threadhandler,gpio_irq.flags,gpio_irq.name,(void*)0);<br> 但hardirq和thread_fn只有一个存在时，处理thread_fn时，中断是关闭的</span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="long_text"><br></span></p> 
+   <p><font color="#666666"><span style="font-size:14px;"><br></span></font></p> 
+   <p><font color="#666666"><span class="long_text" style="font-size:14px;"></span></font></p> 
+   <p><font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/5639629.html</span></font><span style="font-size:14px;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

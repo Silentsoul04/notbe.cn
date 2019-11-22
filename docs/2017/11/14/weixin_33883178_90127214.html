@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux内核学习之四：进程切换简述【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/xiongyuanxiong/p/3531884.html    在讲述专业知识前，先讲讲我学习linux内核使用的入门书籍：《深入理解linux内核》第三版（英文原版叫《Understanding the Linux Kernel》）...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/14/weixin_33883178_90127214.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux内核学习之四：进程切换简述【转】</h1>
+    <p class="post-meta">Nov 14, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://www.cnblogs.com/xiongyuanxiong/p/3531884.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.cnblogs.com/xiongyuanxiong/p/3531884.html</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在讲述专业知识前，先讲讲我学习linux内核使用的入门书籍：《深入理解linux内核》第三版（英文原版叫《Understanding the Linux Kernel》），不过这本书不一定对每个人都适合，大家可以根据自己的情况选择适合的入门书籍。看了前面几章，感觉这本书的语言极其精练，没有一句多余的，必须慢慢读。可能我以前习惯了粗略浏览的阅读方式，读这本书时经常看着看着就迷糊了，不得不回到前面重新读起，如此反反复复。关于进程的一章更是深奥难懂，前前后后翻了十几遍才明白个大概。另外说明下，我用来验证代码的内核版本为官方的linux-3.2.54内核，而系统是用debian7.3_i386光盘安装的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp;进程是现代操作系统的核心概念之一，用于分配系统（CPU,内存）资源的使用。了解linux进程及进程切换的知识，首先要理解进程与程序的区别，进程是执行流，是动态概念；程序是数据与指令序列的集合，是静态概念。进程作为动态的执行流，可以用execv系统调用自由选择一个程序（只要有权限）来执行的，理解这一点很重要。在阅读本书的第三章《进程》中，有两个地方比较难于理解的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">1 switch_to宏的last参数</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp;书中讨论switch_to宏(第110页)时，提到，该宏有3个参数:prev,next和last。前两个分别是当前进程描述符地址和待切换的进程描述符的地址，相信大家对这两个参数都不会有疑问，prev就是从current得到的，而next则是schedule()函数在根据调度算法从进程等待队列中挑选的。关键是第三个last参数，为什么需要这么一个参数呢？书中的描述比较难理解。它的意思是说，A切换到B时，prev=A,next=B, 经过一定时间后，A被重新调度到CPU上执行时，A需要知道从哪个进程切换过来的，需要从last参数得到。实际上我们只需要关注A-&gt;B这一个过程就可以理解last参数的使用了。下面我们用图片记录每个步骤：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img src="https://images0.cnblogs.com/blog/599666/201401/241148043353.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(1) 在进程切换之前，A是当前进程，esp寄存器指向A的内核栈，prev,next这两个局部变量保存在栈中，也就是在A的内核栈中。那么B的内核栈有没有这两个参数呢？当然也有，因为B既然是在等待队列中，很可能B也经历过被其他进程切换出去这一个过程，在那个过程中，B的内核栈同样保存了这两个变量(如果B是新创建的进程，可以在创建时，或在schedule函数中将两个值压入内核栈），但是这两个值肯定跟A中的prev=A，next=B不同，因为那个过程中，B是被切换的，因此，这时，B的内核栈中应该是prev=B.</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp;为了在切换到B进程执行时，prev参数是正确的，就需要借助于第三个参数last 。在schedule函数中（它挑选的B，当然也知道B进程描述符的地址），它从B的进程描述符中得到B的内核栈的地址（书中是thread_info参数，3.2.54版本代码中改成了stack参数，原理是一样的），从而得到B的prev参数的地址，作为第三个参数传给switch_to宏。switch_to宏还将A的进程描述符地址加载到EAX寄存器中，而在进程切换过程中，EAX寄存器内容是不会改变的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(2) 执行进程切换，主要是内核栈的切换，因为内核实现中，将thread_info结构与内核栈放在一起，esp改变了，current参数得到的当前进程描述符地址也跟着改变。这时，当前进程变成了B进程，并在B的内核栈上工作。注意，这时B内核栈的prev参数还是不正确的，它指向的依然是B。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(3) 将EAX寄存器内容复制到last指向的内存，即B内核栈的prev参数所在的地址。这样，B内核栈上的prev参数就指向了正确的A进程描述符的地址。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">2 进程切换过程中进程栈</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp;书中对进程切换的描述中，对进程的栈的描述是零散的，很容易让人犯糊途。栈是进程中的重要数据结构，在函数调用中起到核心作用，关于栈的详细描述可以参阅《深入理解计算机系统》。下面描述进程切换过程中，进程的栈的变迁。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp;linux的进程有两种栈，用户栈和内核栈，它们在不同的内存区域，用户栈在用户态中使用，在用户地址空间分配(0~3G)，内核栈在内核态中使用，在内核地址空间分配(3G~4G)。用户栈主要用于函数调用和存储局部变量，内核栈除此之外还要保存进程切换额外的信息，如通用寄存器等。不管是用户栈还是内核栈，CPU都是用ESP寄存器保存栈顶地址，因此早在进程切换前，进程进入内核态后，用户栈就需要被切换出去，整个切换过程，都是在内核栈上工作，因而用户栈与进程切换无关。另一方面，内核的实现中，将thread_info结构与内核栈放在一起，内核栈改变了，current参数得到的当前进程描述符地址也跟着改变，因此进程切换，就是由内核栈切换来完成的。整个完整的进程切换可以分为三个部分，以下假设从进程A切换到进程B：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(1) &nbsp;A的用户态--&gt;A的内核态</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp;这一过程是由中断，异常或系统调用实现的，书中的后面章节会有介绍，以后再详谈。这里只讨论几个要点，每次从用户态切换到内核态，内核栈都会被清空，ESP直接指向内核栈的栈底，而用户栈的信息则会保存到内核栈中。清空内核栈的设计估计是考虑到经过了用户态的操作后，以前内核栈的调用信息没有用处了，没有必要再保存，毕竟内核栈只分配了8K或4K的空间。那么，切换到内核态之前，内核怎么知道进程的内核栈地址呢，进程描述符虽然保存有内核栈的地址（stack变量），但是进程描述符位于动态内态中，从内存读取的效率太低了。实现上，它是从TSS中获取的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp;书中“任务状态段”一节（第108页）对TSS进行比较详细的描述，每个CPU都有一个TSS，CPU可以快速访问它。TSS的一个最重要的功能就是在用户态转为内核态时供CPU读取内核栈地址，即是init_tss[cpu]-&gt;sp0字段（3.2.54版本的代码），实际上，它存储的是栈底地址，因此一加载到ESP中，就同时清空了内核栈。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">(2) A的内核态-&gt;B的内核态</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">这一阶段实现的是进程间的内核栈切换，同时也实现进程切换。与此过程关系最密切的是task_struct的thread变量，thread变量的类型是thread_struct，可称为线程描述符，用于保存进程切换的硬件上下文（书中第109页）。书中的switch_to和__switch_to函数详细描述了进程切换过程中的每一个步骤，与内核栈相关的有：</p> 
+   <ul style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <li style="list-style:disc;">保存A的内核栈栈顶地址，即ESP寄存器的内容到A_task-&gt;thread-&gt;sp。（switch_to的第3步,变量名根据3.2.54版本中的代码）</li> 
+    <li style="list-style:disc;">将B_task-&gt;thread-&gt;sp内容加载到ESP。(switch_to的第4步，这步完成了内核栈的切换)</li> 
+    <li style="list-style:disc;">将B_task-&gt;thread-&gt;sp0加载到init_tss[cpu]-&gt;sp0字段（__switch_to的第3步），这一步与(1)的描述对应，以后B在运行期间，用户态切换到内核态时，ESP寄存器总是从init_tss[cpu]-&gt;sp0字段获取内核栈的地址，这一操作同时清空了内核栈内容。（thread_struct结构有sp0，sp1变量，sp0保存内核栈栈底地址，sp保存栈顶地址）。</li> 
+   </ul>
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">（3）B的内核态-&gt;B用户态</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp; 执行与(1)相反的过程，从内核栈中取出（1）中保存的用户栈信息，装载相应寄存器，切换到用户栈，内核栈信息不必保存，因为(2)中已保存了栈底地址，下次进入内核栈时直接将其加载到ESP寄存器中即可（将栈底地址作为栈顶使用）。这一过程书中后面的章节同样会有详细描述。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp; &nbsp; &nbsp;有关进程的内容远不止这些，例如，进程的创建与清除，进程队列，进程调度等，总之要理解linux内核的进程管理，必须将《深入理解linux内核》一书相关章节逐句逐句细细品读。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p><font color="#666666"><span style="font-size:14px;"><br></span></font></p> 
+   <p><font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/6282922.html</span></font><span style="font-size:14px;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

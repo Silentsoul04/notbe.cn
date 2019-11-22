@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Hadoop 源码分析（二四）FSNamesystem « NotBeCN</title>
+  <meta name="description" content="             以下轮到FSNamesystem 出场了。        FSNamesystem.java 一共同拥有4573 行。而整个namenode 文件夹下全部的Java 程序总共也仅仅有16876行，把FSNamesystem 搞定了，NameNode 也就基本搞定。FSNamesystem...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/18/weixin_34185560_90117518.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Hadoop 源码分析（二四）FSNamesystem</h1>
+    <p class="post-meta">Oct 18, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <span style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;">以下轮到FSNamesystem 出场了。</span> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;">FSNamesystem.java 一共同拥有4573 行。而整个namenode 文件夹下全部的Java 程序总共也仅仅有16876<br style="line-height:21px;"><span style="line-height:21px;">行，把FSNamesystem 搞定了，NameNode 也就基本搞定。</span><br style="line-height:21px;"><span style="line-height:21px;">FSNamesystem 是NameNode 实际记录信息的地方，保存在FSNamesystem 中的数据有：</span><br style="line-height:21px;"><span style="line-height:21px;">文件名称数据块列表（存放在FSImage 和日志中）</span><br style="line-height:21px;"><span style="line-height:21px;">合法的数据块列表（上面关系的逆关系）</span><br style="line-height:21px;"><span style="line-height:21px;">数据块DataNode（仅仅保存在内存中，依据DataNode 发过来的信息动态建立）</span><br style="line-height:21px;"><span style="line-height:21px;">DataNode 上保存的数据块（上面关系的逆关系）</span><br style="line-height:21px;"><span style="line-height:21px;">近期发送过心跳信息的DataNode（LRU）</span><br style="line-height:21px;"><span style="line-height:21px;">我们先来分析FSNamesystem 的成员变量。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><br style="line-height:21px;"><span style="line-height:21px;">privatprivate boolean isPermissionEnabled;</span><br style="line-height:21px;"><span style="line-height:21px;">是否打开权限检查。能够通过配置项dfs.permissions 来设置。</span><br style="line-height:21px;"><span style="line-height:21px;">private UserGroupInformation fsOwner;</span><br style="line-height:21px;"><span style="line-height:21px;">本地文件的用户文件属主和文件组，能够通过hadoop.job.ugi 设置，假设没有设置，那么将使用启动HDFS 的用户（通过whoami 获得）和该用户</span><br style="line-height:21px;"><span style="line-height:21px;">所在的组（通过groups 获得）作为值。</span><br style="line-height:21px;"><span style="line-height:21px;">private String supergroup;</span><br style="line-height:21px;"><span style="line-height:21px;">相应配置项dfs.permissions.supergroup，应用在defaultPermission 中。是系统的超级组。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><br style="line-height:21px;"><span style="line-height:21px;">private PermissionStatus defaultPermission;</span><br style="line-height:21px;"><span style="line-height:21px;">缺省权限，缺省用户为fsOwner，缺省用户组为supergroup。缺省权限为0777，能够通过dfs.upgrade.permission 改动。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><br style="line-height:21px;"><span style="line-height:21px;">private long capacityTotal, capacityUsed, capacityRemaining;</span><br style="line-height:21px;"><span style="line-height:21px;">系统总容量/已使用容量/剩余容量</span><br style="line-height:21px;"><span style="line-height:21px;">private int totalLoad = 0;</span><br style="line-height:21px;"><span style="line-height:21px;">系统总连接数，依据DataNode 心跳信息跟新。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><br style="line-height:21px;"><span style="line-height:21px;">privatprivate long pendingReplicationBlocksCount, underReplicatedBlocksCount, scheduledReplicationBlocksCount;</span><br style="line-height:21px;"><span style="line-height:21px;">各自是成员变量pendingReplications（正在复制的数据块），neededReplications（须要复制的数据块）的大小，</span><br style="line-height:21px;"><span style="line-height:21px;">scheduledReplicationBlocksCount 是当前正在处理的复制工作数目。</span><br style="line-height:21px;"><span style="line-height:21px;">public FSDirectory dir;</span><br style="line-height:21px;"><span style="line-height:21px;">指向系统使用的FSDirectory 对象。</span><br style="line-height:21px;"><span style="line-height:21px;">BlocksMap blocksMap = new BlocksMap();</span><br style="line-height:21px;"><span style="line-height:21px;">保存数据块到INode 和DataNode 的映射关系</span><br style="line-height:21px;"><span style="line-height:21px;">public CorruptReplicasMap corruptReplicas = new CorruptReplicasMap();</span><br style="line-height:21px;"><span style="line-height:21px;">保存损坏（如：校验没通过）的数据块到相应DataNode 的关系， CorruptReplicasMap 类图例如以下。类仅仅有一个成员变量。保存Block 到一个</span><br style="line-height:21px;"><span style="line-height:21px;">DatanodeDescriptor 的集合的映射和这个映射上的一系列操作：</span><br style="line-height:21px;"><img src="http://bbs.superwu.cn/data/attachment/forum/201506/03/151828p1fjtjhrza6frah9.jpg" class="zoom" width="293" alt="" style="border:0px;">&nbsp;<span style="line-height:21px;"></span><br style="line-height:21px;"><br style="line-height:21px;"><span style="line-height:21px;">Map&lt;String, DatanodeDescriptor&gt; datanodeMap = new TreeMap&lt;String, DatanodeDescriptor&gt;();</span><br style="line-height:21px;"><span style="line-height:21px;">保存了StorageID � DatanodeDescriptor 的映射，用于保证DataNode 使用的Storage 的一致性。</span><br style="line-height:21px;"><span style="line-height:21px;">private Map&lt;String, Collection&lt;Block&gt;&gt; recentInvalidateSets</span><br style="line-height:21px;"><span style="line-height:21px;">保存了每一个DataNode 上无效但还存在的数据块（ StorageID � ArrayList&lt;Block&gt;）。</span><br style="line-height:21px;"><span style="line-height:21px;">Map&lt;String, Collection&lt;Block&gt;&gt; recentInvalidateSets</span><br style="line-height:21px;"><span style="line-height:21px;">保存了每一个DataNode 上有效，但须要删除的数据块（ StorageID � TreeSet&lt;Block&gt;），这样的情况可能发生在一个DataNode 故障后恢复后。 上</span><br style="line-height:21px;"><span style="line-height:21px;">面的数据块在系统中副本数太多，须要删除一些数据块。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><br style="line-height:21px;"><span style="line-height:21px;">HttpServer infoServer;</span><br style="line-height:21px;"><span style="line-height:21px;">int infoPort;</span><br style="line-height:21px;"><span style="line-height:21px;">Date startTime;</span><br style="line-height:21px;"><span style="line-height:21px;">用于内部信息传输的HTTP 请求server（ Servlet 的容器）。如今有/fsck，/getimage，/listPaths/*。/data/*和/fileChecksum/*，我们</span><br style="line-height:21px;"><span style="line-height:21px;">后面还会继续讨论。</span><br style="line-height:21px;"><span style="line-height:21px;">ArrayList&lt;DatanodeDescriptor&gt; heartbeats;</span><br style="line-height:21px;"><span style="line-height:21px;">全部眼下活着的DataNode，线程HeartbeatMonitor 会定期检查。</span><br style="line-height:21px;"><span style="line-height:21px;">private UnderReplicatedBlocks neededReplications</span><br style="line-height:21px;"><span style="line-height:21px;">须要进行复制的数据块。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;">UnderReplicatedBlocks 的类图例如以下，它事实上是一个数组。数组的下标是优先级（0 的优先级最高，假设数据块仅仅有一个副<br style="line-height:21px;"><span style="line-height:21px;">本，它的优先级是0）。数组的内容是一个Block 集合。UnderReplicatedBlocks 提供一些方法。对Block 进行添加。改动，查找和删除。</span><br style="line-height:21px;"><img src="http://bbs.superwu.cn/data/attachment/forum/201506/03/151830w5di9dim9mpmmozc.bmp" class="zoom" width="600" alt="" style="border:0px;">&nbsp;<span style="line-height:21px;"></span><br style="line-height:21px;"><br style="line-height:21px;"><span style="line-height:21px;">private PendingReplicationBlocks pendingReplications;</span><br style="line-height:21px;"><span style="line-height:21px;">保存正在复制的数据块的相关信息。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;">PendingReplicationBlocks 的类图例如以下：<br style="line-height:21px;"><img src="http://bbs.superwu.cn/data/attachment/forum/201506/03/151831jyaomq94biayr9yj.bmp" class="zoom" width="499" alt="" style="border:0px;">&nbsp;<span style="line-height:21px;"></span><br style="line-height:21px;"><br style="line-height:21px;"><span style="line-height:21px;">当中，pendingReplications 保存了全部正在进行复制的数据块。使用Map 是须要一些附加的信息PendingBlockInfo。这些信息包含时间戳。</span><br style="line-height:21px;"><span style="line-height:21px;">用于检測是否已经超时，和如今进行复制的数目numReplicasInProgress。timedOutItems 是超时的复制项，超时的复制项在FSNamesystem 的</span><br style="line-height:21px;"><span style="line-height:21px;">processPendingReplications 方法中被删除。并从新复制。timerThread 是用于检測复制超时的线程的句柄，相应的线程是</span><br style="line-height:21px;"><span style="line-height:21px;">PendingReplicationMonitor 的一个实例，它的run 方法每隔一段会检查是否有超时的复制项。假设有，将该数据块加到timedOutItems 中。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><br style="line-height:21px;"><span style="line-height:21px;">Timeout 是run 方法的检查间隔。 defaultRecheckInterval 是缺省值。PendingReplicationBlocks 和PendingBlockInfo 的方法都非常简</span><br style="line-height:21px;"><span style="line-height:21px;">单。</span><br style="line-height:21px;"><span style="line-height:21px;">publipublic LeaseManager leaseManager = new LeaseManager(this);</span><br style="line-height:21px;"></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><span style="line-height:21px;">租约管理器。</span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><span style="line-height:21px;"><br></span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><span style="line-height:21px;"><br></span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><span style="line-height:21px;"><br></span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><span style="line-height:21px;"><br></span></p> 
+   <p style="color:rgb(68,68,68);font-family:Tahoma, 'Microsoft Yahei', Simsun;font-size:14px;"><span style="line-height:21px;"><br></span></p> 
+   <p><span style="line-height:21px;"><font color="#444444"><span style="font-size:14px;">本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/5165482.html，如需转载请自行联系原作者</span></font><br></span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

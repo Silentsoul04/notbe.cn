@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Docker: 限制容器可用的内存 « NotBeCN</title>
+  <meta name="description" content="             默认情况下容器使用的资源是不受限制的。也就是可以使用主机内核调度器所允许的最大资源。但是在容器的使用过程中，经常需要对容器可以使用的主机资源进行限制，本文介绍如何限制容器可以使用的主机内存。    为什么要限制容器对内存的使用？    限制容器不能过多的使用主机的内存是非常重要的。对于 ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/11/weixin_34407348_90132652.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Docker: 限制容器可用的内存</h1>
+    <p class="post-meta">Oct 11, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">默认情况下容器使用的资源是不受限制的。也就是可以使用主机内核调度器所允许的最大资源。但是在容器的使用过程中，经常需要对容器可以使用的主机资源进行限制，本文介绍如何限制容器可以使用的主机内存。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">为什么要限制容器对内存的使用？</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">限制容器不能过多的使用主机的内存是非常重要的。对于 linux 主机来说，一旦内核检测到没有足够的内存可以分配，就会扔出 OOME(Out Of Memmory Exception)，并开始杀死一些进程用于释放内存空间。糟糕的是任何进程都可能成为内核猎杀的对象，包括 docker daemon 和其它一些重要的程序。更危险的是如果某个支持系统运行的重要进程被干掉了，整个系统也就宕掉了！这里我们考虑一个比较常见的场景，大量的容器把主机的内存消耗殆尽，OOME 被触发后系统内核立即开始杀进程释放内存。如果内核杀死的第一个进程就是 docker daemon 会怎么样？结果是所有的容器都不工作了，这是不能接受的！</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">针对这个问题，docker 尝试通过调整 docker daemon 的 OOM 优先级来进行缓解。内核在选择要杀死的进程时会对所有的进程打分，直接杀死得分最高的进程，接着是下一个。当 docker daemon 的 OOM 优先级被降低后(注意容器进程的 OOM 优先级并没有被调整)，docker daemon 进程的得分不仅会低于容器进程的得分，还会低于其它一些进程的得分。这样 docker daemon 进程就安全多了。</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">我们可以通过下面的脚本直观的看一下当前系统中所有进程的得分情况：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>#!/bin/<span style="line-height:1.5;">bash
+</span><span style="color:rgb(0,0,255);line-height:1.5;">for</span> proc <span style="color:rgb(0,0,255);line-height:1.5;">in</span> $(<span style="color:rgb(0,0,255);line-height:1.5;">find</span> /proc -maxdepth <span style="color:rgb(128,0,128);line-height:1.5;">1</span> -regex <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">/proc/[0-9]+</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>); <span style="color:rgb(0,0,255);line-height:1.5;">do</span><span style="line-height:1.5;">
+    printf </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">%2d %5d %s\n</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;"> \
+        </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$(cat $proc/oom_score)</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;"> \
+        </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$(basename $proc)</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;"> \
+        </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$(cat $proc/cmdline | tr '\0' ' ' | head -c 50)</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">done</span> <span style="color:rgb(128,0,128);line-height:1.5;">2</span>&gt;/dev/<span style="color:rgb(0,0,255);line-height:1.5;">null</span> | <span style="color:rgb(0,0,255);line-height:1.5;">sort</span> -nr | <span style="color:rgb(0,0,255);line-height:1.5;">head</span> -n <span style="color:rgb(128,0,128);line-height:1.5;">40</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">此脚本输出得分最高的 40 个进程，并进行了排序：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><img src="https://images2017.cnblogs.com/blog/952033/201712/952033-20171213130216597-1179723743.png" alt="" style="border:0px;"></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">第一列显示进程的得分，mysqld 排到的第一名。显示为 node server.js 的都是容器进程，排名普遍比较靠前。红框中的是 docker daemon 进程，非常的靠后，都排到了 sshd 的后面。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">有了上面的机制后是否就可以高枕无忧了呢！不是的，docker 的官方文档中一直强调这只是一种缓解的方案，并且为我们提供了一些降低风险的建议：</span></p> 
+   <ul style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;">
+    <li style="list-style:disc;"><span style="font-family:'Microsoft YaHei';font-size:15px;">通过测试掌握应用对内存的需求</span></li> 
+    <li style="list-style:disc;"><span style="font-family:'Microsoft YaHei';font-size:15px;">保证运行容器的主机有充足的内存</span></li> 
+    <li style="list-style:disc;"><span style="font-family:'Microsoft YaHei';font-size:15px;">限制容器可以使用的内存</span></li> 
+    <li style="list-style:disc;"><span style="font-family:'Microsoft YaHei';font-size:15px;">为主机配置 swap</span></li> 
+   </ul>
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">好了，啰嗦了这么多，其实就是说：通过限制容器使用的内存上限，可以降低主机内存耗尽时带来的各种风险。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">压力测试工具 stress</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">为了测试容器的内存使用情况，笔者在 ubuntu 的镜像中安装了压力测试工作 stress，并新创建了镜像 u-stress。本文演示用的所有容器都会通过 u-stress 镜像创建(本文运行容器的宿主机为 CentOS7)。下面是创建 u-stress 镜像的 Dockerfile：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="line-height:1.5;">FROM ubuntu:latest
+
+RUN apt</span>-get update &amp;&amp;<span style="line-height:1.5;"> \
+        apt</span>-get <span style="color:rgb(0,0,255);line-height:1.5;">install</span> stress</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">创建镜像的命令为：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker build -t u-stress:latest .</pre>
+   </div> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">限制内存使用上限</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">在进入繁琐的设置细节之前我们先完成一个简单的用例：限制容器可以使用的最大内存为 300M。</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">-m(--memory=) 选项可以完成这样的配置：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker run -it -m 300M --memory-swap -<span style="color:rgb(128,0,128);line-height:1.5;">1</span> --name con1 u-stress /bin/bash</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">下面的 stress 命令会创建一个进程并通过 malloc 函数分配内存：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre># stress --vm <span style="color:rgb(128,0,128);line-height:1.5;">1</span> --vm-bytes 500M</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">通过 docker stats 命令查看实际情况：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><img src="https://images2017.cnblogs.com/blog/952033/201712/952033-20171213130510707-38147422.png" alt="" style="border:0px;"></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">上面的 docker run 命令中通过 -m 选项限制容器使用的内存上限为 300M。同时设置 memory-swap 值为 -1，它表示容器程序使用内存的受限，而可以使用的 swap 空间使用不受限制(宿主机有多少 swap 容器就可以使用多少)。</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">下面我们通过 top 命令来查看 stress 进程内存的实际情况：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><img src="https://images2017.cnblogs.com/blog/952033/201712/952033-20171213130752754-1982342098.png" alt="" style="border:0px;"></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">上面的截图中先通过 pgrep 命令查询 stress 命令相关的进程，进程号比较大的那个是用来消耗内存的进程，我们就查看它的内存信息。VIRT 是进程虚拟内存的大小，所以它应该是 500M。RES 为实际分配的物理内存数量，我们看到这个值就在 300M 上下浮动。看样子我们已经成功的限制了容器能够使用的物理内存数量。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">限制可用的 swap 大小</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">强调一下&nbsp;<strong>--memory-swap</strong>&nbsp;是必须要与&nbsp;<strong>--memory</strong>&nbsp;一起使用的。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">正常情况下， --memory-swap 的值包含容器可用内存和可用 swap。所以 --memory="300m" --memory-swap="1g" 的含义为：</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">容器可以使用 300M 的物理内存，并且可以使用 700M(1G -300M) 的 swap。</span><span style="font-family:'Microsoft YaHei';font-size:15px;"><strong>--memory-swap</strong>&nbsp;居然是容器可以使用的物理内存和可以使用的 swap 之和！</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">把 --memory-swap 设置为 0 和不设置是一样的，此时如果设置了 --memory，容器可以使用的 swap 大小为 --memory 值的两倍。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">如果 --memory-swap 的值和 --memory 相同，则容器不能使用 swap。下面的 demo 演示了在没有 swap 可用的情况下向系统申请大量内存的场景：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>$ docker run -it --<span style="color:rgb(0,0,255);line-height:1.5;">rm</span> -m 300M --memory-swap=300M u-stress /bin/<span style="line-height:1.5;">bash
+# stress </span>--vm <span style="color:rgb(128,0,128);line-height:1.5;">1</span> --vm-bytes 500M</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><img src="https://images2017.cnblogs.com/blog/952033/201712/952033-20171213130735519-39244675.png" alt="" style="border:0px;"></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">demo 中容器的物理内存被限制在 300M，但是进程却希望申请到 500M 的物理内存。在没有 swap 可用的情况下，进程直接被 OOM kill 了。如果有足够的 swap，程序至少还可以正常的运行。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">我们可以通过 --oom-kill-disable 选项强行阻止 OOM kill 的发生，但是笔者认为 OOM kill 是一种健康的行为，为什么要阻止它呢？</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">除了限制可用 swap 的大小，还可以设置容器使用 swap 的紧迫程度，这一点和主机的 swappiness 是一样的。容器默认会继承主机的 swappiness，如果要显式的为容器设置 swappiness 值，可以使用 --memory-swappiness 选项。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">总结</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">通过限制容器可用的物理内存，可以避免容器内服务异常导致大量消耗主机内存的情况(此时让容器重启是较好的策略)，因此可以降低主机内存被耗尽带来的风险。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><br></span></p> 
+   <p><span><font><span style="font-size:15px;line-height:21px;">本文转自sparkdev博客园博客，原文链接：</span></font></span><font><span style="font-size:15px;line-height:21px;">http://www.cnblogs.com/sparkdev/p/8032330.html</span></font><span style="font-size:15px;line-height:21px;font-family:'Microsoft YaHei';">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

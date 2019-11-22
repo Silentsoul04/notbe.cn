@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>浅析 JNDI / DataSource / ConnectionPool 三者 « NotBeCN</title>
+  <meta name="description" content="             &nbsp; &nbsp;最近有个用户量 5W-10W 的 web 应用，频繁导致 weblogic 崩溃，让运维组很难受。    &nbsp; &nbsp;通过几天跟踪系统日志和 weblogic 运行状况，发现报错的姿势有很多，其中对定位问题比较关键的报错：    &nbsp; &n...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/22/weixin_33686714_90128744.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">浅析 JNDI / DataSource / ConnectionPool 三者</h1>
+    <p class="post-meta">Nov 22, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;最近有个用户量 5W-10W 的 web 应用，频繁导致 weblogic 崩溃，让运维组很难受。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;通过几天跟踪系统日志和 weblogic 运行状况，发现报错的姿势有很多，其中对定位问题比较关键的报错：</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;ExecuteThread: '496' for queue: 'weblogic.kernel.Default (self-tuning)' has beenbusy for "712" seconds working on the request "XXXX", which is more than the configured time (StuckThreadMaxTime) of "600" seconds.</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.5;font-size:15px;">&nbsp; &nbsp;weblogic 分配给 web 应用使用的线程响应返回周期最大为10分钟，线程迟迟无法返回结果导致阻塞，并且这样的刺头线程越来越多。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;运行一段时间后达到 weblogic 阻塞线程的阀值，weblogic 自然就崩溃了。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;刚开始也试着调大 weblogic 响应周期/阻塞线程的阀值，但是阻塞线程还是会存在并且很快达到阀值。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;仔细比对奔溃前后日志，查看 weblogic 阻塞线程详情，导致阻塞开始罪魁祸首是数据库查询需要很长时间。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;该系统与内外围很多厂商系统有进行数据交互，数据库里面旁根错杂的 db_link/synonyms/view/procedure。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;而且是老旧项目，代码经过很多人修改，已经风烛残年摇摇欲坠，俺想重造它不是一天两天了，因为很多原因无法进行，很无奈。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;规范数据库中的交互流程？然后动代码？oh,no! 限定解决的期限将至，不能拖。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;应用起初使用的是自带 C3P0 ConnectionPool，出现崩溃问题后，辗转尝试很多方法。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;将应用的数据库连接池改动为服务器 weblogic &nbsp;JNDI&nbsp;ConnectionPool ，使数据库连接的压力从应用转移到 web 容器。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;崩溃问题得到了缓解，经过后续的 weblogic 连接池参数的调整，卡死崩溃问题得到妥善解决。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;实践证明 web 容器配置 JNDI 提供给应用使用效率远远大于应用自带的连接池，也使我不得不重新审视这块对于 web 项目的重要性。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;同样 JNDI 避免了程序与数据库之间的紧耦合，使应用更加易于配置、易于部署。&nbsp;&nbsp;而且这样几乎无代码改动，只需变动下&nbsp;DataSource 的获取。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;试想发布在 weblogic 上面的 10个自带连接池的应用，当数据库信息变动时，你是不是想哭？</span></p> 
+   <div style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:right;"> 
+    <a href="http://www.cnblogs.com/java-class/p/6717844.html#_labelTop" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">回到顶部</a>
+    <a name="_label0" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);"></a> 
+   </div> 
+   <h3 style="font-size:16px;line-height:1.5;font-family:verdana, Arial, Helvetica, sans-serif;"><span style="line-height:1.8;font-size:15px;">1. DataSource / ConnectionPool /&nbsp;&nbsp;JNDI 三者关系</span></h3> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;<img src="https://images2015.cnblogs.com/blog/362169/201704/362169-20170416103645192-415760261.gif" alt="" style="border:0px;"><br></span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;<span style="line-height:1.8;">DataSource</span>：数据源是在 JDBC2.0 中引入的一个概念；</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;在 JDBC 扩展包中定义了Java.sql.DataSource 接口，它负责建立与数据库的连接；</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;在应用程序访问数据库是不必编写连接数据库的代码，可直接从数据源获得数据库连接。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;<span style="line-height:1.8;">ConnectionPool</span>&nbsp;：在数据源中初始化建立了多个数据库连接，这些数据库连接保存在连接池（ConnectionPool）中。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; Java程序访问数据库时，只需从连接池中取出空闲状态的数据库连接，当访问结束时，将数据库连接返回给连接池。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;<span style="line-height:1.8;">JNDI</span>&nbsp;: （Java Naming and Directory Interface）Java命名与目录接口；</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; 为开发人员提供了查找和访问各种命名和目录服务的通用、统一的接口。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; 其实可以将 JNDI 理解为一种对象和名字绑定的技术，即指定一个资源名称，将该名称与某一资源或服务相关联。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; 结合图和上面的简述，数据层关键性对象都已展露无遗，同样也很容易理解。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; JNDI 避免了程序与数据库之间的紧耦合，使应用更加易于配置、易于部署。</span></p> 
+   <div style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:right;"> 
+    <a href="http://www.cnblogs.com/java-class/p/6717844.html#_labelTop" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">回到顶部</a>
+    <a name="_label1" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);"></a> 
+   </div> 
+   <h3 style="font-size:16px;line-height:1.5;font-family:verdana, Arial, Helvetica, sans-serif;"><span style="line-height:1.8;font-size:15px;">2.&nbsp;配置 JNDI 数据源的方式和使用</span></h3> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;weblogic 上配置 JNDI 为图形界面，操作起来很方便，而且那是运维组的事情，术业有专攻。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;这里我拿 Tomcat 为例（开发时你也不可能在本机装个 weblogic 调试吧），简述下配置 JDNI 的几种方式：</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">a. 全局使用：Tomcat 的 conf 文件夹下的 context.xml &nbsp;配置文件中添加：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="font-size:15px;line-height:1.8;"><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">Resource </span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;">name</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jndi/db_test"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> auth</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="Container"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> type</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="javax.sql.DataSource"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> driverClassName</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="com.mysql.jdbc.Driver"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> url</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jdbc:mysql://localhost:3306/db_test"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> username</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="root"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> password</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="123456"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxActive</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="20"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxIdle</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="10"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxWait</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="10000"</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">/&gt;</span>      </span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">b.局部使用：Tomcat 的 conf 文件夹下 server.xml 的 &lt;host&gt; 标签内添加:</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="font-size:15px;line-height:1.8;"><span style="line-height:1.8;font-size:12px;">Context path="/demo_jndi" docBase="/demo_jndi"&gt; </span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">Resource </span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;">name</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jndi/db_test"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> type</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="javax.sql.DataSource"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> driverClassName</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="com.mysql.jdbc.Driver"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxIdle</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="2"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxWait</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="5000"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> username</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="root"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> password</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="123456"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> url</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jdbc:mysql://localhost:3306/db_test"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxActive</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="4"</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">/&gt;</span>  
+<span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;/</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">Context</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&gt;</span>  </span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp;c.局部使用：应用&nbsp;META-INFO 下新建 context.xml 添加：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="font-size:15px;line-height:1.8;"><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;?</span><span style="line-height:1.8;color:rgb(255,0,255);font-size:12px;">xml version="1.0" encoding="UTF-8"</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">?&gt;</span>  
+<span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">Context</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&gt;</span>  
+    <span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">Resource </span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;">name</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jndi/db_test"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> auth</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="Container"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> type</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="javax.sql.DataSource"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> driverClassName</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="com.mysql.jdbc.Driver"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> url</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jdbc:mysql://localhost:3306/db_test"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> username</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="root"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> password</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="123456"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxActive</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="20"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxIdle</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="10"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxWait</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="10000"</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">/&gt;</span>      
+<span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;/</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">Context</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&gt;</span>  </span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;上述几种配置使用的数据源都为&nbsp;javax.sql.DataSource，当然你也可以引入其他开源的数据源。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;也就是 web 容器使用其他的开源数据库连接池，比如像下面这几种姿势（记得将依赖的 jar 添加到容器的 lib 中）：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="font-size:15px;line-height:1.8;"><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">Resource </span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;">name</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jndi/db_test"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> auth</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="Container"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> //DBCP type</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="javax.sql.DataSource"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> factory</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="org.apache.tomcat.dbcp.dbcp.BasicDataSourceFactory"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> //C3P0 type</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="com.mchange.v2.c3p0.ComboPooledDataSource"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> factory</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="org.apache.naming.factory.BeanFactory"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> //Druid type</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="com.alibaba.druid.pool.DruidDataSource"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> factory</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="com.alibaba.druid.pool.DruidDataSourceFactory"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> driverClassName</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="com.mysql.jdbc.Driver"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> url</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jdbc:mysql://localhost:3306/db_test"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> username</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="root"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> password</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="123456"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxActive</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="20"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxIdle</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="10"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> maxWait</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="10000"</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">/&gt;</span>    </span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;配置好之后，使用起来也是相当的简单，核心如下2行代码即可：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="font-size:15px;line-height:1.8;">    Context ctx = <span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">new</span><span style="line-height:1.8;font-size:12px;"> InitialContext(); DataSource ds </span>= (DataSource) ctx.lookup("java:comp/env/jndi/db_test");  </span></pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; &nbsp;如果项目中引入了 Spring 上述两行代码都可以省了，注入数据源配置，如下：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="font-size:15px;line-height:1.8;">    <span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">bean </span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;">id</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="dataSource"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> class</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="org.springframework.jndi.JndiObjectFactoryBean"</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&gt;</span>  
+        <span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">property </span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;">name</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jndiName"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> value </span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">= "java:comp/env/jndi/db_test"</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">/&gt;</span>  
+    <span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;/</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">bean</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&gt;</span>  </span></pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;font-size:15px;">&nbsp; 因为命名前缀的不用，避免发布时忘记修改，统一配置 tomcat 和 weblogic 上的数据源 jndi 的方式：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="font-size:15px;line-height:1.8;"><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">&lt;</span><span style="line-height:1.8;color:rgb(128,0,0);font-size:12px;">jee:jndi-lookup </span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;">id</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="dataSource"</span><span style="line-height:1.8;color:rgb(255,0,0);font-size:12px;"> jndi-name</span><span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">="jdbc/db_test"</span> <span style="line-height:1.8;color:rgb(0,0,255);font-size:12px;">/&gt;</span></span></pre>
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;本文转自Orson博客园博客，原文链接：http://www.cnblogs.com/java-class/p/6717844.html，如需转载请自行联系原作者</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

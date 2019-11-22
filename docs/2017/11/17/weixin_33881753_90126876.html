@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>探索 OpenStack 之（17）：计量模块 Ceilometer 中的数据收集机制 « NotBeCN</title>
+  <meta name="description" content="                  本文将阐述 Ceilometer 中的数据收集机制。Ceilometer 使用三种机制来收集数据：          Notifications：Ceilometer 接收 OpenStack 其它服务发出的 notification message      Polling：...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/17/weixin_33881753_90126876.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">探索 OpenStack 之（17）：计量模块 Ceilometer 中的数据收集机制</h1>
+    <p class="post-meta">Nov 17, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="blogpost-body" style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <p style="line-height:1.5;">本文将阐述 Ceilometer 中的数据收集机制。Ceilometer 使用三种机制来收集数据：</p> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">Notifications：Ceilometer 接收 OpenStack 其它服务发出的 notification message</li> 
+     <li style="list-style-type:disc;">Polling：直接从 Hypervisor 或者 使用 SNMP 从host machine，或者使用 OpenStack 其它服务的 API 来获取数据。</li> 
+     <li style="list-style-type:disc;">RESTful API：别的 application 使用 Ceilometer 的 REST API 创建 samples。</li> 
+    </ul>
+    <h2 style="font-size:21px;line-height:1.5;"><span class="term" style="line-height:1.5;">1. Notifications</span></h2> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;"><span class="term" style="line-height:1.5;">1.1 被 Ceilometer 处理的 notifications</span></h3> 
+    <p style="line-height:1.5;"><span class="term" style="line-height:1.5;">所有的 OpenStack 服务都会在执行了某种操作或者状态变化时发出 notification。一些 nofication message 会包含 metering 需要的数据，这部分消息会被ceilometer 处理并转化为samples。下表列出了目前 Ceilometer 所处理的各服务的notification：</span>&nbsp;</p> 
+    <p style="line-height:1.5;">（参考文档：&nbsp;<a href="http://docs.openstack.org/admin-guide-cloud/content/section_telemetry-notifications.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://docs.openstack.org/admin-guide-cloud/content/section_telemetry-notifications.html</a>）</p> 
+    <table style="border:1px solid #C0C0C0;border-collapse:collapse;">
+     <thead>
+      <tr>
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">OpenStack service</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Event types</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Note</td> 
+      </tr>
+     </thead>
+     <tbody>
+      <tr>
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">OpenStack Compute</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">scheduler.run_instance.scheduled，scheduler.select_destinations</p> <p style="line-height:1.5;">compute.instance.*</p> </td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">For a more detailed list of Compute notifications please check the&nbsp;<a class="link" href="https://wiki.openstack.org/wiki/SystemUsageData" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">System Usage Data wiki page</a>.</td> 
+      </tr>
+      <tr>
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Bare metal module for OpenStack</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">hardware.ipmi.*</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      </tr>
+      <tr>
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">OpenStack Image Service</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">image.update，image.upload，image.delete，image.send</p> </td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">The required configuration for Image service can be found in the&nbsp;<a class="link" href="http://docs.openstack.org/juno/install-guide/install/apt/content/ceilometer-agent-glance.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Configure the Image Service for Telemetry section</a>&nbsp;section in the<em>OpenStack Installation Guide</em>.</td> 
+      </tr>
+      <tr>
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">OpenStack Networking</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">floatingip.create.end，floatingip.update.*，floatingip.exists</p> <p style="line-height:1.5;">network.create.end，network.update.*，network.exists</p> <p style="line-height:1.5;">port.create.end，port.update.*，port.exists</p> <p style="line-height:1.5;">router.create.end，router.update.*，router.exists</p> <p style="line-height:1.5;">subnet.create.end，subnet.update.*，subnet.exists</p> <p style="line-height:1.5;">l3.meter</p> </td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      </tr>
+      <tr>
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Orchestration module</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">orchestration.stack.create.end，orchestration.stack.update.end</p> <p style="line-height:1.5;">orchestration.stack.delete.end，orchestration.stack.resume.end</p> <p style="line-height:1.5;">orchestration.stack.suspend.end</p> </td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;</td> 
+      </tr>
+      <tr>
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">OpenStack Block Storage</td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">volume.exists，volume.create.*，volume.delete.*</p> <p style="line-height:1.5;">volume.update.*，volume.resize.*，volume.attach.*</p> <p style="line-height:1.5;">volume.detach.*</p> <p style="line-height:1.5;">snapshot.exists，snapshot.create.*</p> <p style="line-height:1.5;">snapshot.delete.*，snapshot.update.*</p> </td> 
+       <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">The required configuration for Block Storage service can be found in the&nbsp;<a class="link" href="http://docs.openstack.org/juno/install-guide/install/apt/content/ceilometer-agent-cinder.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Add the Block Storage service agent for Telemetry section</a>section in the&nbsp;<em>OpenStack Installation Guide</em>.<br><br></td> 
+      </tr>
+     </tbody>
+    </table>
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.2 Cinder Volume Notificaitons 发出过程</h3> 
+    <p style="line-height:1.5;">&nbsp;Cinder 中 /cinder/volume/util.py 的&nbsp;notify_about_volume_usage 函数负责调用 oslo.message 的方法来发出 volume usage 相关的 notificaiton message：</p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre><span style="line-height:1.5;">def notify_about_volume_usage(context, volume, event_suffix,
+                              extra_usage_info</span>=None, host=<span style="line-height:1.5;">None):
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span><span style="line-height:1.5;"> not host:
+        host </span>=<span style="line-height:1.5;"> CONF.host
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span><span style="line-height:1.5;"> not extra_usage_info:
+        extra_usage_info </span>=<span style="line-height:1.5;"> {}
+    usage_info </span>= _usage_from_volume(context, volume, **<span style="line-height:1.5;">extra_usage_info)
+    rpc.get_notifier(</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">volume</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, host).info(context, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">volume.%s</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> %<span style="line-height:1.5;"> event_suffix, usage_info)</span></pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <p style="line-height:1.5;">下图显示了该函数被调用的地方。可见：</p> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">Controller 节点上的 cinder-api &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;会发出 Info 级别的 volume.update.* notificaiton</li> 
+     <li style="list-style-type:disc;">Controller 节点上的&nbsp;cinder-scheduler 会发出 Info 级别的volume.create.* notification</li> 
+     <li style="list-style-type:disc;">Volume &nbsp; &nbsp;节点上的 cinder-volume &nbsp; &nbsp;会发出&nbsp;Info 级别的别的&nbsp;volume.*.* notificaiton</li> 
+    </ul>
+    <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201504/021212507324077.jpg" alt="" style="border:0px;"></p> 
+    <p style="line-height:1.5;">再看看 notification 发出的时机。以 volume.update.* 为例：</p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre> @wsgi.serializers(xml=<span style="line-height:1.5;">VolumeTemplate)
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">def</span><span style="line-height:1.5;"> update(self, req, id, body):
+        </span><span style="color:rgb(128,0,0);line-height:1.5;">"""</span><span style="color:rgb(128,0,0);line-height:1.5;">Update a volume.</span><span style="color:rgb(128,0,0);line-height:1.5;">"""</span><span style="line-height:1.5;">
+       ...
+
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">try</span><span style="line-height:1.5;">:
+            volume </span>= self.volume_api.get(context, id, viewable_admin_meta=<span style="line-height:1.5;">True)
+            <span style="color:rgb(0,0,255);line-height:1.5;">volume_utils.notify_about_volume_usage(context, volume, </span></span><span style="color:rgb(0,0,255);line-height:1.5;">'update.start'</span><span style="line-height:1.5;"><span style="color:rgb(0,0,255);line-height:1.5;">) #开始更新前发出 volume.update.start notificaiton</span>
+            self.volume_api.update(context, volume, update_dict)
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">except</span><span style="line-height:1.5;"> exception.NotFound:
+            msg </span>= _(<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">Volume could not be found</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">)
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">raise</span> exc.HTTPNotFound(explanation=<span style="line-height:1.5;">msg)
+
+        volume.update(update_dict)
+        utils.add_visible_admin_metadata(volume)
+        <span style="color:rgb(0,0,255);line-height:1.5;">volume_utils.notify_about_volume_usage(context, volume, </span></span><span style="color:rgb(0,0,255);line-height:1.5;">'update.end') #更新结束后发出 volume.update.end notification
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> self._view_builder.detail(req, volume)</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <p style="line-height:1.5;">在来看看使用 notificaiton driver 是如何发出 notification 的：</p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre><span style="color:rgb(0,0,255);line-height:1.5;">// /oslo/messaging/notify/_impl_messaging.py，<br>
+// notificaiton driver 由 cinder.conf 配置项 notification_driver = cinder.openstack.common.notifier.rpc_notifier 指定，它实际对应的是 oslo.messaging.notify._impl_messaging:MessagingDriver (对应关系由 cinder/setup.cfg 定义)<br>
+def</span><span style="line-height:1.5;"> notify(self, ctxt, message, priority, retry):
+        priority </span>=<span style="line-height:1.5;"> priority.lower()
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">for</span> topic <span style="color:rgb(0,0,255);line-height:1.5;">in</span><span style="line-height:1.5;"> self.topics:
+            target </span>= messaging.Target(topic=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">%s.%s</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> %<span style="line-height:1.5;"> (topic, priority)) <span style="color:rgb(0,0,255);line-height:1.5;">#topic 是 notificaitons.info，因此会被发到同名的queue。使用默认的由 cinder.conf 中配置项 control_exchange 指定的exchange，其默认值为 openstack。而 topic 中的 "notifications" 由配置项 #notification_topics=notifications&nbsp;指定。 </span></span><span style="color:rgb(0,0,255);line-height:1.5;">try</span><span style="line-height:1.5;">:
+                self.transport._send_notification(target, ctxt, message, version</span>=<span style="line-height:1.5;">self.version, retry</span>=<span style="line-height:1.5;">retry) <span style="color:rgb(0,0,255);line-height:1.5;">#Send a notify message on a topic </span></span><span style="color:rgb(0,0,255);line-height:1.5;">except</span><span style="line-height:1.5;"> Exception:
+                ......</span></pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <p style="line-height:1.5;">因此，为了 Cinder 能正确发出 notificaiton 被 Ceilometer 接收到，需要在 controller 节点和 cinder-volume 节点上的 cinder.conf 中做如下配置：</p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;">
+     <pre>control_exchange =<span style="line-height:1.5;"> cinder <span style="color:rgb(0,0,255);line-height:1.5;">#因为queue "notificaitons.info" 是 bind 到 "cinder" exchange 上的，所以 cinder 的 notificaiton message 需要被发到 “cinder” exchange。</span>
+notification_driver </span>= cinder.openstack.common.notifier.rpc_notifier <span style="color:rgb(0,0,255);line-height:1.5;">#在某些时候 /oslo/messaging/notify/_impl_messaging.py 不存在，需要手工从别的地方拷贝过来</span></pre>
+    </div> 
+    <p style="line-height:1.5;">Cinder 还有会同样的方式发出别的资源的notification：</p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre> 81: rpc.get_notifier(<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(0,0,255);line-height:1.5;">volume</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, host).info(context, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">volume.%s</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> %<span style="line-height:1.5;"> event_suffix,  
+</span>113: rpc.get_notifier(<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(0,0,255);line-height:1.5;">snapshot</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, host).info(context, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">snapshot.%s</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> %<span style="line-height:1.5;"> event_suffix,  
+</span>129: rpc.get_notifier(<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(0,0,255);line-height:1.5;">replication</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, host).info(context, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">replication.%s</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> %<span style="line-height:1.5;"> suffix,  
+</span>145: rpc.get_notifier(<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(0,0,255);line-height:1.5;">replication</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span>, host).error(context, <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">replication.%s</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> %<span style="line-height:1.5;"> suffix,  
+</span>174: rpc.get_notifier(<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(0,0,255);line-height:1.5;">consistencygroup</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, host).info(context,<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">consistencygroup.%s</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> %<span style="line-height:1.5;"> event_suffix,  
+</span>204: rpc.get_notifier(<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(0,0,255);line-height:1.5;">cgsnapshot</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, host).info( </pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <p style="line-height:1.5;">但是目前 Ceilometer 只处理 volume 和 snapshot notificaiton message。</p> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.3 Ceilometer 处理 Volume notifications 的过程</h3> 
+    <p style="line-height:1.5;">Ceilometer 从 AMQP message queue "notifications.info" 中获取 notificaiton 消息。该 queue 的名字由 ceilometer.conf 中的配置项&nbsp;notification_topics = notifications 指定。它会按照一定的方法将 notification 转化为 ceilometer event，然后再转化为 samples。</p> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.4 Cinder 到 Ceilometer 全过程</h3> 
+    <p style="line-height:1.5;">（1） cinder-* 发出 event-type 为 "volume.*.*" topic 为"&lt;topic&gt;.&lt;priority&gt;" 的消息 到 类型为 topic 名为 &lt;service&gt; 的exchange</p> 
+    <p style="line-height:1.5;">（2）exchange &lt;service&gt; 和&nbsp;queue "&lt;topic&gt;.&lt;priority&gt;" 使用 routing-key "&lt;topic&gt;.&lt;priority&gt;"&nbsp;绑定</p> 
+    <p style="line-height:1.5;">（3）notificaiton message 被 exchange 转发到&nbsp;queue "&lt;topic&gt;.&lt;priority&gt;"</p> 
+    <p style="line-height:1.5;">（4）ceilometer-agent-notification 从&nbsp;queue "&lt;topic&gt;.&lt;priority&gt;" 中获取 message</p> 
+    <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201504/021331335147207.jpg" alt="" style="border:0px;"></p> 
+    <p style="line-height:1.5;">这里对cinder 来说：</p> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">&lt;service&gt; 是 "cinder"。需要注意 cinder 默认的 control exchange 是 "openstack"，所以使用 ceilometer 时需要将其修改为 "cinder"。</li> 
+     <li style="list-style-type:disc;">&lt;topic&gt; 是 "notificaitons"，<span style="line-height:1.5;font-family:'Courier New';">由 cinder.conf 中的配置项 notification_topics=notifications&nbsp;指定。</span> </li> 
+     <li style="list-style-type:disc;">&lt;priority&gt; 是 "info"，由 cinder 代码中写死的。</li> 
+     <li style="list-style-type:disc;">notificaiton message 的数据内容可参考&nbsp;<a href="https://wiki.openstack.org/wiki/SystemUsageData" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">https://wiki.openstack.org/wiki/SystemUsageData</a> </li> 
+    </ul>
+    <p style="line-height:1.5;"><span style="line-height:1.5;font-size:10px;">&nbsp;</span></p> 
+    <h2 style="font-size:21px;line-height:1.5;">2. Polling</h2> 
+    <p style="line-height:1.5;">Ceilometer 的 polling 机制使用三种类型的 agent：</p> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">Compute agent</li> 
+     <li style="list-style-type:disc;">Central agent</li> 
+     <li style="list-style-type:disc;">IPMI agent</li> 
+    </ul>
+    <p style="line-height:1.5;">在 Kilo 版本中，这些 agent 都属于&nbsp;ceilometer-polling，不同的是，每种agent使用不同的&nbsp;polling plug-ins (pollsters)&nbsp;</p> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.1 Central agent</h3> 
+    <p style="line-height:1.5;">该 agent 负责使用个 OpenStack 服务的 REST API 来获取 openstack 资源的各种信息，以及通过 SNMP 来获取 hardware 资源的信息。这些资源包括：</p> 
+    <ul class="itemizedlist" style="list-style:none;font-size:12px;">
+     <li class="listitem" style="list-style-type:disc;"> <p style="line-height:1.5;">OpenStack Networking</p> </li> 
+     <li class="listitem" style="list-style-type:disc;"> <p style="line-height:1.5;">OpenStack Object Storage</p> </li> 
+     <li class="listitem" style="list-style-type:disc;"> <p style="line-height:1.5;">OpenStack Block Storage</p> </li> 
+     <li class="listitem" style="list-style-type:disc;"> <p style="line-height:1.5;">Hardware resources via SNMP</p> </li> 
+     <li class="listitem" style="list-style-type:disc;"> <p style="line-height:1.5;">Energy consumption metrics via&nbsp;<a class="link" href="https://launchpad.net/kwapi" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Kwapi</a>&nbsp;framework</p> </li> 
+    </ul>
+    <p style="line-height:1.5;">该 agent 收集到的 samples 会通过 AMQP 发给 Ceilometer Collector 或者外部系统。</p> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.2 Compute agent</h3> 
+    <p style="line-height:1.5;">Compute agent 安装在 compute node 上，负责收集在上面运行的虚机的使用数据。它是通过调用 hypervisor SDK 来收集数据的。到目前为止支持的hypervisor包括：</p> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">Kernel-based Virtual Machine (KVM)</li> 
+     <li style="list-style-type:disc;">Quick Emulator (QEMU)</li> 
+     <li style="list-style-type:disc;">Linux Containers (LXC)</li> 
+     <li style="list-style-type:disc;">User-mode Linux (UML)</li> 
+     <li style="list-style-type:disc;">Hyper-V</li> 
+     <li style="list-style-type:disc;">XEN</li> 
+     <li style="list-style-type:disc;">VMWare vSphere</li> 
+    </ul>
+    <p style="line-height:1.5;">除了虚机外，该 agent 还能够收集 compute 节点 cpu 的数据。这功能需要配置 nova.conf 文件中的&nbsp;<code class="option">compute_monitors</code>&nbsp;项为&nbsp;<code class="literal">ComputeDriverCPUMonitor。</code></p> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.3 IPMI agent</h3> 
+    <p style="line-height:1.5;">IPMI agent 负责在 compute 节点上收集 IPMI 传感器（sensor）的数据，以及Intel Node Manager 的数据。</p> 
+    <h2 style="font-size:21px;line-height:1.5;">3. 使用 Ceilometer REST API 创建 samples</h2> 
+    <pre class="screen">$ ceilometer sample-create -r 37128ad6-daaa-4d22-9509-b7e1c6b08697 -m memory.usage --meter-type gauge --meter-unit MB --sample-volume 48
++-------------------+--------------------------------------------+
+| Property          | Value                                      |
++-------------------+--------------------------------------------+
+| message_id        | 6118820c-2137-11e4-a429-08002715c7fb       |
+| name              | memory.usage                               |
+| project_id        | e34eaa91d52a4402b4cb8bc9bbd308c1           |
+| resource_id       | 37128ad6-daaa-4d22-9509-b7e1c6b08697       |
+| resource_metadata | {}                                         |
+| source            | e34eaa91d52a4402b4cb8bc9bbd308c1:openstack |
+| timestamp         | 2014-08-11T09:10:46.358926                 |
+| type              | gauge                                      |
+| unit              | MB                                         |
+| user_id           | 679b0499e7a34ccb9d90b64208401f8e           |
+| volume            | 48.0                                       |
++-------------------+--------------------------------------------+</pre> 
+    <h2 style="font-size:21px;line-height:1.5;">4. 收集 Neutron Bandwidth samples</h2> 
+    <p style="line-height:1.5;">Havana 版本中添加该功能。与 Ceilometer 其他采集方式不同的是，bandwidth 的采集是通过 neutron-meter-agent 收集，然后 push 到 oslo-messaging，ceilometer-agent-notification通过监听消息队列来收取bandwidth信息。</p> 
+    <p style="line-height:1.5;">其实现是在 L3 router 层次来收集数据，因此需要操作员配置 IP 范围以及设置标签（label）。比如，我们加两个标签，一个表示内部网络流量，另一个表示外部网络流量。每个标签会计量一定IP范围内的流量。然后，每个标签的带宽的测量数据会被发到 MQ，然后被 Ceilometer 收集到。</p> 
+    <p style="line-height:1.5;"><span style="line-height:1.5;">参考链接：</span></p> 
+    <p style="line-height:1.5;"><a href="https://wiki.openstack.org/wiki/Neutron/Metering/Bandwidth" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">https://wiki.openstack.org/wiki/Neutron/Metering/Bandwidth</a></p> 
+    <p style="line-height:1.5;"><a href="https://openstackr.wordpress.com/2014/05/23/bandwidth-monitoring-with-neutron-and-ceilometer/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">https://openstackr.wordpress.com/2014/05/23/bandwidth-monitoring-with-neutron-and-ceilometer/</a></p> 
+    <h2 style="font-size:21px;line-height:1.5;">5. 收集物理设备samples</h2> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">5.1 使用 kwapi kwapi 收集设备能耗数据</h3> 
+    <div>
+     有时候我们需要收集 OpenStack 集群中服务器的能耗数据。kwapi 是采集物理机能耗信息的项目，agent-central 组件通过kwapi暴露的api来收集物理机的能耗信息。目前 kwapi 提供两个类型的计量数据：
+    </div> 
+    <div> 
+     <ul class="first last simple" style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">Energy (cumulative type): 表示 kWh.</li> 
+      <li style="list-style-type:disc;">Power (gauge type): 表示 watts.</li> 
+     </ul>
+     <p style="line-height:1.5;">Ceilometer central agent 的 pollers 直接调用 kwapi 的 API 来获取 samples。&nbsp;</p> 
+     <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201504/021022002794095.jpg" alt="" style="border:0px;"></p> 
+     <p style="line-height:1.5;">参考文档：</p> 
+     <p style="line-height:1.5;"><a href="http://kwapi.readthedocs.org/en/latest/architecture.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://kwapi.readthedocs.org/en/latest/architecture.html</a></p> 
+     <p style="line-height:1.5;"><a href="http://blog.zhaw.ch/icclab/collecting-energy-consumption-data-using-kwapi-in-openstack/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://blog.zhaw.ch/icclab/collecting-energy-consumption-data-using-kwapi-in-openstack/</a></p> 
+     <p style="line-height:1.5;"><a href="http://perso.ens-lyon.fr/laurent.lefevre/greendayslux/GreenDays_Rossigneux.pdf" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://perso.ens-lyon.fr/laurent.lefevre/greendayslux/GreenDays_Rossigneux.pdf</a></p> 
+    </div> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">5.2 使用 snmp 协议收集硬件的CPU、MEM、IO等信息</h3> 
+    <p style="line-height:1.5;">在 IceHouse 中新增该功能。</p> 
+    <p style="line-height:1.5;">参考文档：<a href="http://www.cnblogs.com/smallcoderhujin/p/4150368.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.cnblogs.com/smallcoderhujin/p/4150368.html</a></p> 
+    <h2 style="font-size:21px;line-height:1.5;">6. 基于 OpenDayLight &nbsp;收集 SDN samples</h2> 
+    <div>
+     OpenDayLight &nbsp;是 SDN 解决方案的开源项目，它的规范中包括暴露 REST API 接口来提供SDN内部的一些信息，Ceilometer Central agent 正是通过这些 API 来收集网络组件的信息。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     基本实现：
+    </div> 
+    <ol>
+     <li style="list-style-type:decimal;">Central agent 不直接调用&nbsp;OpenDayLight 的 REST API，而是实现了一个 driver 来调用。</li> 
+     <li style="list-style-type:decimal;">Driver 调用 REST API 收集统计数据，返回 volume、resource id 和 metadata 给 pollster。</li> 
+     <li style="list-style-type:decimal;">Pollster 负责产生 samples。</li> 
+    </ol>
+    <div> 
+     <p style="line-height:1.5;">实现代码在OpenStack 的&nbsp;\ceilometer\network\statistics 目录中。</p> 
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     参考链接：
+    </div> 
+    <div>
+     <a href="https://blueprints.launchpad.net/ceilometer/+spec/monitoring-network-from-opendaylight" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">https://blueprints.launchpad.net/ceilometer/+spec/monitoring-network-from-opendaylight</a>
+    </div> 
+    <div>
+     <a href="https://wiki.openstack.org/wiki/Ceilometer/blueprints/monitoring-network" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">https://wiki.openstack.org/wiki/Ceilometer/blueprints/monitoring-network</a>
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     总结图：
+    </div> 
+    <div>
+     <img src="https://images0.cnblogs.com/blog2015/697113/201504/030946270451425.jpg" alt="" style="border:0px;">
+    </div> 
+    <p style="line-height:1.5;">&nbsp;<img src="https://images0.cnblogs.com/blog2015/697113/201504/030946496071064.jpg" alt="" style="border:0px;"></p> 
+   </div> 
+   <div class="clear" style="clear:both;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"></div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <div> 
+     <div>
+      &nbsp; &nbsp; 本文转自SammyLiu博客园博客，原文链接：http://www.cnblogs.com/sammyliu/p/4384470.html，如需转载请自行联系原作者
+     </div> 
+     <div>
+      <br>
+     </div> 
+    </div> 
+    <div>
+     <br>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux设备驱动中的并发控制【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/plinx/archive/2013/01/28/2873121.html    在linux内核中，主要的静态发生于以下几种情况：    　　1、对称多处理器（SMP）的多个CPU：    　　多个CPU共同使用系统总线，可访问共同点...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/07/06/weixin_34025051_90126816.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux设备驱动中的并发控制【转】</h1>
+    <p class="post-meta">Jul 6, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.cnblogs.com/plinx/archive/2013/01/28/2873121.html" rel="nofollow">http://www.cnblogs.com/plinx/archive/2013/01/28/2873121.html</a></p> 
+   <p>在linux内核中，主要的静态发生于以下几种情况：</p> 
+   <p>　　1、对称多处理器（SMP）的多个CPU：</p> 
+   <p>　　多个CPU共同使用系统总线，可访问共同点的外设和存储器。</p> 
+   <p>　　2、单CPU内核进程与抢占它的进程：</p> 
+   <p>　　一个进程的执行可被另一高优先级进程打断。</p> 
+   <p>　　3、中断（硬中断、软中断、Tasklet，底半部）与进程之间：</p> 
+   <p>　　中断可以打断正在执行的进程，若访问该进程正在访问的空间，将引发竞态。</p> 
+   <p>　　上述并发的发生出了SMP是真正的并行以外，其他的都是“宏观并行，微观串行”的，但其引发的实质问题与SMP相似。</p> 
+   <p>　　访问共享字段的代码区域成为临界区（critical sections）</p> 
+   <p>&nbsp;</p> 
+   <p>　　<strong>中断屏蔽：</strong></p> 
+   <p>　　使用方法</p> 
+   <div class="cnblogs_code"> 
+    <pre>local_irq_disable()  <span style="color:#008000;">//<span style="color:#008000;">屏蔽中断 <span style="color:#000000;">... critical section <span style="color:#008000;">//<span style="color:#008000;">临界区 <span style="color:#000000;">... local_irq_enable() <span style="color:#008000;">//<span style="color:#008000;">开中断</span></span></span></span></span></span></span></span></pre> 
+   </div> 
+   <p>　　local_irq_disable/enable只能禁止/使能本CPU内的中断，不能解决SMP多CPU引发的竞态，故不推荐使用，其适宜于自旋锁联合使用。</p> 
+   <p>&nbsp;</p> 
+   <p>　　<strong>原子操作：</strong></p> 
+   <p>　　使用方法</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008000;">//<span style="color:#008000;">设置原子变量的值 <span style="color:#0000ff;">static __inline__ <span style="color:#0000ff;">void atomic_set(atomic_t *v, <span style="color:#0000ff;">int i); <span style="color:#008000;">//<span style="color:#008000;">输入原子指针，将原子变量置为i atomic_t v = ATOMIC_INIT(i);　　　　　　　　　　　　　　　　<span style="color:#008000;">//<span style="color:#008000;">直接将v的原子变量初始化为i <span style="color:#008000;">//<span style="color:#008000;">原子变量的基本操作 atomic_read(atmic_t *v);　　　　　　　　　　<span style="color:#008000;">//<span style="color:#008000;">读值 <span style="color:#0000ff;">void atomic_add/sub(<span style="color:#0000ff;">int i, atomic_t *v); <span style="color:#008000;">//<span style="color:#008000;">加/减i操作 <span style="color:#0000ff;">void atomic_inc/dec(atomic_t *v);　　　　 <span style="color:#008000;">//<span style="color:#008000;">自加/自减操作 <span style="color:#0000ff;">int atomic_inc/dec_test(atomic_t *v);　　<span style="color:#008000;">//<span style="color:#008000;">自加/自减后测试，为0返回ture，否则返回false <span style="color:#0000ff;">int atomic_sub_and_test(<span style="color:#0000ff;">int i, atomic_t *v); <span style="color:#008000;">//<span style="color:#008000;">减i后测试，为0返回ture，否则返回false <span style="color:#0000ff;">int atomic_add/sub_return(<span style="color:#0000ff;">int i, atomic_t *v); <span style="color:#008000;">//<span style="color:#008000;">加/减i后return <span style="color:#0000ff;">int atomic_inc/dec_return(atomic_t *v); <span style="color:#008000;">//<span style="color:#008000;">自加/自减后return　</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>　　一个操作例程</p> 
+   <div> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre><span style="color:#0000ff;">static atomic_t xxx_atomic = ATOMIC_INIT(<span style="color:#800080;">1); <span style="color:#008000;">//<span style="color:#008000;">初始化 <span style="color:#0000ff;">static <span style="color:#0000ff;">int xxx_open(<span style="color:#0000ff;">struct inode *inode, <span style="color:#0000ff;">struct file *<span style="color:#000000;">filp) { ... <span style="color:#0000ff;">if(!atomic_dec_and_test(&amp;<span style="color:#000000;">xxx_atomic)){ <span style="color:#008000;">//<span style="color:#008000;">首次调用xxx_atomic时，其为1，则test后返回ture atomic_inc(&amp;<span style="color:#000000;">xxx_availavle); <span style="color:#008000;">//<span style="color:#008000;">再次调用是执行if(!false){}的内容 <span style="color:#0000ff;">return -<span style="color:#000000;"> EBUSY; } ... <span style="color:#0000ff;">return <span style="color:#800080;">0<span style="color:#000000;">; } <span style="color:#0000ff;">static <span style="color:#0000ff;">int xxx_release(<span style="color:#0000ff;">struct inode *inode, <span style="color:#0000ff;">struct file *<span style="color:#000000;">filp) { atomic_inc(&amp;<span style="color:#000000;">xxx_atomic); <span style="color:#008000;">//<span style="color:#008000;">清楚调用，使其变回初值 <span style="color:#0000ff;">return <span style="color:#800080;">0<span style="color:#000000;">; } <span style="color:#008000;">//<span style="color:#008000;">这里只是举例，并非一定要先dec_test然后inc， 只要前后的操作，不互相冲突， 实现再次调用时返回忙，而释放时使原子变量回到调用前的值即可</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <p>&nbsp;</p> 
+    <p>　　<strong>自旋锁（spin lock）：</strong></p> 
+    <p>　　自旋锁是一种典型的对临界资源进行互斥访问的手段。</p> 
+    <p>　　为了获得一个自旋锁，在某CPU上运行的代码需先执行一个原子操作，该操作测试并设置(test-and-set)某个内存变量，由于它是原子操作，所以在该操作完成之前，其他单元无法访问这个内存变量。</p> 
+    <p>　　自旋锁有四种操作：</p> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre><span style="color:#008000;">//<span style="color:#008000;">定义自旋锁 spinlock_t <span style="color:#0000ff;">lock<span style="color:#000000;">; <span style="color:#008000;">//<span style="color:#008000;">初始化自旋锁 spin_lock_init(<span style="color:#0000ff;">lock<span style="color:#000000;">); <span style="color:#008000;">//<span style="color:#008000;">获得自旋锁 spin_lock(<span style="color:#0000ff;">lock); <span style="color:#008000;">//<span style="color:#008000;">若获得则返回，否则自旋 <span style="color:#000000;"> tryspin_lock(<span style="color:#0000ff;">lock); <span style="color:#008000;">//<span style="color:#008000;">若获得返回真，否则返回假 <span style="color:#008000;">//<span style="color:#008000;">释放自旋锁 spin_unlock(<span style="color:#0000ff;">lock<span style="color:#000000;">); <span style="color:#008000;">//<span style="color:#008000;">自旋锁主要针对SMP或单CPU但内核可以抢占的情况，其他系统或不可抢占的CPU中，自旋锁为空操作</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <p>&nbsp;　　驱动程序中应该谨慎使用自旋锁，原因如下：</p> 
+    <p>　　1、自旋锁是忙等待锁，当等待时间较长的时候将降低系统系能；</p> 
+    <p>　　2、自旋锁可能导致系统死锁（锁陷阱）；</p> 
+    <p>　　3、自旋锁锁定器件不能调用可能引起进程调度的函数。如果进程获得自旋锁之后再阻塞赛，如调用copy_from_user()、copy_to_user()、kmalloc()和msleep()等函数，则可能导致内核崩溃。</p> 
+   </div> 
+   <p>&nbsp;　　接下来深入研究一下自旋锁的工作过程</p> 
+   <div> 
+    <div> 
+     <div> 
+      <div class="cnblogs_code"> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+       <pre><span style="color:#008000;">//<span style="color:#008000;">此处的spin_lock是针对配置了SMP的内核 <span style="color:#0000ff;">static inline <span style="color:#0000ff;">void spin_lock(spinlock_t *<span style="color:#0000ff;">lock<span style="color:#000000;">) { raw_spin_lock(&amp;<span style="color:#0000ff;">lock-&gt;<span style="color:#000000;">rlock); } <span style="color:#0000ff;">#define raw_spin_lock(lock) _raw_spin_lock(lock) <span style="color:#0000ff;">void __lockfunc _raw_spin_lock(raw_spinlock_t *<span style="color:#0000ff;">lock<span style="color:#000000;">) { __raw_spin_lock(<span style="color:#0000ff;">lock<span style="color:#000000;">); } EXPORT_SYMBOL(_raw_spin_lock); <span style="color:#0000ff;">static inline <span style="color:#0000ff;">void __raw_spin_lock(raw_spinlock_t *<span style="color:#0000ff;">lock)　　<span style="color:#008000;">//<span style="color:#008000;">这里开始，便是自旋锁实际的执行过程了 <span style="color:#000000;">{ preempt_disable();　　　　　　　　　　　　　　　　　　　 　　　　　　<span style="color:#008000;">//<span style="color:#008000;">禁止抢占 spin_acquire(&amp;<span style="color:#0000ff;">lock-&gt;dep_map, <span style="color:#800080;">0, <span style="color:#800080;">0<span style="color:#000000;">, _RET_IP_);　　　　 　　　　　　<span style="color:#008000;">//<span style="color:#008000;">判断锁是否为0，lock为0则可以抢占，lock为1则不可抢占 LOCK_CONTENDED(<span style="color:#0000ff;">lock<span style="color:#000000;">, do_raw_spin_trylock, do_raw_spin_lock); 　　　　　　<span style="color:#008000;">//<span style="color:#008000;">使lock为1，即加锁 <span style="color:#000000;">} <span style="color:#008000;">//<span style="color:#008000;">接下来细看一下每个函数的内存实现 <span style="color:#008000;">//<span style="color:#008000;">首先是禁止抢占函数 <span style="color:#0000ff;">#define preempt_disable() \ <span style="color:#0000ff;">do<span style="color:#000000;"> { \ inc_preempt_count(); \ 　　　　　　<span style="color:#008000;">//<span style="color:#008000;">禁止抢占函数的本质就是将preempt_count+1，具体如下（1） <span style="color:#000000;"> barrier(); \ 　　　　　　<span style="color:#008000;">//<span style="color:#008000;">barrier函数是一个内存屏障函数，具体如下（2） } <span style="color:#0000ff;">while (<span style="color:#800080;">0<span style="color:#000000;">) <span style="color:#008000;">//<span style="color:#008000;">（1） <span style="color:#0000ff;">#define preempt_count() (current_thread_info()-&gt;preempt_count) <span style="color:#0000ff;">#define inc_preempt_count() add_preempt_count(1) <span style="color:#0000ff;">#define add_preempt_count(val) do { preempt_count() += (val); } while (0) <span style="color:#008000;">//<span style="color:#008000;">即最后返回为 current_thread_info()-&gt;preempt_count+1 <span style="color:#008000;">//<span style="color:#008000;">（2） <span style="color:#008000;">//<span style="color:#008000;">在linux/arch/cris/include/asm/system.h文件中，可以看到mb函数族的本质就是barrier <span style="color:#0000ff;">#define barrier() __asm__ __volatile__("": : :"memory") <span style="color:#008000;">//<span style="color:#008000;">其实是一个空操作 <span style="color:#0000ff;">#define mb() barrier() <span style="color:#008000;">//<span style="color:#008000;">读写屏障 <span style="color:#0000ff;">#define rmb() mb() <span style="color:#008000;">//<span style="color:#008000;">读屏障 <span style="color:#0000ff;">#define wmb() mb() <span style="color:#008000;">//<span style="color:#008000;">写屏障 <span style="color:#008000;">//<span style="color:#008000;">引用大师的讲解，CPU越过内存屏障后，将刷新自己对存储器的缓冲状态。这条语句实际上不生成任何代码，但可使gcc在barrier()之后刷新寄存器对变量的分配。 <span style="color:#008000;">//<span style="color:#008000;">屏障之所以起到作用，是因为在执行空操作的时候是不允许其他进程对寄存器调用的，而这样的做法，保证了在屏障前执行的操作，和在屏障后执行的操作不互相影响，具体也可参阅《LDK》，上面有个简洁易明的图例 <span style="color:#008000;">//<span style="color:#008000;">接着来看一下spin_acquire()与LOCK_CONTENTDED() <span style="color:#000000;">#ifdef CONFIG_DEBUG_LOCK_ALLOC # ifdef CONFIG_PROVE_LOCKING # define spin_acquire(l, s, t, i) lock_acquire(l, s, t, <span style="color:#800080;">0, <span style="color:#800080;">2<span style="color:#000000;">, NULL, i) # define spin_acquire_nest(l, s, t, n, i) lock_acquire(l, s, t, <span style="color:#800080;">0, <span style="color:#800080;">2<span style="color:#000000;">, n, i) # <span style="color:#0000ff;">else <span style="color:#008000;">//<span style="color:#008000;">CONFIG未设置CONFIG_PROVE_LOCKING情况下 # define spin_acquire(l, s, t, i) lock_acquire(l, s, t, <span style="color:#800080;">0, <span style="color:#800080;">1<span style="color:#000000;">, NULL, i) # define spin_acquire_nest(l, s, t, n, i) lock_acquire(l, s, t, <span style="color:#800080;">0, <span style="color:#800080;">1<span style="color:#000000;">, NULL, i) # endif # define spin_release(l, n, i) lock_release(l, n, i) <span style="color:#0000ff;">#else <span style="color:#008000;">//<span style="color:#008000;">CONFIG未设置CONFIG_DEBUG_LOCK_ALLOC情况下<span style="color:#000000;"> # define spin_acquire(l, s, t, i) <span style="color:#0000ff;">do { } <span style="color:#0000ff;">while (<span style="color:#800080;">0<span style="color:#000000;">) # define spin_release(l, n, i) <span style="color:#0000ff;">do { } <span style="color:#0000ff;">while (<span style="color:#800080;">0<span style="color:#000000;">) <span style="color:#0000ff;">#endif</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+      </div> 
+     </div> 
+     <pre><span style="font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:1.5;">　　首先来仔细看一下spin_acquire()</span></pre> 
+    </div> 
+    <div> 
+     <div class="cnblogs_code"> 
+      <div class="cnblogs_code_toolbar">
+       <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+      </div> 
+      <pre><span style="color:#0000ff;">void lock_acquire(<span style="color:#0000ff;">struct lockdep_map *<span style="color:#0000ff;">lock, unsigned <span style="color:#0000ff;">int<span style="color:#000000;"> subclass, <span style="color:#0000ff;">int trylock, <span style="color:#0000ff;">int read, <span style="color:#0000ff;">int<span style="color:#000000;"> check, <span style="color:#0000ff;">struct lockdep_map *nest_lock, unsigned <span style="color:#0000ff;">long<span style="color:#000000;"> ip) <span style="color:#008000;">//入口参数<span style="color:#008000;">对应为*lock = &amp;lock-&gt;dep_map, subclass = 0, trylock = 0, <span style="color:#008000;">//<span style="color:#008000;">read = 0, check = 1/2, *nest_lock = NULL, ip = _REP_IP_ <span style="color:#000000;">{ unsigned <span style="color:#0000ff;">long<span style="color:#000000;"> flags; <span style="color:#0000ff;">if (unlikely(current-&gt;<span style="color:#000000;">lockdep_recursion)) <span style="color:#008000;">//<span style="color:#008000;">current-&gt;lock_recursion不为0则返回 <span style="color:#0000ff;">return<span style="color:#000000;">; raw_local_irq_save(flags); <span style="color:#008000;">//<span style="color:#008000;">save flags check_flags(flags);　　　　 <span style="color:#008000;">//<span style="color:#008000;">暂时保留、看不是太懂 <span style="color:#000000;"> current-&gt;lockdep_recursion = <span style="color:#800080;">1<span style="color:#000000;">; <span style="color:#008000;">//<span style="color:#008000;">这里将其置1了，可想而知，在另外一个进程调用lock_acquire来获取该dep_map的时候，将直接返回 trace_lock_acquire(<span style="color:#0000ff;">lock<span style="color:#000000;">, subclass, trylock, read, check, nest_lock, ip); __lock_acquire(<span style="color:#0000ff;">lock<span style="color:#000000;">, subclass, trylock, read, check, irqs_disabled_flags(flags), nest_lock, ip, <span style="color:#800080;">0<span style="color:#000000;">); <span style="color:#008000;">//<span style="color:#008000;">接下来在详解该函数，（2） <span style="color:#000000;"> current-&gt;lockdep_recursion = <span style="color:#800080;">0<span style="color:#000000;">; <span style="color:#008000;">//<span style="color:#008000;">再将其置0，使其他进程可以正常调用lock_acquire <span style="color:#000000;"> raw_local_irq_restore(flags); <span style="color:#008000;">//<span style="color:#008000;">接下来再详解该函数，（1） <span style="color:#000000;">} EXPORT_SYMBOL_GPL(lock_acquire); <span style="color:#008000;">//<span style="color:#008000;">（1） <span style="color:#0000ff;">#define raw_local_irq_restore(flags) \ <span style="color:#0000ff;">do<span style="color:#000000;"> { \ typecheck(unsigned <span style="color:#0000ff;">long<span style="color:#000000;">, flags); \ arch_local_irq_restore(flags); \ <span style="color:#008000;">//<span style="color:#008000;">这个暂时不讨论了 } <span style="color:#0000ff;">while (<span style="color:#800080;">0<span style="color:#000000;">) <span style="color:#0000ff;">#define typecheck(type,x) \ <span style="color:#008000;">//<span style="color:#008000;">一个检验类型的函数,type 与 x 类型相同则返回1 <span style="color:#000000;">({ type __dummy; \ <span style="color:#0000ff;">typeof<span style="color:#000000;">(x) __dummy2; \ (<span style="color:#0000ff;">void)(&amp;__dummy == &amp;<span style="color:#000000;">__dummy2); \ <span style="color:#800080;">1<span style="color:#000000;">; \ }) <span style="color:#008000;">//<span style="color:#008000;">（2） <span style="color:#0000ff;">static <span style="color:#0000ff;">int __lock_acquire(<span style="color:#0000ff;">struct lockdep_map *<span style="color:#0000ff;">lock, unsigned <span style="color:#0000ff;">int<span style="color:#000000;"> subclass, <span style="color:#0000ff;">int trylock, <span style="color:#0000ff;">int read, <span style="color:#0000ff;">int check, <span style="color:#0000ff;">int<span style="color:#000000;"> hardirqs_off, <span style="color:#0000ff;">struct lockdep_map *nest_lock, unsigned <span style="color:#0000ff;">long<span style="color:#000000;"> ip, <span style="color:#0000ff;">int<span style="color:#000000;"> references) <span style="color:#008000;">//<span style="color:#008000;">传入参数 *lock = &amp;lock-&gt;dep_map, subclass = 0, trylock = 0, <span style="color:#008000;">//<span style="color:#008000;">read = 0, check = 1/2, hardirqs_off = irqs_disabled_flags(flags), <span style="color:#008000;">//<span style="color:#008000;">*nest_lock = NULL, ip = _RET_IP_<br>//这个函数确实难懂了些= =、姑且略过<br><span style="color:#000000;line-height:1.5;">{<br><span style="color:#0000ff;">struct task_struct *curr =<span style="color:#000000;"> current; <span style="color:#0000ff;">struct lock_class *<span style="color:#0000ff;">class =<span style="color:#000000;"> NULL; <span style="color:#0000ff;">struct held_lock *<span style="color:#000000;">hlock; unsigned <span style="color:#0000ff;">int<span style="color:#000000;"> depth, id; <span style="color:#0000ff;">int chain_head = <span style="color:#800080;">0<span style="color:#000000;">; <span style="color:#0000ff;">int<span style="color:#000000;"> class_idx; u64 chain_key; <span style="color:#0000ff;">if (!<span style="color:#000000;">prove_locking) check = <span style="color:#800080;">1<span style="color:#000000;">; <span style="color:#0000ff;">if (unlikely(!<span style="color:#000000;">debug_locks)) <span style="color:#0000ff;">return <span style="color:#800080;">0<span style="color:#000000;">; <span style="color:#008000;">/*<span style="color:#008000;"> * Lockdep should run with IRQs disabled, otherwise we could * get an interrupt which would want to take locks, which would * end up in lockdep and have you got a head-ache already? <span style="color:#008000;">*/ <span style="color:#0000ff;">if (DEBUG_LOCKS_WARN_ON(!<span style="color:#000000;">irqs_disabled())) <span style="color:#0000ff;">return <span style="color:#800080;">0<span style="color:#000000;">; <span style="color:#0000ff;">if (<span style="color:#0000ff;">lock-&gt;key == &amp;<span style="color:#000000;">__lockdep_no_validate__) check = <span style="color:#800080;">1<span style="color:#000000;">; <span style="color:#0000ff;">if (subclass &lt;<span style="color:#000000;"> NR_LOCKDEP_CACHING_CLASSES) <span style="color:#0000ff;">class = <span style="color:#0000ff;">lock-&gt;<span style="color:#000000;">class_cache[subclass]; <span style="color:#008000;">/*<span style="color:#008000;"> * Not cached? <span style="color:#008000;">*/ <span style="color:#0000ff;">if (unlikely(!<span style="color:#0000ff;">class<span style="color:#000000;">)) { <span style="color:#0000ff;">class = register_lock_class(<span style="color:#0000ff;">lock, subclass, <span style="color:#800080;">0<span style="color:#000000;">); <span style="color:#0000ff;">if (!<span style="color:#0000ff;">class<span style="color:#000000;">) <span style="color:#0000ff;">return <span style="color:#800080;">0<span style="color:#000000;">; } atomic_inc((atomic_t *)&amp;<span style="color:#0000ff;">class-&gt;<span style="color:#000000;">ops); <span style="color:#0000ff;">if (very_verbose(<span style="color:#0000ff;">class<span style="color:#000000;">)) { printk(<span style="color:#800000;">"<span style="color:#800000;">\nacquire class [%p] %s<span style="color:#800000;">", <span style="color:#0000ff;">class-&gt;key, <span style="color:#0000ff;">class-&gt;<span style="color:#000000;">name); <span style="color:#0000ff;">if (<span style="color:#0000ff;">class-&gt;name_version &gt; <span style="color:#800080;">1<span style="color:#000000;">) printk(<span style="color:#800000;">"<span style="color:#800000;">#%d<span style="color:#800000;">", <span style="color:#0000ff;">class-&gt;<span style="color:#000000;">name_version); printk(<span style="color:#800000;">"<span style="color:#800000;">\n<span style="color:#800000;">"<span style="color:#000000;">); dump_stack(); } <span style="color:#008000;">/*<span style="color:#008000;"> * Add the lock to the list of currently held locks. * (we dont increase the depth just yet, up until the * dependency checks are done) <span style="color:#008000;">*/<span style="color:#000000;"> depth = curr-&gt;<span style="color:#000000;">lockdep_depth; <span style="color:#008000;">/*<span style="color:#008000;"> * Ran out of static storage for our per-task lock stack again have we? <span style="color:#008000;">*/ <span style="color:#0000ff;">if (DEBUG_LOCKS_WARN_ON(depth &gt;=<span style="color:#000000;"> MAX_LOCK_DEPTH)) <span style="color:#0000ff;">return <span style="color:#800080;">0<span style="color:#000000;">; class_idx = <span style="color:#0000ff;">class - lock_classes + <span style="color:#800080;">1<span style="color:#000000;">; <span style="color:#0000ff;">if (depth) { hlock = curr-&gt;held_locks + depth - 1; if (hlock-&gt;class_idx == class_idx &amp;&amp; nest_lock) { if (hlock-&gt;references) hlock-&gt;references++; else hlock-&gt;references = 2; return 1; } } hlock = curr-&gt;held_locks + depth; /* * Plain impossible, we just registered it and checked it weren't no * NULL like.. I bet this mushroom I ate was good! */ if (DEBUG_LOCKS_WARN_ON(!class)) return 0; hlock-&gt;class_idx = class_idx; hlock-&gt;acquire_ip = ip; hlock-&gt;instance = lock; hlock-&gt;nest_lock = nest_lock; hlock-&gt;trylock = trylock; hlock-&gt;read = read; hlock-&gt;check = check; hlock-&gt;hardirqs_off = !!hardirqs_off; hlock-&gt;references = references; #ifdef CONFIG_LOCK_STAT hlock-&gt;waittime_stamp = 0; hlock-&gt;holdtime_stamp = lockstat_clock(); #endif if (check == 2 &amp;&amp; !mark_irqflags(curr, hlock)) return 0; /* mark it as used: */ if (!mark_lock(curr, hlock, LOCK_USED)) return 0; /* * Calculate the chain hash: it's the combined hash of all the * lock keys along the dependency chain. We save the hash value * at every step so that we can get the current hash easily * after unlock. The chain hash is then used to cache dependency * results. * * The 'key ID' is what is the most compact key value to drive * the hash, not class-&gt;key. */ id = class - lock_classes; /* * Whoops, we did it again.. ran straight out of our static allocation. */ if (DEBUG_LOCKS_WARN_ON(id &gt;= MAX_LOCKDEP_KEYS)) return 0; chain_key = curr-&gt;curr_chain_key; if (!depth) { /* * How can we have a chain hash when we ain't got no keys?! */ if (DEBUG_LOCKS_WARN_ON(chain_key != 0)) return 0; chain_head = 1; } hlock-&gt;prev_chain_key = chain_key; if (separate_irq_context(curr, hlock)) { chain_key = 0; chain_head = 1; } chain_key = iterate_chain_key(chain_key, id); if (!validate_chain(curr, lock, hlock, chain_head, chain_key)) return 0; curr-&gt;curr_chain_key = chain_key; curr-&gt;lockdep_depth++; check_chain_key(curr); #ifdef CONFIG_DEBUG_LOCKDEP if (unlikely(!debug_locks)) return 0; #endif if (unlikely(curr-&gt;lockdep_depth &gt;= MAX_LOCK_DEPTH)) { debug_locks_off(); printk("BUG: MAX_LOCK_DEPTH too low!\n"); printk("turning off the locking correctness validator.\n"); dump_stack(); return 0; } if (unlikely(curr-&gt;lockdep_depth &gt; max_lockdep_depth)) max_lockdep_depth = curr-&gt;lockdep_depth; return 1; }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+      <div class="cnblogs_code_toolbar">
+       <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+      </div> 
+     </div> 
+     <p>　　继续往下看一下LOCK_CONTENDED()</p> 
+     <div> 
+      <div class="cnblogs_code"> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+       <pre><span style="color:#008000;">//<span style="color:#008000;">入口参数为(lock, do_raw_spin_trylock, do_raw_spin_lock) <span style="color:#0000ff;">#define LOCK_CONTENDED(_lock, try, lock) \ <span style="color:#0000ff;">do<span style="color:#000000;"> { \ <span style="color:#0000ff;">if (!<span style="color:#0000ff;">try<span style="color:#000000;">(_lock)) { \ <span style="color:#008000;">//<span style="color:#008000;">这里实际为 do_raw_spin_trylock(lock), 具体如下（1） lock_contended(&amp;(_lock)-&gt;<span style="color:#000000;">dep_map, _RET_IP_); \ <span style="color:#008000;">//<span style="color:#008000;">详解如下（2） <span style="color:#0000ff;">lock<span style="color:#000000;">(_lock); \ <span style="color:#008000;">//<span style="color:#008000;">这里实际为 do_raw_spin_lock(lock), 具体如下（3） <span style="color:#000000;"> } \ lock_acquired(&amp;(_lock)-&gt;<span style="color:#000000;">dep_map, _RET_IP_); \ <span style="color:#008000;">//<span style="color:#008000;">详解如下（4） } <span style="color:#0000ff;">while (<span style="color:#800080;">0<span style="color:#000000;">) <span style="color:#008000;">//<span style="color:#008000;">（1） <span style="color:#0000ff;">static inline <span style="color:#0000ff;">int do_raw_spin_trylock(raw_spinlock_t *<span style="color:#0000ff;">lock<span style="color:#000000;">) { <span style="color:#0000ff;">return arch_spin_trylock(&amp;(<span style="color:#0000ff;">lock)-&gt;<span style="color:#000000;">raw_lock); } # define arch_spin_trylock(<span style="color:#0000ff;">lock) ({ (<span style="color:#0000ff;">void)(<span style="color:#0000ff;">lock); <span style="color:#800080;">1<span style="color:#000000;">; }) <span style="color:#008000;">//<span style="color:#008000;">实际返回值都是为1，写个小程序验证下就明白了 <span style="color:#008000;">//<span style="color:#008000;">在锁机制中, 若上锁了则lock 为1, 否则 为0 <span style="color:#008000;">//<span style="color:#008000;">（2） <span style="color:#008000;">//<span style="color:#008000;">好吧、到此为止先了……这里的函数真的比较深、能力所限看不太懂 <span style="color:#0000ff;">void lock_contended(<span style="color:#0000ff;">struct lockdep_map *<span style="color:#0000ff;">lock, unsigned <span style="color:#0000ff;">long<span style="color:#000000;"> ip) { unsigned <span style="color:#0000ff;">long<span style="color:#000000;"> flags; <span style="color:#0000ff;">if (unlikely(!<span style="color:#000000;">lock_stat)) <span style="color:#0000ff;">return<span style="color:#000000;">; <span style="color:#0000ff;">if (unlikely(current-&gt;<span style="color:#000000;">lockdep_recursion)) <span style="color:#0000ff;">return<span style="color:#000000;">; raw_local_irq_save(flags); check_flags(flags); current-&gt;lockdep_recursion = <span style="color:#800080;">1<span style="color:#000000;">; trace_lock_contended(<span style="color:#0000ff;">lock<span style="color:#000000;">, ip); __lock_contended(<span style="color:#0000ff;">lock<span style="color:#000000;">, ip); current-&gt;lockdep_recursion = <span style="color:#800080;">0<span style="color:#000000;">; raw_local_irq_restore(flags); } EXPORT_SYMBOL_GPL(lock_contended);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+      </div> 
+      <p>　　一个自旋锁机制的内核实现确实是博大精深。</p> 
+      <p>　　若只挑简单的地方来理解，可以只理解总结为如下步奏来实现一个自旋锁</p> 
+      <p>　　1、声明锁变量</p> 
+      <p>　　2、上锁</p> 
+      <p>　　3、临界区</p> 
+      <p>　　4、解锁</p> 
+      <p>&nbsp;</p> 
+      <p>　　<strong>顺序锁（seqlock）:</strong></p> 
+      <p><strong>　　</strong>顺序锁是对读写锁的一种优化，若使用顺序锁，读与写操作不阻塞，只阻塞同种操作，即读与读/写与写操作。</p> 
+      <p>　　写执行单元的操作顺序如下：</p> 
+      <div class="cnblogs_code"> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+       <pre><span style="color:#008000;">//<span style="color:#008000;">获得顺序锁 <span style="color:#0000ff;">void write_seqlock(seqlock_t *<span style="color:#000000;">s1); <span style="color:#0000ff;">int write_tryseqlock(seqlock_t *<span style="color:#000000;">s1); write_seqlock_irqsave(<span style="color:#0000ff;">lock<span style="color:#000000;">, flags) write_seqlock_irq(<span style="color:#0000ff;">lock<span style="color:#000000;">) write_seqlock_bh(<span style="color:#0000ff;">lock<span style="color:#000000;">) <span style="color:#008000;">//<span style="color:#008000;">释放顺序锁 <span style="color:#0000ff;">void write_sequnlock(seqlock_t *<span style="color:#000000;">s1); write_sequnlock_irqrestore(<span style="color:#0000ff;">lock<span style="color:#000000;">, flags) write_sequnlock_irq(<span style="color:#0000ff;">lock<span style="color:#000000;">) write_sequnlock_bh(<span style="color:#0000ff;">lock)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+      </div> 
+      <p>　　读执行单元的操作顺序</p> 
+      <div class="cnblogs_code"> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+       <pre><span style="color:#008000;">//<span style="color:#008000;">读开始 unsinged read_seqbegin(<span style="color:#0000ff;">const seqlock_t *<span style="color:#000000;">s1); read_seqbegin_irqsave(<span style="color:#0000ff;">lock<span style="color:#000000;">, flags) <span style="color:#008000;">//<span style="color:#008000;">重读，读执行单元在访问完被顺序锁s1保护的共享资源后需要调用该函数来检查在读操作器件是否有写操作，如果有，读执行单元需要从新读一次。 <span style="color:#0000ff;">int reead_seqretry(<span style="color:#0000ff;">const seqlock_t *<span style="color:#000000;">s1, unsigned iv); read_seqretry_irqrestore(<span style="color:#0000ff;">lock, iv, flags)</span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+      </div> 
+      <p>&nbsp;</p> 
+      <p>　　<strong>读-拷贝-更新（RCU,Read-Copy Update）：</strong></p> 
+      <p>　　对于被RCU保护的功效数据结构，读执行单元不需要获得任何锁就可以访问它，不使用原子指令，而且在除alpha的所有架构上也不需要内存屏障（Memory Barrier），因此不会导致锁竞争、内存延迟以及流水线停滞。使用RCU的写执行单元在访问它前需要首先拷贝一个副本，然后对副本进行修改，最后使用一个回调机制在适当的实际把指向原来数据的指针重新指向新的被修改的数据，这个时机就是所有引用该数据的CPU都退出对共享数据的操作的时候。</p> 
+      <p>　　RCU可以看作读写锁的高性能版本，相比读写锁，RCU的优点在于既允许多个读执行单元同时访问被保护的数据，又允许多个读执行单元和多个写执行单元同时访问被保护的数据。但是RCU不能替代读写锁，因为如果写比较多时，对读执行单元的性能提高不能弥补写执行单元导致的损失。</p> 
+      <p>　　具体操作：略</p> 
+      <p>&nbsp;</p> 
+      <p>　　<strong>信号量（semaphore）：</strong></p> 
+      <p>　　信号量是用于保护临界区的一种常用方法，它的使用方式和自旋锁类似。</p> 
+      <p>　　相同点：只有得到信号量的进程才能执行临界区的代码。</p> 
+      <p>　　（linux自旋锁和信号量锁采用的都是“获得锁-访问临界区-释放锁”，可以称为“互斥三部曲”，实际存在于几乎所有多任务操作系统中）</p> 
+      <p>　　不同点：当获取不到信号量时，进程不会原地打转而是进入休眠等待状态。</p> 
+      <div class="cnblogs_code"> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+       <pre><span style="color:#008000;">//<span style="color:#008000;">信号量的结构 <span style="color:#0000ff;">struct<span style="color:#000000;"> semaphore sem; <span style="color:#008000;">//<span style="color:#008000;">初始化信号量 <span style="color:#0000ff;">void sema_init(<span style="color:#0000ff;">struct semaphore *sem, <span style="color:#0000ff;">int<span style="color:#000000;"> val) <span style="color:#008000;">//<span style="color:#008000;">常用下面两种形式 <span style="color:#0000ff;">#define init_MUTEX(sem) sema_init(sem, 1) <span style="color:#0000ff;">#define init_MUTEX_LOCKED(sem) sema_init(sem, 0) <span style="color:#008000;">//<span style="color:#008000;">以下是初始化信号量的快捷方式，最常用的 DECLARE_MUTEX(name) <span style="color:#008000;">//<span style="color:#008000;">初始化name的信号量为1 DECLARE_MUTEX_LOCKED(name) <span style="color:#008000;">//<span style="color:#008000;">初始化信号量为0 <span style="color:#008000;">//<span style="color:#008000;">常用操作 <span style="color:#000000;">DECLARE_MUTEX(mount_sem); down(&amp;mount_sem); <span style="color:#008000;">//<span style="color:#008000;">获取信号量 <span style="color:#000000;">... critical section <span style="color:#008000;">//<span style="color:#008000;">临界区 <span style="color:#000000;">... up(&amp;mount_sem); <span style="color:#008000;">//<span style="color:#008000;">释放信号量</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+       <div class="cnblogs_code_toolbar">
+        <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+       </div> 
+      </div> 
+      <p>　　信号量用于同步时只能唤醒一个执行单元，而完成量（completion）用于同步时可以唤醒所有等待的执行单元。</p> 
+      <p>&nbsp;</p> 
+      <p>　　<strong>自旋锁与互斥锁的选择</strong></p> 
+      <p>　　1、当锁 不能被获取到时，使用信号量的开销是进程上下文切换时间Tsw，使用自旋锁的开始是等待获取自旋锁的时间Tcs，若Tcs比较小，则应使用自旋锁，否则应使用信号量</p> 
+      <p>　　2、信号量锁保护的临界区可以包含引起阻塞的代码，而自旋锁则却对要避免使用包含阻塞的临界区代码，否则很可能引发锁陷阱</p> 
+      <p>　　3、信号量存在于进程上下文，因此，如果被保护的共享资源需要在中断或软中断情况下使用，则在信号量和自旋锁之间只能选择自旋锁。当然，如果一定要使用信号量，则只能通过down_trylock()方式进行，不能获取就立即返回以避免阻塞。</p> 
+      <p>&nbsp;</p> 
+      <p>　　读写信号量：与读写信号锁相似，是一种放宽粒度的实现机制。</p> 
+      <p>　　</p> 
+      <p>&nbsp;</p> 
+      <p>　　小结一下并发控制这一部分：</p> 
+      <p>　　 现在的处理器基本上都是SMP类型的，而且在新的内核版本中，基本上都支持抢占式的操作，在linux中很多程序都是可重入的，要保护这些数据，就得使用不同的锁机制。</p> 
+      <p>　　而锁机制的基本操作过程其实大同小异的，声明变量，上锁，执行临界区代码，然后再解锁。</p> 
+      <p>　　不同点在于，可以重入的限制不同，有的可以无限制重入，有的只允许异种操作重入，而有的是不允许重入操作的。</p> 
+      <p>　　而在考虑不同的锁机制的使用时，也要考虑CPU处理的效率问题，对于不同的代码长度，不同的代码执行时间，选择一个好的锁对CPU的良好使用有很大的影响，否则将造成浪费。<span style="font-size:14px;line-height:1.5;">&nbsp;</span></p> 
+     </div> 
+    </div> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

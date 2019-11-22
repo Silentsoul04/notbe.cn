@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>大话Linux内核中锁机制之原子操作、自旋锁【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.sina.com.cn/s/blog_6d7fa49b01014q7p.html    多人会问这样的问题，Linux内核中提供了各式各样的同步锁机制到底有何作用？追根到底其实是由于操作系统中存在多进程对共享资源的并发访问，从而引起了进程间的竞态。这其中包括...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/07/05/weixin_34379433_90126434.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">大话Linux内核中锁机制之原子操作、自旋锁【转】</h1>
+    <p class="post-meta">Jul 5, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://blog.sina.com.cn/s/blog_6d7fa49b01014q7p.html" rel="nofollow">http://blog.sina.com.cn/s/blog_6d7fa49b01014q7p.html</a></p> 
+   <p><span style="font-family:'宋体';font-size:medium;">多人会问这样的问题，Linux内核中提供了各式各样的同步锁机制到底有何作用？追根到底其实是由于操作系统中存在多进程对共享资源的并发访问，从而引起了进程间的竞态。这其中包括了我们所熟知的SMP系统，多核间的相互竞争资源，单CPU之间的相互竞争，中断和进程间的相互抢占等诸多问题。</span></p> 
+   <p>通常情况下，如图1所示，对于一段程序，我们的理想是总是美好的，希望它能够这样执行：进程1先对临界区完成操作，然后进程2再去操作临界区。但是往往现实总是残酷的，进程1在执行过程中，进程2很可能在此插入一脚，导致两个进程同时对临界区进行读写访问，读是没有问题，但写的话问题就大了。这样的话，得到的结果往往不是我们想要的。</p> 
+   <p>&nbsp;</p> 
+   <p>图1&nbsp; 一个简单的例子</p> 
+   <p>因此，我们需要一些解决方法，在Linux内核中它提供了如下几种锁机制，供用户在针对不同情况分别或配合使用，包括：原子操作、自旋锁、内存屏障、读写自旋锁、顺序锁、信号量、读写信号量、完成量、RCU机制、BKL(大内核锁)等等，下面笔者将分五篇博文一一讨论这些锁机制。另外，本文所涉及的关于Linux内核源码采用版本为：Linux 3.3.1。OK，让我们首先讨论有关原子操作和自旋锁的相关内容吧。</p> 
+   <h2>一、原子操作</h2> 
+   <p>所谓的原子操作即是保证指令以原子的方式执行，它在执行过程中不被打断。它包括了原子整数操作和原子位操作，在内核中分别定义于include\linux\types.h和arch\x86\include\asm\bitops.h。通常了解一个东西，我们是先了解它怎么用的，因此，我们先来看看内核提供给用户的一些接口函数。对于整数原子操作函数，如下图1.1所示，下述有关加法的操作在内核中均有相应的减法操作。</p> 
+   <p>&nbsp;</p> 
+   <p>图1.1 &nbsp;&nbsp;&nbsp;&nbsp; 内核中的整数原子操作函数</p> 
+   <p>如图1.2展示的是内核中提供的一些主要位原子操作函数。同时内核还提供了一组与上述操作对应的非原子位操作函数，名字前多两下划线。由于不保证原子性，因此速度可能执行更快。</p> 
+   <p>&nbsp;</p> 
+   <p>图1.2 &nbsp;&nbsp;&nbsp;&nbsp; 内核中的位原子操作函数</p> 
+   <p>下面笔者展示一个关于原子操作的具体例子，请注意加粗部分的内容，它的作用是实现了设备只能被一个进程打开。配合注释的内容，应该不难理解，如图1.3所示。</p> 
+   <p>&nbsp;</p> 
+   <p>图1.3 &nbsp;&nbsp;&nbsp;&nbsp; 原子操作示例程序</p> 
+   <p>下面给出笔者在讨论关于原子操作的认为的一些比较重要的内容：1、原子操作在不同体系架构实现的方法不同，基本采用汇编实现；2、上述的整数原子函数集仅针对32位，内核中关于64位有另一套函数。3、对于SMP系统，内核还提供了local_t数据类型，实现对单个CPU的整数原子操作，接口函数仅将atomic_替换成local_即可，具体的定义可参见arch/x86/include/asm/local.h中定义。</p> 
+   <p>接下来看它的实现核心，如图1.4所示。鉴于篇幅的限制，中间关于SMP的汇编操作在这里省去，感兴趣的读者可参见具体的内核源码。</p> 
+   <p>&nbsp;</p> 
+   <p>图1.4 &nbsp;&nbsp;&nbsp;&nbsp; 原子操作的实现核心</p> 
+   <p>可以看到对于SMP系统，它的实现核心是lock指令，而对于单CPU系统来说，则退化为空操作，因为对于单CPU来说，在某程序执行期间，不可能有其它CPU来中断它的执行，因此，实际上，非SMP系统中的原子操作是没有必要存在的。下面讨论SMP系统。讨论前，先了解x86中的lock指令。lock指令是一种前缀，它可与其他指令联合，用来维持总线的锁存信号直到与其联合的指令执行完为止。当CPU与其他处理机协同工作时，该指令可避免破坏有用信息。它对中断没有任何影响，因为中断只能在指令之间产生。lock前缀的真正作用是保持对系统总线的控制，直到整条指令执行完毕。</p> 
+   <p>了解完lock指令的作用后，对于原子操作采用lock指令的原因就已经很明显。但需注意：lock指令只是针对自身CPU进行处理。lock指令在执行中占用CPU资源，从硬件上考虑，多核之间要负责相互通信，要让某个核的修改被其他核发现，因此lock指令的过多使用必然降低系统的性能。</p> 
+   <p>至此，关于原子操作的内容基本上讨论到这里。总结一下，对于原子操作，它的优点就是简单，但它的缺点也很明了，即是只能作计数操作，保护的东西太少，从它所提供的接口函数即可看出。</p> 
+   <h2>二、自旋锁</h2> 
+   <p>接下来笔者将讨论关于自旋锁的内容。它的定义可表述如下：某个进程在试图加锁的时候，若当前锁已经处于“锁定”状态，试图加锁进程就进行不断的“旋转”，用一个死循环测试锁的状态，直到成功的获得锁。它在内核include\linux\spinlock_types.h中定义，核心的结构体及成员如图2.1所示。</p> 
+   <p>图2.1 &nbsp;&nbsp;&nbsp;&nbsp; 自旋锁核心结构体及成员</p> 
+   <p>下面首先看下自旋锁提供了哪些函数，依次定义include\linux\spinlock.h文件中，部分函数如图2.2所示。</p> 
+   <p>&nbsp;</p> 
+   <p>图2.2 &nbsp;&nbsp;&nbsp;&nbsp; 自旋锁提供的部分接口函数</p> 
+   <p>同样配合的看个例子，这个例子其实就是对device_count变量的保护，例子如图2.3所示，同样需注意加粗部分。仔细研究这个例子对于后续了解顺序锁有很大帮助，到时读者便会发现它其实是顺序锁的核心实现理念。</p> 
+   <p>&nbsp;</p> 
+   <p>图2.3 &nbsp;&nbsp;&nbsp;&nbsp; 自旋锁示例程序</p> 
+   <p>上面关于自旋锁的例子应该不难理解，下面让我们深入自旋锁加解锁的核心源码，进一步来看下它到底是怎么实现的。首先，对于单CPU来说，它的机制实际上就是禁止和使能抢占，下图展示的是自旋锁加锁和解锁在内核中层层迭代的源码，特别注意加粗部分内容。深入琢磨下去，实际上这里牵扯到一个“引用计数器”的概念。它是内存管理的一个技巧，可以看做C/C++中的一种垃圾回收机制，具体的内容读者可以去了解，这里不再细说。</p> 
+   <p>&nbsp;</p> 
+   <p>图2.4 &nbsp;&nbsp;&nbsp;&nbsp; 自旋锁单CPU的加锁函数实现核心</p> 
+   <p>以上展示的是一个内核加锁函数的源码实现的过程，实际上对于解锁也是这么一个过程。如图2.5所示。</p> 
+   <p>&nbsp;</p> 
+   <p>图2.5 &nbsp;&nbsp;&nbsp;&nbsp; 自旋锁针对单CPU的实现源码</p> 
+   <p>总结来说，其实对于单CPU来说，其实就是很简单的内容，对于CPU存在内核抢占机制的，将禁止内核抢占，否则，退化为空操作。</p> 
+   <p>对于SMP系统来说，它除了简单的禁止或使能本CPU的抢占机制外，还做了一些另外的操作。通过源码的搜索，我们可以发现它的实现核心其实是图2.6中所展示的两个函数，采用AT&amp;T汇编实现。看的挺复杂，但实际上分析起来还是很简单的。</p> 
+   <p>&nbsp;</p> 
+   <p>图2.6 &nbsp;&nbsp;&nbsp;&nbsp; 自旋锁针对SMP系统的实现源码</p> 
+   <p>在这里，我们可以看到它真正实现了对于多进程的之间某个进程“自旋的情况”，看源码前先记住几条指令：”xaddw”, ”cmpb”, “movb”, “incb”，其中xaddw表示先交换源操作数和目的操作数的数值，然后两个操作数再按字求和，最终结果保存在目的寄存器中；”cmpb”, “movb”, “incb”较为简单，后续的b（byte）后缀表示按字节执行这条指令。同时注意在Linux内核中，采用的AT&amp;T汇编格式，指令操作数的顺序是先源后目的，而不是x86汇编中的先目的后源，如图2.6中的“xaddw”汇编指令则是%1所代表的寄存器为目的寄存器，即lock-&gt;slock变量。下面我们看下具体的执行过程，其中P1，P2表示系统中的两个不同的进程，如图2.7所描述。</p> 
+   <p>&nbsp;</p> 
+   <p>图2.7 &nbsp;&nbsp;&nbsp;&nbsp; 自旋锁内核的执行过程</p> 
+   <p>到这里，读者应该明白了到底自旋锁是怎么实现自旋的。注意：对于“xaddw”它实际上完成了三条指令的事，为了防止被这个过程被打断，所以加了LOCK_PREFIX宏，在前面的原子操作我们也看到了LOCK_PREFIX宏实际上是针对lock指令的包装，当然是针对SMP系统。</p> 
+   <p>当然，上述给出的源码是最大只支持256个处理器的情况，对于操作256个处理器的时候，内核中还有一套函数去处理，感兴趣的可以去研究下。可能分析完源码后有人会提出这个的疑问：如果P2和P3都在等待自旋锁，Linux系统如何保证能够正确的顺序执行呢？其实，这个在源码中已经体现出来了，实际上，考虑slcok的值，我们可以观察到它实际上已经保证了后续在等待自旋锁的进程的顺序执行性，比如上述分析过程中我们得到P2的slcok=0x0201，假如P1还未释放，P3又来申请自旋锁，这时候，内核经过计算得到P3的slcok=0x0301。进而继续分析源码，我们可知P3要想执行，必须得到P2执行完毕后（此时slcok=0x0302），方可有条件（slcok经过低8位加1后等于0x0303）申请到自旋锁，从而无形中保证了申请自旋锁进程的顺序执行性。由于slock只有高8位用于保证顺序性，所以这段源码最大只支持256个处理器同时申请自旋锁。</p> 
+   <p>另外说到自旋锁，不得不提自旋锁和中断之间的关系，首先看一个双重请求的例子，假如某一进程在临界区正在执行，然而这时候，突然有一个中断来打断了它，于是，在临界区触发了中断处理程序，若中断处理程序里面也有包含申请自旋锁的操作，这将造成一个大问题，即所谓的双重请求的例子。如下图2.8所示。</p> 
+   <p>&nbsp;</p> 
+   <p>图2.8 &nbsp;&nbsp;&nbsp;&nbsp; 双重请求图例</p> 
+   <p>当然内核当然考虑了此种情况，于是在自旋锁中就有了关于关闭中断的函数：spin_lock_irq()和spin_unlock_irq()。如图2.9代码所示的函数，但正如图中所提的那样，这两个函数的使用是有条件的，它要求中断在加锁前必须是激活的。假如现在有一个进程，它的中断本来就是关闭的，但是你通过这个锁的过程后中断变成开了，这不就又造成问题了吗。考虑此种情况，内核中提出了如图2.10所展示的自旋锁函数：spin_lock_irqsave()和spin_unlock_irqrestore()。可能读者在此会有些许疑惑，既然flags是作为spin_lock_irqsave()的输出参数，理论上应当要有”&amp;”符号才对，这里却没有。事实上，spin_lock_irqsave()中flags不用“&amp;”是因为这个函数是以宏形式定义的，一直嵌套，最终到arch\x86\include\asm\irqflags.h下，感兴趣的搜索到本源。一般来说，若是输出参数不带”&amp;”符号的函数，几乎都是采用宏形式的定义的，这点需注意。</p> 
+   <div>
+    &nbsp;
+   </div> 
+   <p>&nbsp; &nbsp; &nbsp; &nbsp;图2.9&nbsp; spin_lock_irq()的使用实例&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;图2.10&nbsp; spin_lock_irqsave()的使用实例</p> 
+   <p>关于中断下半部的问题，还有几点需要说明。首先如果存在中断下半部和某个进程之间存在数据共享的问题，那就需要注意一下，因为中断下半部可抢占进程上下文，因此下半部和进程之间存在临界区时除了加锁，还需要禁止下半部执行。内核中提供的包括函数spin_lock_bh() 和spin_unlock_bh()即是实现禁止或使能下半部。同时关于自旋锁中的中断还有两点要说明：① 若中断处理程序与中断下半部共享数据，则对数据区加锁的同时也要禁止中断，因为中断也是可抢占中断下半部。② 若数据被软中断共享，也需要加锁，因为在不同处理器上存在软中断同时执行问题。</p> 
+   <p>OK！上述讨论了自旋锁多方面的内容，下面是对自旋锁一番总结。首先从前面的实现机制上，读者可以看到自旋锁主要针对SMP系统，而且它们存在抢占情况。对于单CPU系统，自旋锁的实现则退化为空操作。其次自旋锁是忙等待，要求临界区执行时间短。再次自旋锁可能引发死锁，引发的情况有：自旋锁的递归调用（双重请求）或获得自旋锁后不释放，最终将导致系统不可用。最后一点则是若自旋锁在锁定期间调用可能引发睡眠的函数，如kmalloc()等，从此“一睡不醒”(因为这时候“无人”负责唤醒，主要原因是连中断都被关闭了，从此在无人唤醒，除非重启系统)。这一点需特别注意。</p> 
+   <p>至此，关于自旋锁部分的内容到此讨论结束，让我们跳出来观全局，如图2.11所示。其实抽象的看自旋锁的实现机制还是挺简单的，而它提供的关于中断的一系列函数则为自旋锁提供了“安全带”的作用。</p> 
+   <p>&nbsp;</p> 
+   <p>图2.11 &nbsp;&nbsp; 跳出来观全局—自旋锁实现机制</p> 
+   <p>出于文章篇幅的限制，本篇博文到此结束，后续将会给出《大话Linux内核中锁机制之内存屏障、读写自旋锁及顺序锁》，感兴趣的读者可继续阅读后一篇博文。由于笔者水平所限，博文中难免有出错之处，欢迎读者指出，大家相互讨论，共同进步。</p> 
+   <p>转载请注明出处：http://blog.sina.com.cn/huangjiadong19880706</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux mmap 详解【转】 « NotBeCN</title>
+  <meta name="description" content="                 转自：http://blog.chinaunix.net/uid-20321537-id-3483405.html            一.前言        mmap的具体实现以前在学习内核时学习过，但是对于其中的很多函数是一知半解的，有些只能根据其函数名来猜测其具体的功能，...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_34314962_90119170.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux mmap 详解【转】</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="Blog_wz1" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <strong>转自：<a href="http://blog.chinaunix.net/uid-20321537-id-3483405.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://blog.chinaunix.net/uid-20321537-id-3483405.html</a></strong>
+   </div> 
+   <div class="Blog_wz1"> 
+    <strong style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">一.前言</strong>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">mmap的具体实现以前在学习内核时学习过，但是对于其中的很多函数是一知半解的，有些只能根据其函数名来猜测其具体的功能，在本文中，一起来重新深入理解其</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">具体的实现。</span></font>
+    <br>
+    <br>
+    <strong style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">二.mmap的用户层应用</strong>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">void *mmap(void *start,size_t length,int prot,int flags,int fd,off_t offsize);&nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">具体参数含义</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">start ：&nbsp; 指向欲映射的内存起始地址，通常设为 NULL，代表让系统自动选定地址，映射成功后返回该地址。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">length：&nbsp; 代表将文件中多大的部分映射到内存。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">prot&nbsp; ：&nbsp; 映射区域的保护方式。可以为以下几种方式的组合：</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PROT_EXEC 映射区域可被执行</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PROT_READ 映射区域可被读取</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PROT_WRITE 映射区域可被写入</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PROT_NONE 映射区域不能存取</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">flags ：&nbsp; 影响映射区域的各种特性。在调用mmap()时必须要指定MAP_SHARED 或MAP_PRIVATE。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAP_FIXED 如果参数start所指的地址无法成功建立映射时，则放弃映射，不对地址做修正。通常不鼓励用此旗标。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAP_SHARED 对映射区域的写入数据会复制回文件内，而且允许其他映射该文件的进程共享。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAP_PRIVATE 对映射区域的写入操作会产生一个映射文件的复制，即私人的“写入时复制”（copy on write）对此区域作的任何修改都不会写回原来的文件内容。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAP_ANONYMOUS建立匿名映射。此时会忽略参数fd，不涉及文件，而且映射区域无法和其他进程共享。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAP_DENYWRITE只允许对映射区域的写入操作，其他对文件直接写入的操作将会被拒绝。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAP_LOCKED 将映射区域锁定住，这表示该区域不会被置换（swap）。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">fd&nbsp;&nbsp;&nbsp; ：&nbsp; 要映射到内存中的文件描述符。如果使用匿名内存映射时，即flags中设置了MAP_ANONYMOUS，fd设为-1。有些系统不支持匿名内存映射，则可以使用fopen打开/dev/zero文件，</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 然后对该文件进行映射，可以同样达到匿名内存映射的效果。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">offset：文件映射的偏移量，通常设置为0，代表从文件最前方开始对应，offset必须是PAGE_SIZE的整数倍。</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">返回值：</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 若映射成功则返回映射区的内存起始地址，否则返回MAP_FAILED(－1)，错误原因存于errno 中。</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">错误代码：</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EBADF&nbsp; 参数fd 不是有效的文件描述词</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EACCES 存取权限有误。如果是MAP_PRIVATE 情况下文件必须可读，使用MAP_SHARED则要有PROT_WRITE以及该文件要能写入。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EINVAL 参数start、length 或offset有一个不合法。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EAGAIN 文件被锁住，或是有太多内存被锁住。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ENOMEM 内存不足。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">用户层的调用很简单，其具体功能就是直接将物理内存直接映射到用户虚拟内存，使用户空间可以直接对物理空间操作。但是对于内核层而言，其具体实现比较复杂。</span></font>
+    <br>
+    <br>
+    <strong style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">三.mmap的内核实现</strong>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">对于mmap的内核有了解的都会知道用户层的mmap到内核层的mmap其中多了一个参数vma_struct这个结构体，在开始时对于这个参数很疑惑就是这个参数的值是哪儿来的，</span></font>
+    <br>
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在这里我们会一一来讲述。</p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">mmap() ---&gt; sys_mmap_pgoff() 内核系统调用函数</p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">munmap() ---&gt;sys_munmap() 内核系统调用函数，其最终调用unmap_region()来解除映射关系,不需要对应的file_operation有unmap操作项.</p> 
+    <font color="#666666"><span style="font-size:14px;">还是从do_mmap开始吧。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">3.1 do_mmap</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">参数说明：</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">file&nbsp; :就是用户层想要映射的file</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">addr&nbsp; :欲映射的起始地址，即用户层的start</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">prot&nbsp; :用户层传入的port</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">flag&nbsp; :同上</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">offset:同上</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">从这里可以知道，这里面的参数几乎均是用户层传入的参数。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">static inline unsigned long do_mmap(struct file *file, unsigned long addr,unsigned long len, unsigned long prot,</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned long flag, unsigned long offset)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">{</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; unsigned long ret = -EINVAL;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if ((offset + PAGE_ALIGN(len)) &lt; offset)&nbsp;&nbsp;--页对齐len，检测传入参数是否有误。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (!(offset &amp; ~PAGE_MASK))&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --检测offset是否页对齐。映射时只能映射页对齐的长度。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = do_mmap_pgoff(file, addr, len, prot, flag, offset &gt;&gt; PAGE_SHIFT); &nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">out:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; return ret;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">}</span></font>
+    <br>
+    <br>
+    <strong style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">3.2 do_mmap_pgoff</strong>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">这个函数是巨大的。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,unsigned long len, unsigned long prot,unsigned long flags, unsigned long pgoff)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">{</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct mm_struct * mm = current-&gt;mm;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --当前用户进程的mm</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct inode *inode;&nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; unsigned int vm_flags;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; int error;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; int accountable = 1;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; unsigned long reqprot = prot;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if ((prot &amp; PROT_READ) &amp;&amp; (current-&gt;personality &amp; READ_IMPLIES_EXEC))&nbsp;&nbsp; --是否隐藏了可执行属性。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!(file &amp;&amp; (file-&gt;f_path.mnt-&gt;mnt_flags &amp; MNT_NOEXEC)))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; prot |= PROT_EXEC;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (!len)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (!(flags &amp; MAP_FIXED))&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; - &nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; addr = round_hint_to_min(addr);&nbsp;&nbsp;&nbsp; --判断输入的欲映射的起始地址是否小于最小映射地址，如果小于，将addr修改为最小地址，不过前提是MAP_FIXED旗标没有设置。</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; error = arch_mmap_check(addr, len, flags);&nbsp;&nbsp; --不同平台对于mmap参数的不同检测。这里之间返回0</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (error)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return error;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; len = PAGE_ALIGN(len);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --检测len是否越界，len的范围在0~TASK_SIZE之间。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (!len || len &gt; TASK_SIZE)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --错误值为nomem</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if ((pgoff + (len &gt;&gt; PAGE_SHIFT)) &lt; pgoff)&nbsp; --再次检测是否越界。我们这里不得不小心哪个晕头了传入一个莫名其妙的值</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; return -EOVERFLOW;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (mm-&gt;map_count &gt; sysctl_max_map_count)&nbsp;&nbsp; --在一个进程中对于mmap个数是有限制的。超出了还是nomem的错误。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; addr = get_unmapped_area(file, addr, len, pgoff, flags);&nbsp; --获取没有映射的地址，这个是查询mm中空闲的内存地址，这个在下面理解。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (addr &amp; ~PAGE_MASK)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return addr;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vm_flags = calc_vm_prot_bits(prot) | calc_vm_flag_bits(flags) | mm-&gt;def_flags |</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --设置vm_flags，根据传入的port和flags以及mm本身自有的旗标来设置。</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (flags &amp; MAP_LOCKED) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!can_do_mlock())&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EPERM;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_flags |= VM_LOCKED;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (vm_flags &amp; VM_LOCKED) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned long locked, lock_limit;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; locked = len &gt;&gt; PAGE_SHIFT;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; locked += mm-&gt;locked_vm;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lock_limit = current-&gt;signal-&gt;rlim[RLIMIT_MEMLOCK].rlim_cur;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lock_limit &gt;&gt;= PAGE_SHIFT;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (locked &gt; lock_limit &amp;&amp; !capable(CAP_IPC_LOCK))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EAGAIN;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp; --关于锁定的内存区在以后学习中再看，这里就不细看。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; inode = file ? file-&gt;f_path.dentry-&gt;d_inode : NULL;&nbsp; --判断是否匿名映射，如果不是则赋值inode</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (file) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; switch (flags &amp; MAP_TYPE) {&nbsp;&nbsp; --MAP_TYPE = 0x0F type的掩码</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case MAP_SHARED:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ((prot&amp;PROT_WRITE) &amp;&amp; !(file-&gt;f_mode&amp;FMODE_WRITE))&nbsp;&nbsp; --file应该被打开并允许写入。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EACCES;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (IS_APPEND(inode) &amp;&amp; (file-&gt;f_mode &amp; FMODE_WRITE))&nbsp; --不能写入一个只允许写追加的文件</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EACCES;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (locks_verify_locked(inode))&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --确保文件没有被强制锁定。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EAGAIN;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_flags |= VM_SHARED | VM_MAYSHARE;&nbsp; --尝试允许其他进程共享。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!(file-&gt;f_mode &amp; FMODE_WRITE))&nbsp;&nbsp;&nbsp; --如果file不允许写就算了，共享也没有用啊，因为file就一直固定死了，共享也没有意义。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_flags &amp;= ~(VM_MAYWRITE | VM_SHARED);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case MAP_PRIVATE:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!(file-&gt;f_mode &amp; FMODE_READ))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EACCES;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (file-&gt;f_path.mnt-&gt;mnt_flags &amp; MNT_NOEXEC) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vm_flags &amp; VM_EXEC)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EPERM;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_flags &amp;= ~VM_MAYEXEC;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (is_file_hugepages(file))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; accountable = 0;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!file-&gt;f_op || !file-&gt;f_op-&gt;mmap)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENODEV;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; default:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; } else {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; switch (flags &amp; MAP_TYPE) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case MAP_SHARED:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pgoff = 0;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_flags |= VM_SHARED | VM_MAYSHARE;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; case MAP_PRIVATE:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pgoff = addr &gt;&gt; PAGE_SHIFT;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; default:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp; --上面就是对一些旗标进行检测，防止出现旗标冲突，比如我欲映射的文件不允许写，而我映射的旗标却设定是可写并可以共享的，这个就冲突了。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; error = security_file_mmap(file, reqprot, prot, flags, addr, 0);&nbsp;&nbsp; --这个函数就忽略了。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (error)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return error;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; return mmap_region(file, addr, len, flags, vm_flags, pgoff,accountable);&nbsp; --最后一个参数为是否为大页，如果是的就为0.其余的参数都好理解。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">}</span></font>
+    <br>
+    <br>
+    <strong style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">3.3 get_unmapped_area</strong>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">这个是获取没有被映射的内存区</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">unsigned long get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,unsigned long pgoff, unsigned long flags)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">{</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; unsigned long (*get_area)(struct file *, unsigned long,unsigned long, unsigned long, unsigned long);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; get_area = current-&gt;mm-&gt;get_unmapped_area;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (file &amp;&amp; file-&gt;f_op &amp;&amp; file-&gt;f_op-&gt;get_unmapped_area)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; get_area = file-&gt;f_op-&gt;get_unmapped_area;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; addr = get_area(file, addr, len, pgoff, flags);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (IS_ERR_VALUE(addr))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return addr;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (addr &gt; TASK_SIZE - len)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (addr &amp; ~PAGE_MASK)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; return arch_rebalance_pgtables(addr, len);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">}</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">对于get_area函数我们以arch_get_unmapped_area为例来看如何查找一个空闲的mmap area</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,unsigned long len, unsigned long pgoff, unsigned long flags)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">{</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct mm_struct *mm = current-&gt;mm;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct vm_area_struct *vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; unsigned long start_addr;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (len &gt; TASK_SIZE)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (flags &amp; MAP_FIXED)&nbsp;&nbsp;&nbsp; --还记否这个MAP_FIXED是什么含义不？</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return addr;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (addr) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; addr = PAGE_ALIGN(addr);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma = find_vma(mm, addr); --vma为NULL即addr的地址不在任一个VMA(vma-&gt;vm_start~vma-&gt;vm_end) addr的地址没有被映射，</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 而且空洞足够我们这次的映射，那么返回addr以准备这次的映射</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (TASK_SIZE - len &gt;= addr &amp;&amp;(!vma || addr + len &lt;= vma-&gt;vm_start))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return addr;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (len &gt; mm-&gt;cached_hole_size) { --如果所需的长度大于当前vma之间的空洞长度</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; start_addr = addr = mm-&gt;free_area_cache;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; } else {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; start_addr = addr = TASK_UNMAPPED_BASE;&nbsp; --需要的长度小于当前空洞，为了不至于时间浪费，那么从0开始搜寻，</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这里的搜寻基地址TASK_UNMAPPED_BASE很重要，用户mmap的地址的基地址必须在TASK_UNMAPPED_BASE之上，</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 但是一定这样严格 吗？看上面的if (addr)判断，如果用户给了一个地址在TASK_UNMAPPED_BASE之下，</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 映射实际上还是会发生的。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mm-&gt;cached_hole_size = 0;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">full_search:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; for (vma = find_vma(mm, addr); ; vma = vma-&gt;vm_next) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (TASK_SIZE - len &lt; addr) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (start_addr != TASK_UNMAPPED_BASE) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; addr = TASK_UNMAPPED_BASE;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; start_addr = addr;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mm-&gt;cached_hole_size = 0;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto full_search;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp; &nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!vma || addr + len &lt;= vma-&gt;vm_start) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --如果第一次find_vma返回值即为NULL ，vma没有被映射并且空洞足够映射</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; !vma的条件只有可能在循环的第一次满足，在其后不可能满足，在其后的判断条件即为</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma-&gt;vma_end~vma-&gt;vma_next-&gt;vma_start之间的空洞大小大于所需要映射的长度即可，</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 下面判断条件中的addr为vma-&gt;vma_end,而vma-&gt;vm_start为 vma-&gt;vma_next-&gt;vma_start</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mm-&gt;free_area_cache = addr + len;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return addr;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (addr + mm-&gt;cached_hole_size &lt; vma-&gt;vm_start)&nbsp; --在循环的第一次如果vma不为NULL，不会满足下面的条件，在以后循环中mm-&gt;cached_hole_size&nbsp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 则为该次vma-&gt;vm_start 与上一次的vma-&gt;vm_end之间的差值</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mm-&gt;cached_hole_size = vma-&gt;vm_start - addr;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; addr = vma-&gt;vm_end;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">}</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">还记否以前看的红黑树，这里就现实的用了红黑树的算法。关于这个我们就不看了。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">struct vm_area_struct * find_vma(struct mm_struct * mm, unsigned long addr)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">{</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct vm_area_struct *vma = NULL;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (mm) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma = mm-&gt;mmap_cache;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!(vma &amp;&amp; vma-&gt;vm_end &gt; addr &amp;&amp; vma-&gt;vm_start &lt;= addr)) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct rb_node * rb_node;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_node = mm-&gt;mm_rb.rb_node;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma = NULL;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; while (rb_node) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct vm_area_struct * vma_tmp;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma_tmp = rb_entry(rb_node,struct vm_area_struct, vm_rb);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vma_tmp-&gt;vm_end &gt; addr) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma = vma_tmp;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vma_tmp-&gt;vm_start &lt;= addr)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_node = rb_node-&gt;rb_left;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } else</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_node = rb_node-&gt;rb_right;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vma)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mm-&gt;mmap_cache = vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; return vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">}</span></font>
+    <br>
+    <br>
+    <strong style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">3.4 mmap_region</strong>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">unsigned long mmap_region(struct file *file, unsigned long addr,unsigned long len, unsigned long flags,</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned int vm_flags, unsigned long pgoff,int accountable)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">{</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct mm_struct *mm = current-&gt;mm;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct vm_area_struct *vma, *prev;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct vm_area_struct *merged_vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; int correct_wcount = 0;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; int error;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct rb_node **rb_link, *rb_parent;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; unsigned long charged = 0;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; struct inode *inode =&nbsp; file ? file-&gt;f_path.dentry-&gt;d_inode : NULL;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; /* Clear old maps */</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; error = -ENOMEM;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">munmap_back:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma = find_vma_prepare(mm, addr, &amp;prev, &amp;rb_link, &amp;rb_parent); --函数find_vma_prepare()与find_vma()基本相同，它扫描当前进程地址空间的vm_area_struct</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 结构所形成的红黑树，试图找到结束地址高于addr的第一个区间；如果找到了一个虚拟区，</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 说明addr所在的虚拟区已经在使用，也就是已经有映射存在，因此要调用do_munmap()</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 把这个老的虚拟区从进程地址空间中撤销，如果撤销不成功，就返回一个负数；</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 如果撤销成功，就继续查找，直到在红黑树中找不到addr所在的虚拟区</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (vma &amp;&amp; vma-&gt;vm_start &lt; addr + len) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (do_munmap(mm, addr, len))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto munmap_back;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (!may_expand_vm(mm, len &gt;&gt; PAGE_SHIFT))&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -- 页数和超过限定值返回 0 ，不超过返回1</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (flags &amp; MAP_NORESERVE)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -- 如果flags参数中没有设置MAP_NORESERVE标志，新的虚拟区含有私有的可写页，空闲页面数小于要映射的虚拟区</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 的大小；则函数终止并返回一个负数；其中函数security_vm_enough_memory()用来检查一个</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 进程的地址空间中是否有足够的内存来进行一个新的映射</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_flags |= VM_NORESERVE;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (accountable &amp;&amp; (!(flags &amp; MAP_NORESERVE) ||</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sysctl_overcommit_memory == OVERCOMMIT_NEVER)) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vm_flags &amp; VM_SHARED) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Check memory availability in shmem_file_setup? */</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_flags |= VM_ACCOUNT;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } else if (vm_flags &amp; VM_WRITE) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; charged = len &gt;&gt; PAGE_SHIFT;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (security_vm_enough_memory(charged))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_flags |= VM_ACCOUNT;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (!file &amp;&amp; !(vm_flags &amp; VM_SHARED)) { --如果是匿名映射（file为空），并且这个虚拟区是非共享的，则可以把这个虚拟区和与它紧挨的前一个虚拟区进行合并；</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 虚拟区的合并是由vma_merge()函数实现的。如果合并成功，则转out处，请看后面out处的代码。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma = vma_merge(mm, prev, addr, addr + len, vm_flags,</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NULL, NULL, pgoff, NULL);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vma)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma = kmem_cache_zalloc(vm_area_cachep, GFP_KERNEL);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (!vma) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; error = -ENOMEM;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto unacct_error;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma-&gt;vm_mm = mm;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma-&gt;vm_start = addr;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma-&gt;vm_end = addr + len;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma-&gt;vm_flags = vm_flags;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma-&gt;vm_page_prot = vm_get_page_prot(vm_flags);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma-&gt;vm_pgoff = pgoff;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (file) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; error = -EINVAL;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vm_flags &amp; (VM_GROWSDOWN|VM_GROWSUP))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto free_vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vm_flags &amp; VM_DENYWRITE) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; error = deny_write_access(file);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (error)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto free_vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; correct_wcount = 1;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma-&gt;vm_file = file;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; get_file(file);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; error = file-&gt;f_op-&gt;mmap(file, vma);&nbsp;&nbsp;&nbsp; -- (⊙o⊙)哦 ，终于可以调用设备文件中真正的mmap</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (error)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto unmap_and_free_vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vm_flags &amp; VM_EXECUTABLE)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; added_exe_file_vma(mm);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; } else if (vm_flags &amp; VM_SHARED) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; error = shmem_zero_setup(vma);// it will call shmem_file_setup(), the same way as called in ashmem.c</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (error)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto free_vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">如果建立的是从文件到虚存区间的映射，则：</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">1.当参数flags中的VM_GROWSDOWN或VM_GROWSUP标志位为1时，说明这个区间可以向低地址或高地址扩展，但从文件映射的区间不能进行扩展，因此转到free_vma，释放给vm_area_struct分配的Slab，并返回一个错误；</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">2.当flags中的VM_DENYWRITE标志位为1时，就表示不允许通过常规的文件操作访问该文件，所以要调用deny_write_access（）排斥常规的文件操作（参见第八章）。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">3.get_file（）函数的主要作用是递增file结构中的共享计数；</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">4.每个文件系统都有个fiel_operation数据结构，其中的函数指针mmap提供了用来建立从该类文件到虚存区间进行映射的操作，这是最具有实质意义的函数；对于大部分文件系统，这个函数为generic_file_mmap( )函数实现的，该函数执行以下操作：</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (1)初始化vm_area_struct结构中的vm_ops域。如果VM_SHARED标志为1，就把该域设置成file_shared_mmap， 否则就把该域设置成file_private_mmap。从某种意义上说，这个步骤所做的事情类似于打开一个文件并初始化文件对象的方法。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (2)从索引节点的i_mode域（参见第八章）检查要映射的文件是否是一个常规文件。如果是其他类型的文件（例如目录或套接字），就返回一个错误代码。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (3)从索引节点的i_op域中检查是否定义了readpage( )的索引节点操作。如果没有定义，就返回一个错误代码。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (4)调用update_atime( )函数把当前时间存放在该文件索引节点的i_atime域中，并将这个索引节点标记成脏。</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">5.如果flags参数中的MAP_SHARED标志位为1，则调用shmem_zero_setup（）进行共享内存的映射。</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if ((vm_flags &amp; (VM_SHARED|VM_ACCOUNT)) == (VM_SHARED|VM_ACCOUNT))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma-&gt;vm_flags &amp;= ~VM_ACCOUNT;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; addr = vma-&gt;vm_start;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; pgoff = vma-&gt;vm_pgoff;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vm_flags = vma-&gt;vm_flags;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (vma_wants_writenotify(vma))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma-&gt;vm_page_prot = vm_get_page_prot(vm_flags &amp; ~VM_SHARED);</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; merged_vma = NULL;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (file)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; merged_vma = vma_merge(mm, prev, addr, vma-&gt;vm_end,</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma-&gt;vm_flags, NULL, file, pgoff, vma_policy(vma));</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (merged_vma) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mpol_put(vma_policy(vma));</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; kmem_cache_free(vm_area_cachep, vma);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fput(file);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (vm_flags &amp; VM_EXECUTABLE)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; removed_exe_file_vma(mm);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma = merged_vma;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; } else {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma_link(mm, vma, prev, rb_link, rb_parent);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; file = vma-&gt;vm_file;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; }</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">此时，把新建的虚拟区插入到进程的地址空间，这是由函数vma_link（）完成的，该函数具有三方面的功能：</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">（1）把vma 插入到虚拟区链表中</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">（2）把vma插入到虚拟区形成的红黑树中</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">（3）把vam插入到索引节点（inode）共享链表中</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">函数atomic_inc（x）给*x加1，这是一个原子操作。在内核代码中，有很多地方调用了以atomic为前缀的函数。原子操作，在操作过程中不会被中断。</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (correct_wcount)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; atomic_inc(&amp;inode-&gt;i_writecount);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">out:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; mm-&gt;total_vm += len &gt;&gt; PAGE_SHIFT;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vm_stat_account(mm, vm_flags, file, len &gt;&gt; PAGE_SHIFT);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (vm_flags &amp; VM_LOCKED) {</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; long nr_pages = mlock_vma_pages_range(vma, addr, addr + len);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (nr_pages &lt; 0)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return nr_pages;&nbsp;&nbsp;&nbsp; /* vma gone! */</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mm-&gt;locked_vm += (len &gt;&gt; PAGE_SHIFT) - nr_pages;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; } else if ((flags &amp; MAP_POPULATE) &amp;&amp; !(flags &amp; MAP_NONBLOCK))</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; make_pages_present(addr, addr + len);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; return addr;</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">unmap_and_free_vma:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (correct_wcount)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; atomic_inc(&amp;inode-&gt;i_writecount);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; vma-&gt;vm_file = NULL;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; fput(file);</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; unmap_region(mm, vma, prev, vma-&gt;vm_start, vma-&gt;vm_end);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; charged = 0;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">free_vma:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; kmem_cache_free(vm_area_cachep, vma);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">unacct_error:</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; if (charged)</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vm_unacct_memory(charged);</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">&nbsp;&nbsp;&nbsp; return error;</span></font>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">}</span></font>
+    <br>
+    <br>
+    <font color="#666666"><span style="font-size:14px;">ok！到此mmap的内核核心就可以了，关于具体的mmap的实现，以后再看。</span></font>
+    <br>
+    <br>
+    <strong style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">四.总结</strong>
+    <br>
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">mmap的实质是什么，其实就是从每一个进程中的用户空间分配一段空间用于映射。 这里面的机关重重，需要好好理解，不过谨记一点，进程的vma_struct是采用了红黑树来管理的。对于每一段的内存区都会有一个vma_struct 来描述，比如数据区，code区等等，以及mmap所需要的一段内存区。</p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>五.其它</strong></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">1、特点：<br> ① 进程相关的<br> ② 与XSI共享内存一样，需要与同步原语一起使用<br> ③ 只能是有共同祖先的进程才能使用<br> 2、使用<br> 系统调用mmap()用于共享内存的两种方式：<br> （1）使用普通文件提供的内存映射：<br> &nbsp;&nbsp;&nbsp; 适用于任何进程之间。此时，需要打开或创建一个文件，然后再调用mmap()<br> 典型调用代码如下：<br> fd=open(name, flag, mode); if(fd&lt;0) ...<br> ptr=mmap(NULL, len , PROT_READ|PROT_WRITE, MAP_SHARED , fd , 0);<br> &nbsp;&nbsp;&nbsp;&nbsp; 通过mmap()实现共享内存的通信方式有许多特点和要注意的地方，可以参看UNIX网络编程第二卷。【3】<br> （2）使用特殊文件提供匿名内存映射：<br> &nbsp;&nbsp;&nbsp; 适用于具有亲缘关系的进程之间。由于父子进程特殊的亲缘关系，在父进程中先调用mmap()，然后调用fork()。那么在调用fork()之后，子进程 继承父进程匿名映射后的地址空间，同样也继承mmap()返回的地址，这样，父子进程就可以通过映射区域进行通信了。一般来说，子进程单独维护从父进程继 承下来的一些变量。而mmap()返回的地址，却由父子进程共同维护。对于具有亲缘关系的进程实现共享内存最好的方式应该是采用匿名内存映射的方式。此时，不必指定具体的文件，只要设置相应的标志即可。<br> 3、说明<br> (1)void *mmap(void *addr, size_t len, int prot, int flag, int fd, off_t offset );<br> 把文件或设备映射或解除映射到内存中<br> 0）flag：必须有MAP_SHARED 标志<br> MAP_SHARED对映射区域的写入数据会复制回文件内，而且允许其他映射该文件的进程共享。<br> MAP_PRIVATE 对映射区域的写入操作会产生一个映射文件的复制，即私人的“写入时复制”（copy on write）对此区域作的任何修改都不会写回原来的文件内容。<br> MAP_ANONYMOUS建立匿名共享。此时会忽略参数fd(fd可以指定为-1)，不涉及文件，而且映射区域无法和其他进程共享(只能用于具有亲缘关系的进程间通信)。<br> &nbsp;&nbsp;&nbsp; 映射/dev/zero可为调用程序提供零填充的虚拟内存块。<br> 1）start：指向欲映射的内存起始地址，通常设为 NULL，代表让系统自动选定地址，映射成功后返回该地址。<br> 2）length：代表将文件中多大的部分映射到内存。<br> 3）offset 必须是页面大小的整数倍。页面大小由 getpagesize(2)得到。<br> 4）被映射的文件大小应是页面大小的整数倍。如一个文件大小不是页面大小的整数倍，映射时多出来的区域将被赋为0，对这些区域的写不会被写回到文件中。<br> 5)munmap()系统调用将删除指定地址范围内的映射区域。随后对这个范围内区域的引用将产生非法的内存引用。当这个进程终止后，这个区域也会被删除。另一方面，关闭文件描述符并不会删除映射区域。<br> 6）fd：要映射到内存中的文件描述符。如果使用匿名内存映射时，即flags中设置了MAP_ANONYMOUS，fd设为-1。有些系统不支持匿名内存映射，则可以使用fopen打开/dev/zero文件，然后对该文件进行映射，可以同样达到匿名内存映射的效果。<br> 7）若映射成功则返回映射区的内存起始地址，否则返回MAP_FAILED(－1)。<br> (2) munmap<br> int munmap( void * addr, size_t len )<br> &nbsp;&nbsp;&nbsp; 在进程地址空间中解除一个映射关系，当映射关系解除后，对原来映射地址的访问将导致段错误发生。<br> void * addr ：调用mmap()时返回的地址<br> size_t len ：映射区的大小<br> (3)int msync ( void * addr , size_t len, int flags)<br> &nbsp;&nbsp;&nbsp; 一般说来，进程在映射空间的对共享内容的改变并不直接写回到磁盘文件中，往往在调用munmap()后才执行该操作。可以调用msync()实现磁盘上文件与共享内存区的内容一致。<br> void * addr ：调用mmap()时返回的地址<br> size_t len ：映射区的大小<br> int flags ：MS_ASYN: 异步写，MS_SYN : 同步写，MS_INVALIDAT : 无效的cache 数据。</p> 
+    <p align="justify" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span>5、其他</span></p> 
+    <p align="justify" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span>1）进程调用<span>mmap()<span>时，只是在进程空间内新增了一块相应大小的缓冲区，并设置了相应的访问标识，但并没有建立进程空间到物理页面的映射。因此，第一次访问该空间时，会引发一个缺页异常。</span></span></span></p> 
+    <p align="justify" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span>2）一个共享内存区域可以看作是特殊文件系统<span>shm<span>中的一个文件，<span>shm<span>的安装点在交换区上。</span></span></span></span></span></p> 
+    <p align="justify" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span>3）<span>mmap()<span>系统调用使得进程之间通过映射同一个普通文件实现共享内存。普通文件被映射到进程地址空间后，进程可以向访问普通内存一样对文件进行访问，不必再调用<span>read()<span>，<span>write()<span>等操作。</span></span></span></span></span></span></span></p> 
+    <p align="justify" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span>4）<strong>最终被映射文件的内容的长度不会超过文件本身的初始大小，即映射不能改变文件的大小。文件被映射部分而不是整个文件决定了进程能够访问的空间大小，另外，如果指定文件的偏移部分，一定要注意为页面大小的整数倍。</strong></span></p> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <img src="http://blog.chinaunix.net/attachment/201301/29/20321537_1359427827kt6k.png" alt="" width="669" height="186" style="border:none;">
+    </div> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+    <p><font color="#666666"><span style="font-size:14px;"><br></span></font></p> 
+    <p><font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/5689072.html</span></font><span style="font-size:14px;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">，如需转载请自行联系原作者</span></p> 
+    <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

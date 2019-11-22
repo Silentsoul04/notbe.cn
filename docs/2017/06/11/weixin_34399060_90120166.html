@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>read 系统调用剖析【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：https://www.ibm.com/developerworks/cn/linux/l-cn-read/               大部分程序员可能会有这样的疑问：当在程序中调用库函数 read 时，这个请求是经过哪些处理最终到达磁盘的呢，数据又是怎么被拷贝到用户缓存区的呢？...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/06/11/weixin_34399060_90120166.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">read 系统调用剖析【转】</h1>
+    <p class="post-meta">Jun 11, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="https://www.ibm.com/developerworks/cn/linux/l-cn-read/" rel="nofollow">https://www.ibm.com/developerworks/cn/linux/l-cn-read/</a></p> 
+   <div class="dw-summary-columns"> 
+    <div class="ibm-col-6-4"> 
+     <p>大部分程序员可能会有这样的疑问：当在程序中调用库函数 read 时，这个请求是经过哪些处理最终到达磁盘的呢，数据又是怎么被拷贝到用户缓存区的呢？本文介绍了从 read 系统调用发出到结束处理的全过程。该过程包括两个部分：用户空间的处理、核心空间的处理。用户空间处理部分是系统调用从用户态切到核心态的过程。核心空间处理部分则是 read 系统调用在 linux 内核中处理的整个过程。</p> 
+     <p><span>3<img class="dw-cmts-arrow" src="https://yqfile.alicdn.com/img_431c075af271279e2eac08670205e10e.png" alt="" width="7" height="7">&nbsp;<a class="dw-cmt-link" href="https://www.ibm.com/developerworks/cn/linux/l-cn-read/#icomments" rel="nofollow">评论</a></span></p> 
+    </div> 
+    <div class="ibm-col-6-2 dw-toc-margin"> 
+     <p><a class="ibm-popup-link" href="https://www.ibm.com/developerworks/cn/linux/l-cn-read/#authorN1001A" rel="nofollow">赵 健博</a>&nbsp;(<a href="mailto:zhaojianbo@ncic.ac.cn?subject=read%20%E7%B3%BB%E7%BB%9F%E8%B0%83%E7%94%A8%E5%89%96%E6%9E%90" rel="nofollow">zhaojianbo@ncic.ac.cn</a>), 硕士, 中国科学院计算技术研究所</p> 
+     <p>2008 年 3 月 13 日</p> 
+     <div class="ibm-container"> 
+      <div class="ibm-container-body"> 
+       <ul class="ibm-twisty">
+        <li> <a class="ibm-twisty-trigger ibm-twisty-trigger-closed" href="https://www.ibm.com/developerworks/cn/linux/l-cn-read/#toggle" rel="nofollow"><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="expand"></a><span class="ibm-twisty-head">内容</span> </li> 
+       </ul>
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div> 
+    <div> 
+     <div> 
+      <div> 
+       <div class="ibm-columns"> 
+        <div class="ibm-col-1-1"> 
+         <div class="dw-article-sidebar dw-bluemix"> 
+          <img src="https://yqfile.alicdn.com/img_53bb432f53673e86d66faf52292e101e.png" alt="" width="64" height="64">
+          <p>在 IBM Bluemix 云平台上开发并部署您的下一个应用。</p> 
+          <p><a id="tutc-sbar-bmix-home-btn-ABa" class="dw-button-large" href="https://developer.ibm.com/sso/bmregistration?lang=zh_CN&amp;ca=dwchina-_-bluemix-_-l-cn-read-_-sidebar" rel="nofollow">开始您的试用</a></p> 
+         </div> 
+         <h2>Read 系统调用在用户空间中的处理过程</h2> 
+         <p>Linux 系统调用（SCI，system call interface）的实现机制实际上是一个多路汇聚以及分解的过程，该汇聚点就是 0x80 中断这个入口点（X86 系统结构）。也就是说，所有系统调用都从用户空间中汇聚到 0x80 中断点，同时保存具体的系统调用号。当 0x80 中断处理程序运行时，将根据系统调用号对不同的系统调用分别处理（调用不同的内核函数处理）。系统调用的更多内容，请参见参考资料。</p> 
+         <p>Read 系统调用也不例外，当调用发生时，库函数在保存 read 系统调用号以及参数后，陷入 0x80 中断。这时库函数工作结束。Read 系统调用在用户空间中的处理也就完成了。</p> 
+         <div class="ibm-alternate-rule">
+          &nbsp;
+         </div> 
+         <p><a class="ibm-anchor-up-link" href="https://www.ibm.com/developerworks/cn/linux/l-cn-read/#ibm-pcon" rel="nofollow">回页首</a></p> 
+         <h2>Read 系统调用在核心空间中的处理过程</h2> 
+         <p>0x80 中断处理程序接管执行后，先检察其系统调用号，然后根据系统调用号查找系统调用表，并从系统调用表中得到处理 read 系统调用的内核函数 sys_read ，最后传递参数并运行 sys_read 函数。至此，内核真正开始处理 read 系统调用（sys_read 是 read 系统调用的内核入口）。</p> 
+         <p>在讲解 read 系统调用在核心空间中的处理部分中，首先介绍了内核处理磁盘请求的层次模型，然后再按该层次模型从上到下的顺序依次介绍磁盘读请求在各层的处理过程。</p> 
+         <h3>Read 系统调用在核心空间中处理的层次模型</h3> 
+         <p>图1显示了 read 系统调用在核心空间中所要经历的层次模型。从图中看出：对于磁盘的一次读请求，首先经过虚拟文件系统层（vfs layer），其次是具体的文件系统层（例如 ext2），接下来是 cache 层（page cache 层）、通用块层（generic block layer）、IO 调度层（I/O scheduler layer）、块设备驱动层（block device driver layer），最后是物理块设备层（block device layer）</p> 
+         <h5>图1 read 系统调用在核心空间中的处理层次</h5> 
+         <img src="https://yqfile.alicdn.com/img_d20c7f1824c1721eecb31ac54c6aa674.gif" alt="图1 read 系统调用在核心空间中的处理层次" width="553">
+         <ul class="ibm-bullet-list">
+          <li>虚拟文件系统层的作用：屏蔽下层具体文件系统操作的差异，为上层的操作提供一个统一的接口。正是因为有了这个层次，所以可以把设备抽象成文件，使得操作设备就像操作文件一样简单。</li> 
+          <li>在具体的文件系统层中，不同的文件系统（例如 ext2 和 NTFS）具体的操作过程也是不同的。每种文件系统定义了自己的操作集合。关于文件系统的更多内容，请参见参考资料。</li> 
+          <li>引入 cache 层的目的是为了提高 linux 操作系统对磁盘访问的性能。 Cache 层在内存中缓存了磁盘上的部分数据。当数据的请求到达时，如果在 cache 中存在该数据且是最新的，则直接将数据传递给用户程序，免除了对底层磁盘的操作，提高了性能。</li> 
+          <li>通用块层的主要工作是：接收上层发出的磁盘请求，并最终发出 IO 请求。该层隐藏了底层硬件块设备的特性，为块设备提供了一个通用的抽象视图。</li> 
+          <li>IO 调度层的功能：接收通用块层发出的 IO 请求，缓存请求并试图合并相邻的请求（如果这两个请求的数据在磁盘上是相邻的）。并根据设置好的调度算法，回调驱动层提供的请求处理函数，以处理具体的 IO 请求。</li> 
+          <li>驱动层中的驱动程序对应具体的物理块设备。它从上层中取出 IO 请求，并根据该 IO 请求中指定的信息，通过向具体块设备的设备控制器发送命令的方式，来操纵设备传输数据。</li> 
+          <li>设备层中都是具体的物理设备。定义了操作具体设备的规范。</li> 
+         </ul>
+         <h3>相关的内核数据结构：</h3> 
+         <ul class="ibm-bullet-list">
+          <li>Dentry ： 联系了文件名和文件的 i 节点</li> 
+          <li>inode ： 文件 i 节点，保存文件标识、权限和内容等信息</li> 
+          <li>file ： 保存文件的相关信息和各种操作文件的函数指针集合</li> 
+          <li>file_operations ：操作文件的函数接口集合</li> 
+          <li>address_space ：描述文件的 page cache 结构以及相关信息，并包含有操作 page cache 的函数指针集合</li> 
+          <li>address_space_operations ：操作 page cache 的函数接口集合</li> 
+          <li>bio ： IO 请求的描述</li> 
+         </ul>
+         <h3>数据结构之间的关系：</h3> 
+         <p>图2示意性地展示了上述各个数据结构（除了 bio）之间的关系。可以看出：由 dentry 对象可以找到 inode 对象，从 inode 对象中可以取出 address_space 对象，再由 address_space 对象找到 address_space_operations 对象。</p> 
+         <p>File 对象可以根据当前进程描述符中提供的信息取得，进而可以找到 dentry 对象、 address_space 对象和 file_operations 对象。</p> 
+         <h5>图2 数据结构关系图：</h5> 
+         <img src="https://yqfile.alicdn.com/img_5d1d1a7880ea279b48d8ed1415877df8.gif" alt="图2 数据结构关系图：" width="542">
+         <h3>前提条件：</h3> 
+         <p>对于具体的一次 read 调用，内核中可能遇到的处理情况很多。这里举例其中的一种情况：</p> 
+         <ul class="ibm-bullet-list">
+          <li>要读取的文件已经存在</li> 
+          <li>文件经过 page cache</li> 
+          <li>要读的是普通文件</li> 
+          <li>磁盘上文件系统为 ext2 文件系统，有关 ext2 文件系统的相关内容，参见参考资料</li> 
+         </ul>
+         <h3>准备：</h3> 
+         <div class="dw-sidebar ibm-inset"> 
+          <p>注：所有清单中代码均来自 linux2.6.11 内核原代码</p> 
+         </div> 
+         <p>读数据之前，必须先打开文件。处理 open 系统调用的内核函数为 sys_open 。&nbsp;<br>所以我们先来看一下该函数都作了哪些事。清单1显示了 sys_open 的代码（省略了部分内容，以后的程序清单同样方式处理）</p> 
+         <h5>清单1 sys_open 函数代码</h5> 
+         <div class="codesection"> 
+          <pre class="displaycode">asmlinkage long sys_open(const char __user * filename, int flags, int mode)
+{
+ ……
+ fd = get_unused_fd();
+ if (fd &gt;= 0) {
+ struct file *f = filp_open(tmp, flags, mode);
+ fd_install(fd, f);
+ }
+ ……
+ return fd;
+ ……
+}</pre> 
+         </div> 
+         <p>代码解释：</p> 
+         <ul class="ibm-bullet-list">
+          <li>get_unuesed_fd() ：取回一个未被使用的文件描述符（每次都会选取最小的未被使用的文件描述符）。</li> 
+          <li>filp_open() ：调用 open_namei() 函数取出和该文件相关的 dentry 和 inode （因为前提指明了文件已经存在，所以 dentry 和 inode 能够查找到，不用创建），然后调用 dentry_open() 函数创建新的 file 对象，并用 dentry 和 inode 中的信息初始化 file 对象（文件当前的读写位置在 file 对象中保存）。注意到 dentry_open() 中有一条语句：</li> 
+         </ul>
+         <p>f-&gt;f_op = fops_get(inode-&gt;i_fop);</p> 
+         <p>这个赋值语句把和具体文件系统相关的，操作文件的函数指针集合赋给了 file 对象的 f _op 变量（这个指针集合是保存在 inode 对象中的），在接下来的 sys_read 函数中将会调用 file-&gt;f_op 中的成员 read 。</p> 
+         <ul class="ibm-bullet-list">
+          <li>fd_install() ：以文件描述符为索引，关联当前进程描述符和上述的 file 对象，为之后的 read 和 write 等操作作准备。</li> 
+          <li>函数最后返回该文件描述符。</li> 
+         </ul>
+         <p>图3显示了 sys_open 函数返回后， file 对象和当前进程描述符之间的关联关系，以及 file 对象中操作文件的函数指针集合的来源（inode 对象中的成员 i_fop）。</p> 
+         <h5>图3 file 对象和当前进程描述符之间的关系</h5> 
+         <img src="https://yqfile.alicdn.com/img_2ee799df2dd9295419532597465ab4df.gif" alt="file 对象和当前进程描述符之间的关系" width="592">
+         <p>到此为止，所有的准备工作已经全部结束了，下面开始介绍 read 系统调用在图1所示的各个层次中的处理过程。</p> 
+         <h3>虚拟文件系统层的处理：</h3> 
+         <p>内核函数 sys_read() 是 read 系统调用在该层的入口点，清单2显示了该函数的代码。</p> 
+         <h5>清单2 sys_read 函数的代码</h5> 
+         <div class="codesection"> 
+          <pre class="displaycode">asmlinkage ssize_t sys_read(unsigned int fd, char __user * buf, size_t count)
+{
+ struct file *file;
+ ssize_t ret = -EBADF;
+ int fput_needed;
+
+ file = fget_light(fd, &amp;fput_needed);
+ if (file) {
+ loff_t pos = file_pos_read(file);
+ ret = vfs_read(file, buf, count, &amp;pos);
+ file_pos_write(file, pos);
+ fput_light(file, fput_needed);
+ }
+
+ return ret;
+}</pre> 
+         </div> 
+         <p>代码解析：</p> 
+         <ul class="ibm-bullet-list">
+          <li>fget_light() ：根据 fd 指定的索引，从当前进程描述符中取出相应的 file 对象（见图3）。</li> 
+          <li>如果没找到指定的 file 对象，则返回错误</li> 
+          <li>如果找到了指定的 file 对象：</li> 
+          <li>调用 file_pos_read() 函数取出此次读写文件的当前位置。</li> 
+          <li>调用 vfs_read() 执行文件读取操作，而这个函数最终调用 file-&gt;f_op.read() 指向的函数，代码如下：</li> 
+         </ul>
+         <p>if (file-&gt;f_op-&gt;read)<br>ret = file-&gt;f_op-&gt;read(file, buf, count, pos);</p> 
+         <ul class="ibm-bullet-list">
+          <li>调用 file_pos_write() 更新文件的当前读写位置。</li> 
+          <li>调用 fput_light() 更新文件的引用计数。</li> 
+          <li>最后返回读取数据的字节数。</li> 
+         </ul>
+         <p>到此，虚拟文件系统层所做的处理就完成了，控制权交给了 ext2 文件系统层。</p> 
+         <p>在解析 ext2 文件系统层的操作之前，先让我们看一下 file 对象中 read 指针来源。</p> 
+         <h3>File 对象中 read 函数指针的来源：</h3> 
+         <p>从前面对 sys_open 内核函数的分析来看， file-&gt;f_op 来自于 inode-&gt;i_fop 。那么 inode-&gt;i_fop 来自于哪里呢？在初始化 inode 对象时赋予的。见清单3。</p> 
+         <h5>清单3 ext2_read_inode() 函数部分代码</h5> 
+         <div class="codesection"> 
+          <pre class="displaycode">void ext2_read_inode (struct inode * inode)
+{
+ ……
+ if (S_ISREG(inode-&gt;i_mode)) {
+ inode-&gt;i_op = &amp;ext2_file_inode_operations;
+ inode-&gt;i_fop = &amp;ext2_file_operations;
+ if (test_opt(inode-&gt;i_sb, NOBH))
+ inode-&gt;i_mapping-&gt;a_ops = &amp;ext2_nobh_aops;
+ else
+ inode-&gt;i_mapping-&gt;a_ops = &amp;ext2_aops;
+ } 
+ ……
+}</pre> 
+         </div> 
+         <p>从代码中可以看出，如果该 inode 所关联的文件是普通文件，则将变量 ext2_file_operations 的地址赋予 inode 对象的 i_fop 成员。所以可以知道： inode-&gt;i_fop.read 函数指针所指向的函数为 ext2_file_operations 变量的成员 read 所指向的函数。下面来看一下 ext2_file_operations 变量的初始化过程，如清单4。</p> 
+         <h5>清单4 ext2_file_operations 的初始化</h5> 
+         <div class="codesection"> 
+          <pre class="displaycode">struct file_operations ext2_file_operations = {
+ .llseek = generic_file_llseek,
+    .read        = generic_file_read,
+    .write       = generic_file_write,
+    .aio_read  	= generic_file_aio_read,
+    .aio_write	= generic_file_aio_write,
+    .ioctl       = ext2_ioctl,
+    .mmap        = generic_file_mmap,
+    .open        = generic_file_open,
+    .release     = ext2_release_file,
+    .fsync       = ext2_sync_file,
+    .readv       = generic_file_readv,
+    .writev      = generic_file_writev,
+    .sendfile    = generic_file_sendfile,
+
+};</pre> 
+         </div> 
+         <p>该成员 read 指向函数 generic_file_read 。所以， inode-&gt;i_fop.read 指向 generic_file_read 函数，进而 file-&gt;f_op.read 指向 generic_file_read 函数。最终得出结论： generic_file_read 函数才是 ext2 层的真实入口。</p> 
+         <h3>Ext2 文件系统层的处理</h3> 
+         <h5>图4 read 系统调用在 ext2 层中处理时函数调用关系</h5> 
+         <img src="https://yqfile.alicdn.com/img_87dfaf59071eb52652da0686ad987a41.gif" alt="图4 read 系统调用在 ext2 层中处理时函数调用关系" width="512">
+         <p>由图 4 可知，该层入口函数 generic_file_read 调用函数 __generic_file_aio_read ，后者判断本次读请求的访问方式，如果是直接 io （filp-&gt;f_flags 被设置了 O_DIRECT 标志，即不经过 cache）的方式，则调用 generic_file_direct_IO 函数；如果是 page cache 的方式，则调用 do_generic_file_read 函数。函数 do_generic_file_read 仅仅是一个包装函数，它又调用 do_generic_mapping_read 函数。</p> 
+         <p>在讲解 do_generic_mapping_read 函数都作了哪些工作之前，我们再来看一下文件在内存中的缓存区域是被怎么组织起来的。</p> 
+         <h3>文件的 page cache 结构</h3> 
+         <p>图5显示了一个文件的 page cache 结构。文件被分割为一个个以 page 大小为单元的数据块,这些数据块（页）被组织成一个多叉树（称为 radix 树）。树中所有叶子节点为一个个页帧结构（struct page），表示了用于缓存该文件的每一个页。在叶子层最左端的第一个页保存着该文件的前4096个字节（如果页的大小为4096字节），接下来的页保存着文件第二个4096个字节，依次类推。树中的所有中间节点为组织节点，指示某一地址上的数据所在的页。此树的层次可以从0层到6层，所支持的文件大小从0字节到16 T 个字节。树的根节点指针可以从和文件相关的 address_space 对象（该对象保存在和文件关联的 inode 对象中）中取得（更多关于 page cache 的结构内容请参见参考资料）。</p> 
+         <h5>图5 文件的 page cache 结构</h5> 
+         <img src="https://yqfile.alicdn.com/img_f5407d14a638bff9dffb87f2efedee1c.gif" alt="图5 文件的 page cache 结构" width="477">
+         <p>现在，我们来看看函数 do_generic_mapping_read 都作了哪些工作， do_generic_mapping_read 函数代码较长，本文简要介绍下它的主要流程：</p> 
+         <ul class="ibm-bullet-list">
+          <li>根据文件当前的读写位置，在 page cache 中找到缓存请求数据的 page</li> 
+          <li>如果该页已经最新，将请求的数据拷贝到用户空间</li> 
+          <li>否则， Lock 该页</li> 
+          <li>调用 readpage 函数向磁盘发出添页请求（当下层完成该 IO 操作时会解锁该页），代码：</li> 
+         </ul>
+         <div class="codesection"> 
+          <pre class="displaycode">	error = mapping-&gt;a_ops-&gt;readpage(filp, page);</pre> 
+         </div> 
+         <ul class="ibm-bullet-list">
+          <li>再一次 lock 该页，操作成功时，说明数据已经在 page cache 中了，因为只有 IO 操作完成后才可能解锁该页。此处是一个同步点，用于同步数据从磁盘到内存的过程。</li> 
+          <li>解锁该页</li> 
+          <li>到此为止数据已经在 page cache 中了，再将其拷贝到用户空间中（之后 read 调用可以在用户空间返回了）</li> 
+         </ul>
+         <p>到此，我们知道：当页上的数据不是最新的时候，该函数调用 mapping-&gt;a_ops-&gt;readpage 所指向的函数（变量 mapping 为 inode 对象中的 address_space 对象），那么这个函数到底是什么呢？</p> 
+         <h3>Readpage 函数的由来</h3> 
+         <p>address_space 对象是嵌入在 inode 对象之中的，那么不难想象： address_space 对象成员 a_ops 的初始化工作将会在初始化 inode 对象时进行。如清单3中后半部所显示。</p> 
+         <div class="codesection"> 
+          <pre class="displaycode">if (test_opt(inode-&gt;i_sb, NOBH))
+ inode-&gt;i_mapping-&gt;a_ops = &amp;ext2_nobh_aops;
+else
+    inode-&gt;i_mapping-&gt;a_ops = &amp;ext2_aops;</pre> 
+         </div> 
+         <p>可以知道 address_space 对象的成员 a_ops 指向变量 ext2_aops 或者变量 ext2_nobh_aops 。这两个变量的初始化如清单5所示。</p> 
+         <h5>清单5 变量 ext2_aops 和变量 ext2_nobh_aops 的初始化</h5> 
+         <div class="codesection"> 
+          <pre class="displaycode">struct address_space_operations ext2_aops = {
+    .<strong>readpage          =</strong><strong>ext2_readpage,</strong>
+    .readpages         = ext2_readpages,
+    .writepage         = ext2_writepage,
+    .sync_page         = block_sync_page,
+    .prepare_write     = ext2_prepare_write,
+    .commit_write       = generic_commit_write,
+    .bmap                 = ext2_bmap,
+    .direct_IO           = ext2_direct_IO,
+    .writepages          = ext2_writepages,
+};
+
+struct address_space_operations ext2_nobh_aops = {
+    <strong>.readpage</strong><strong>= ext2_readpage</strong>,
+    .readpages           = ext2_readpages,
+    .writepage	         = ext2_writepage,
+    .sync_page           = block_sync_page,
+    .prepare_write      = ext2_nobh_prepare_write,
+    .commit_write       = nobh_commit_write,
+    .bmap                 = ext2_bmap,
+    .direct_IO           = ext2_direct_IO,
+    .writepages          = ext2_writepages,
+};</pre> 
+         </div> 
+         <p>从上述代码中可以看出，不论是哪个变量，其中的 readpage 成员都指向函数 ext2_readpage 。所以可以断定：函数 do_generic_mapping_read 最终调用 ext2_readpage 函数处理读数据请求。</p> 
+         <p>到此为止， ext2 文件系统层的工作结束。</p> 
+         <h3>Page cache 层的处理</h3> 
+         <p>从上文得知：ext2_readpage 函数是该层的入口点。该函数调用 mpage_readpage 函数，清单6显示了 mpage_readpage 函数的代码。</p> 
+         <h5>清单6 mpage_readpage 函数的代码</h5> 
+         <div class="codesection"> 
+          <pre class="displaycode">int mpage_readpage(struct page *page, get_block_t get_block)
+{
+    struct bio *bio = NULL;
+    sector_t last_block_in_bio = 0;
+
+    bio = do_mpage_readpage(bio, page, 1,
+                         &amp;last_block_in_bio, get_block);
+    if (bio)
+        mpage_bio_submit(READ, bio);
+    return 0;
+}</pre> 
+         </div> 
+         <p>该函数首先调用函数 do_mpage_readpage 函数创建了一个 bio 请求，该请求指明了要读取的数据块所在磁盘的位置、数据块的数量以及拷贝该数据的目标位置——缓存区中 page 的信息。然后调用 mpage_bio_submit 函数处理请求。 mpage_bio_submit 函数则调用 submit_bio 函数处理该请求，后者最终将请求传递给函数 generic_make_request ，并由 generic_make_request 函数将请求提交给通用块层处理。</p> 
+         <p>到此为止， page cache 层的处理结束。</p> 
+         <h3>通用块层的处理</h3> 
+         <p>generic_make_request 函数是该层的入口点，该层只有这一个函数处理请求。清单7显示了函数的部分代码</p> 
+         <h5>清单7 generic_make_request 函数部分代码</h5> 
+         <div class="codesection"> 
+          <pre class="displaycode">void generic_make_request(struct bio *bio)
+{
+    ……
+    do {
+        char b[BDEVNAME_SIZE];
+
+        q = bdev_get_queue(bio-&gt;bi_bdev);
+        ……
+        block_wait_queue_running(q);
+
+        /*
+        * If this device has partitions, remap block n
+        * of partition p to block n+start(p) of the disk.
+        */
+        blk_partition_remap(bio);
+
+        ret = q-&gt;make_request_fn(q, bio);
+    } while (ret);
+}</pre> 
+         </div> 
+         <p>主要操作：</p> 
+         <ul class="ibm-bullet-list">
+          <li>根据 bio 中保存的块设备号取得请求队列 q</li> 
+          <li>检测当前 IO 调度器是否可用，如果可用，则继续；否则等待调度器可用</li> 
+          <li>调用 q-&gt;make_request_fn 所指向的函数将该请求（bio）加入到请求队列中</li> 
+         </ul>
+         <p>到此为止，通用块层的操作结束。</p> 
+         <h3>IO 调度层的处理</h3> 
+         <p>对 make_request_fn 函数的调用可以认为是 IO 调度层的入口，该函数用于向请求队列中添加请求。该函数是在创建请求队列时指定的，代码如下（blk_init_queue 函数中）：</p> 
+         <div class="codesection"> 
+          <pre class="displaycode">q-&gt;request_fn	= rfn;
+blk_queue_make_request(q, __make_request);</pre> 
+         </div> 
+         <p>函数 blk_queue_make_request 将函数 __make_request 的地址赋予了请求队列 q 的 make_request_fn 成员，那么， __make_request 函数才是 IO 调度层的真实入口。</p> 
+         <p>__make_request 函数的主要工作为：</p> 
+         <ol>
+          <li>检测请求队列是否为空，若是，延缓驱动程序处理当前请求（其目的是想积累更多的请求，这样就有机会对相邻的请求进行合并，从而提高处理的性能），并跳到3，否则跳到2</li> 
+          <li>试图将当前请求同请求队列中现有的请求合并，如果合并成功，则函数返回，否则跳到3</li> 
+          <li>该请求是一个新请求，创建新的请求描述符，并初始化相应的域，并将该请求描述符加入到请求队列中，函数返回</li> 
+         </ol>
+         <p>将请求放入到请求队列中后，何时被处理就由 IO 调度器的调度算法决定了（有关 IO 调度器的算法内容请参见参考资料）。一旦该请求能够被处理，便调用请求队列中成员 request_fn 所指向的函数处理。这个成员的初始化也是在创建请求队列时设置的：</p> 
+         <div class="codesection"> 
+          <pre class="displaycode">q-&gt;request_fn	= rfn;
+blk_queue_make_request(q, __make_request);</pre> 
+         </div> 
+         <p>第一行是将请求处理函数 rfn 指针赋给了请求队列的 request_fn 成员。而 rfn 则是在创建请求队列时通过参数传入的。</p> 
+         <p>对请求处理函数 request_fn 的调用意味着 IO 调度层的处理结束了。</p> 
+         <h3>块设备驱动层的处理</h3> 
+         <p>request_fn 函数是块设备驱动层的入口。它是在驱动程序创建请求队列时由驱动程序传递给 IO 调度层的。</p> 
+         <p>IO 调度层通过回调 request_fn 函数的方式，把请求交给了驱动程序。而驱动程序从该函数的参数中获得上层发出的 IO 请求，并根据请求中指定的信息操作设备控制器（这一请求的发出需要依据物理设备指定的规范进行）。</p> 
+         <p>到此为止，块设备驱动层的操作结束。</p> 
+         <h3>块设备层的处理</h3> 
+         <p>接受来自驱动层的请求，完成实际的数据拷贝工作等等。同时规定了一系列规范，驱动程序必须按照这个规范操作硬件。</p> 
+         <h3>后续工作</h3> 
+         <p>当设备完成了 IO 请求之后，通过中断的方式通知 cpu ，而中断处理程序又会调用 request_fn 函数进行处理。</p> 
+         <p>当驱动再次处理该请求时，会根据本次数据传输的结果通知上层函数本次 IO 操作是否成功，如果成功，上层函数解锁 IO 操作所涉及的页面（在 do_generic_mapping_read 函数中加的锁）。</p> 
+         <p>该页被解锁后， do_generic_mapping_read() 函数就可以再次成功获得该锁（数据的同步点），并继续执行程序了。之后，函数 sys_read 可以返回了。最终 read 系统调用也可以返回了。</p> 
+         <p>至此， read 系统调用从发出到结束的整个处理过程就全部结束了。</p> 
+         <div class="ibm-alternate-rule">
+          &nbsp;
+         </div> 
+         <p><a class="ibm-anchor-up-link" href="https://www.ibm.com/developerworks/cn/linux/l-cn-read/#ibm-pcon" rel="nofollow">回页首</a></p> 
+         <h2>总结</h2> 
+         <p>本文介绍了 linux 系统调用 read 的处理全过程。该过程分为两个部分：用户空间的处理和核心空间的处理。在用户空间中通过 0x80 中断的方式将控制权交给内核处理，内核接管后，经过6个层次的处理最后将请求交给磁盘，由磁盘完成最终的数据拷贝操作。在这个过程中，调用了一系列的内核函数。如图 6</p> 
+         <h5>图6 read 系统调用在内核中所经历的函数调用层次</h5> 
+         <img src="https://yqfile.alicdn.com/img_4936970ae4ea171aee0a17029822ea2f.gif" alt="图6 read 系统调用在内核中所经历的函数调用层次" width="572">
+        </div> 
+       </div> 
+       <div class="ibm-columns"> 
+        <div class="ibm-col-6-4"> 
+         <h2>参考资料</h2> 
+         <ul class="ibm-bullet-list">
+          <li>查看文章“<a href="http://www.ibm.com/developerworks/cn/linux/l-system-calls/" rel="nofollow">使用 Linux 系统调用的内核命令</a>”， 了解系统调用的基本原理以及如何实现自己的系统调用的方法。</li> 
+          <li>查看文章“<a href="http://www.ibm.com/developerworks/cn/linux/l-linux-filesystem/" rel="nofollow">Linux&nbsp;</a><a href="http://www.ibm.com/developerworks/cn/linux/l-linux-filesystem/" rel="nofollow">文件系统剖析</a>”，了解 linux 文件系统的相关内容。</li> 
+          <li>参看文章“<a href="http://www.ibm.com/developerworks/cn/linux/filesystem/ext2/" rel="nofollow">Ext2 文件系统的硬盘布局</a>”和书籍“ understanding the linux kernel（3rd edition）”第18章的内容，了解 ext2 文件系统的相关内容。</li> 
+          <li>查看书籍“understanding the linux kernel（3rd edition）”第 14、15 章内容，了解 IO 调度算法、page cache 的技术等内容。</li> 
+         </ul>
+        </div> 
+       </div> 
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

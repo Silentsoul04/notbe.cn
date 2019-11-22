@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux signal 那些事儿（2）【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/uid-24774106-id-4064447.html    上一篇博文，基本算是给glibc的signal函数翻了个身。现在glibc的signal基本修正了传统的UNIX的一些弊端，我们说signal并没有我们想象的那么不堪...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/05/12/weixin_33744854_90133658.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux signal 那些事儿（2）【转】</h1>
+    <p class="post-meta">May 12, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://blog.chinaunix.net/uid-24774106-id-4064447.html" rel="nofollow">http://blog.chinaunix.net/uid-24774106-id-4064447.html</a></p> 
+   <p><span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;">上一篇博文，基本算是给glibc的signal函数翻了个身。现在glibc的signal基本修正了传统的UNIX的一些弊端，我们说signal并没有我们想象的那么不堪。但是signal也有不尽人意的地方。比如信号处理期间，我们期望屏蔽某些信号，而不仅仅是屏蔽自身，这时候signal就不行了。信号既然是进程间通信IPC的一种机制，我们期望获取更多的信息，而不仅仅是signo，这时候signal/kill这个机制就基本不行了。<br><span style="line-height:2;"> &nbsp; &nbsp; 上面所说的都是signal的一些毛病，但是这些都不是致命的，致命的问题在于老的signal机制的不可靠。信号分成可靠性信号和非可靠性信号，并不是说用sigaction安装，用sigqueue发送的信号就是可靠性性信号，用signal安装，kill/tkill发送的信号就是非可靠性信号。这种理解是错误的。这在Linux环境进程间通信（二）：信号（上）一文中讲的非常清楚了。<br><span style="line-height:2;"> &nbsp; &nbsp; 信号值位于[SIGRTMIN,SIGRTMAX] 之间的信号，就是可靠信号，位于[SIGHUP,SIGSYS]之间信号，都是非可靠性信号，与安装函数是signal还是sigaction无关，与发送函数是kill还是sigqueue无关。<br><span style="line-height:2;"><img src="https://yqfile.alicdn.com/img_d7908b63f603ff37c20dbb622918b1a0.png" alt="" width="700" height="214"><br><span style="line-height:2;"> &nbsp; &nbsp; 1～31之间的所有信号都称为不可靠信号，原因就在于信号不可排队，如果kernel发现同一个信号已经有挂起信号，当前信号就会被丢弃，就好象从来没有被发送过一样，无法引起信号的传递，也无法让进程执行信号处理函数。这种实现的机理，造成了这些信号的不可靠。这正所谓：我本将心向明月，奈何明月照沟渠。<br><span style="line-height:2;"> &nbsp; &nbsp; 为了解决这个问题，Linux引入了实时信号,信号值在[32~64]区间内，或者称之为可靠信号。这种信号，kernel不会ignore，哪怕已经有了好多同一个信号，kernel会把新收到信号放入queue之中，等待被传递出去。<br><span style="line-height:2;"> &nbsp; &nbsp; 空口说白话，不是我们的风格，我现在用代码证明之。我参考了Linux Programming Interface 一书的例子，写了两个程序，一个是signal_receiver ,一个是signal_sender.<br><span style="line-height:2;"> &nbsp; &nbsp; 先看signal_receiver的code：&nbsp;&nbsp;&nbsp;&nbsp;<br></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="line-height:2;">
+    <ol>
+     <li> <span style="color:#000000;">manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code<span style="color:#0000cc;">/c<span style="color:#0000cc;">/self<span style="color:#0000cc;">/signal$ cat signal_receiver<span style="color:#0000cc;">.c <br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;stdio<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;stdlib<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;unistd<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;signal<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;<span style="color:#ff0000;">string<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;errno<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> <br></li> 
+     <li> <br></li> 
+     <li> static <span style="color:#ff0000;">int sig_cnt<span style="color:#0000cc;">[NSIG<span style="color:#0000cc;">]<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> static volatile sig_atomic_t get_SIGINT <span style="color:#0000cc;">= 0<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> <br></li> 
+     <li> void handler<span style="color:#0000cc;">(<span style="color:#ff0000;">int signo<span style="color:#0000cc;">)<br></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(signo <span style="color:#0000cc;">=<span style="color:#0000cc;">= SIGINT<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;get_SIGINT <span style="color:#0000cc;">= 1<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">else<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sig_cnt<span style="color:#0000cc;">[signo<span style="color:#0000cc;">]<span style="color:#0000cc;">+<span style="color:#0000cc;">+<span style="color:#0000cc;">;<br></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> <span style="color:#ff0000;">int main<span style="color:#0000cc;">(<span style="color:#ff0000;">int argc<span style="color:#0000cc;">,char<span style="color:#0000cc;">* argv<span style="color:#0000cc;">[<span style="color:#0000cc;">]<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;">int i <span style="color:#0000cc;">= 0<span style="color:#0000cc;">; <br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;sigset_t blockall_mask <span style="color:#0000cc;">;<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;sigset_t pending_mask <span style="color:#0000cc;">; <br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;sigset_t empty_mask <span style="color:#0000cc;">; <br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;printf<span style="color:#0000cc;">(<span style="color:#ff00ff;">"%s:PID is %ld\n"<span style="color:#0000cc;">,argv<span style="color:#0000cc;">[0<span style="color:#0000cc;">]<span style="color:#0000cc;">,getpid<span style="color:#0000cc;">(<span style="color:#0000cc;">)<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">for<span style="color:#0000cc;">(i <span style="color:#0000cc;">= 1<span style="color:#0000cc;">; i <span style="color:#0000cc;">&lt; NSIG<span style="color:#0000cc;">; i<span style="color:#0000cc;">+<span style="color:#0000cc;">+<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(<span>i <span style="color:#0000cc;">=<span style="color:#0000cc;">=<span> SIGKILL <span style="color:#0000cc;">|<span style="color:#0000cc;">|<span> i <span style="color:#0000cc;">=<span style="color:#0000cc;">=<span> SIGSTOP<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;continue<span style="color:#0000cc;">;<br></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(signal<span style="color:#0000cc;">(i<span style="color:#0000cc;">,<span style="color:#0000cc;">&amp;handler<span style="color:#0000cc;">) <span style="color:#0000cc;">=<span style="color:#0000cc;">= SIG_ERR<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stderr<span style="color:#0000cc;">,<span style="color:#ff00ff;">"signal for signo(%d) failed (%s)\n"<span style="color:#0000cc;">,i<span style="color:#0000cc;">,strerror<span style="color:#0000cc;">(errno<span style="color:#0000cc;">)<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">/<span style="color:#0000cc;">/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return <span style="color:#0000cc;">-1<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(argc <span style="color:#0000cc;">&gt; 1<span style="color:#0000cc;">)<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;">int sleep_time <span style="color:#0000cc;">= atoi<span style="color:#0000cc;">(argv<span style="color:#0000cc;">[1<span style="color:#0000cc;">]<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sigfillset<span style="color:#0000cc;">(<span style="color:#0000cc;">&amp;blockall_mask<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(sigprocmask<span style="color:#0000cc;">(SIG_SETMASK<span style="color:#0000cc;">,<span style="color:#0000cc;">&amp;blockall_mask<span style="color:#0000cc;">,<span style="color:#0000ff;">NULL<span style="color:#0000cc;">) <span style="color:#0000cc;">=<span style="color:#0000cc;">= <span style="color:#0000cc;">-1<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stderr<span style="color:#0000cc;">,<span style="color:#ff00ff;">"setprocmask to block all signal failed(%s)\n"<span style="color:#0000cc;">,strerror<span style="color:#0000cc;">(errno<span style="color:#0000cc;">)<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return <span style="color:#0000cc;">-2<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printf<span style="color:#0000cc;">(<span style="color:#ff00ff;">"I will sleep %d second\n"<span style="color:#0000cc;">,sleep_time<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sleep<span style="color:#0000cc;">(sleep_time<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(sigpending<span style="color:#0000cc;">(<span style="color:#0000cc;">&amp;pending_mask<span style="color:#0000cc;">) <span style="color:#0000cc;">=<span style="color:#0000cc;">= <span style="color:#0000cc;">-1<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stderr<span style="color:#0000cc;">,<span style="color:#ff00ff;">"sigpending failed(%s)\n"<span style="color:#0000cc;">,strerror<span style="color:#0000cc;">(errno<span style="color:#0000cc;">)<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return <span style="color:#0000cc;">-2<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">for<span style="color:#0000cc;">(i <span style="color:#0000cc;">= 1 <span style="color:#0000cc;">; i <span style="color:#0000cc;">&lt; NSIG <span style="color:#0000cc;">; i<span style="color:#0000cc;">+<span style="color:#0000cc;">+<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(sigismember<span style="color:#0000cc;">(<span style="color:#0000cc;">&amp;pending_mask<span style="color:#0000cc;">,i<span style="color:#0000cc;">)<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printf<span style="color:#0000cc;">(<span style="color:#ff00ff;">"signo(%d) :%s\n"<span style="color:#0000cc;">,i<span style="color:#0000cc;">,strsignal<span style="color:#0000cc;">(i<span style="color:#0000cc;">)<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sigemptyset<span style="color:#0000cc;">(<span style="color:#0000cc;">&amp;empty_mask<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(sigprocmask<span style="color:#0000cc;">(SIG_SETMASK<span style="color:#0000cc;">,<span style="color:#0000cc;">&amp;empty_mask<span style="color:#0000cc;">,<span style="color:#0000ff;">NULL<span style="color:#0000cc;">) <span style="color:#0000cc;">=<span style="color:#0000cc;">= <span style="color:#0000cc;">-1<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stderr<span style="color:#0000cc;">,<span style="color:#ff00ff;">"setprocmask to release all signal failed(%s)\n"<span style="color:#0000cc;">,strerror<span style="color:#0000cc;">(errno<span style="color:#0000cc;">)<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return <span style="color:#0000cc;">-3<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">while<span style="color:#0000cc;">(<span style="color:#0000cc;">!get_SIGINT<span style="color:#0000cc;">)<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;continue <span style="color:#0000cc;">; <span style="color:#0000cc;">/<span style="color:#0000cc;">/why <span style="color:#0000ff;">not use pause <span style="color:#0000cc;">? I will explain later<br></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">for<span style="color:#0000cc;">(i <span style="color:#0000cc;">= 1<span style="color:#0000cc;">; i <span style="color:#0000cc;">&lt; NSIG <span style="color:#0000cc;">; i<span style="color:#0000cc;">+<span style="color:#0000cc;">+<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(sig_cnt<span style="color:#0000cc;">[i<span style="color:#0000cc;">] <span style="color:#0000cc;">!<span style="color:#0000cc;">= 0 <span style="color:#0000cc;">)<br></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printf<span style="color:#0000cc;">(<span style="color:#ff00ff;">"%s:signal %d caught %d time%s\n"<span style="color:#0000cc;">,<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;argv<span style="color:#0000cc;">[0<span style="color:#0000cc;">]<span style="color:#0000cc;">,i<span style="color:#0000cc;">,sig_cnt<span style="color:#0000cc;">[i<span style="color:#0000cc;">]<span style="color:#0000cc;">,<span style="color:#0000cc;">(sig_cnt<span style="color:#0000cc;">[i<span style="color:#0000cc;">] <span style="color:#0000cc;">&gt;1<span style="color:#0000cc;">)<span style="color:#0000cc;">?<span style="color:#ff00ff;">"s"<span style="color:#0000cc;">:<span style="color:#ff00ff;">""<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;return 0<span style="color:#0000cc;">;<br></span> </li> 
+     <li> <br></li> 
+     <li> <span style="color:#0000cc;">} </span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> <span style="line-height:2;">&nbsp;&nbsp; &nbsp; 因为我们知道，SIGKILL和SIGSTOP这两个信号是不能够定制自己的信号处理函数的，当然也不能block，原因很简单，OS或者说root才是final boss，必须有稳定终结进程的办法。假如所有的信号，进程都能ignore，OS如何终结进程？<br><span style="line-height:2;"> &nbsp; &nbsp; 这个signal_receiver会等待所有的信号，接收到某信号后，该信号的捕捉到的次数++，SIGINT会终结进程，进程退出前，会打印信号的捕捉统计。<br><span style="line-height:2;"> &nbsp; &nbsp; 如果进程有参数，表示sleep时间，signal_receiver会先屏蔽所有信号（当然，SIGKILL和SIGSTOP并不能被真正屏蔽）。然后sleep 一段时间后，取消信号屏蔽。我们可以想象，在信号屏蔽期间，我们收到的信号，都会在kernel记录下来，但是并不能delivery，这种信号称之挂起信号。如果在sleep期间或者说信号屏蔽期间，我收到SIGUSR1 这个信号1次和10000次，对内核来说，都是没差别的，因为后面的9999次都会被ignore掉。SIGUSR1属于不可靠信号，位图表示有没有挂起信号，有的话，直接ignore，没有的话，则记录在kernel。<br><span style="line-height:2;"> &nbsp; &nbsp; 然后我们看下，signal_sender：&nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="line-height:2;">
+    <ol>
+     <li> <span style="color:#000000;">manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code<span style="color:#0000cc;">/c<span style="color:#0000cc;">/self<span style="color:#0000cc;">/signal$ cat signal_sender<span style="color:#0000cc;">.c <br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;stdio<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;stdlib<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;getopt<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;signal<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;<span style="color:#ff0000;">string<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span></span> </li> 
+     <li> #include <span style="color:#0000cc;">&lt;errno<span style="color:#0000cc;">.h<span style="color:#0000cc;">&gt;<br></span></span></span> </li> 
+     <li> <br></li> 
+     <li> void usage<span style="color:#0000cc;">(<span style="color:#0000cc;">)<br></span></span> </li> 
+     <li> <span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stderr<span style="color:#0000cc;">,<span style="color:#ff00ff;">"USAGE:\n"<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stderr<span style="color:#0000cc;">,<span style="color:#ff00ff;">"--------------------------------\n"<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stderr<span style="color:#0000cc;">,<span style="color:#ff00ff;">"signal_sender pid signo times\n"<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> <span style="color:#ff0000;">int main<span style="color:#0000cc;">(<span style="color:#ff0000;">int argc<span style="color:#0000cc;">,char<span style="color:#0000cc;">* argv<span style="color:#0000cc;">[<span style="color:#0000cc;">]<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;pid_t pid <span style="color:#0000cc;">= <span style="color:#0000cc;">-1 <span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;">int signo <span style="color:#0000cc;">= <span style="color:#0000cc;">-1<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;">int times <span style="color:#0000cc;">= <span style="color:#0000cc;">-1<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;">int i <span style="color:#0000cc;">; <br></span></span> </li> 
+     <li> <br></li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(argc <span style="color:#0000cc;">&lt; 4 <span style="color:#0000cc;">)<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;usage<span style="color:#0000cc;">(<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return <span style="color:#0000cc;">-1<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;pid <span style="color:#0000cc;">= atol<span style="color:#0000cc;">(argv<span style="color:#0000cc;">[1<span style="color:#0000cc;">]<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;signo <span style="color:#0000cc;">= atoi<span style="color:#0000cc;">(argv<span style="color:#0000cc;">[2<span style="color:#0000cc;">]<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;times <span style="color:#0000cc;">= atoi<span style="color:#0000cc;">(argv<span style="color:#0000cc;">[3<span style="color:#0000cc;">]<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(pid <span style="color:#0000cc;">&lt;<span style="color:#0000cc;">= 0 <span style="color:#0000cc;">|<span style="color:#0000cc;">| times <span style="color:#0000cc;">&lt; 0 <span style="color:#0000cc;">|<span style="color:#0000cc;">| signo <span style="color:#0000cc;">&lt;1 <span style="color:#0000cc;">|<span style="color:#0000cc;">|signo <span style="color:#0000cc;">&gt;<span style="color:#0000cc;">=64 <span style="color:#0000cc;">|<span style="color:#0000cc;">|signo <span style="color:#0000cc;">=<span style="color:#0000cc;">= 32 <span style="color:#0000cc;">|<span style="color:#0000cc;">| signo <span style="color:#0000cc;">=<span style="color:#0000cc;">=33<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;usage<span style="color:#0000cc;">(<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return <span style="color:#0000cc;">-1<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;printf<span style="color:#0000cc;">(<span style="color:#ff00ff;">"pid = %ld,signo = %d,times = %d\n"<span style="color:#0000cc;">,pid<span style="color:#0000cc;">,signo<span style="color:#0000cc;">,times<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">for<span style="color:#0000cc;">( i <span style="color:#0000cc;">= 0 <span style="color:#0000cc;">; i <span style="color:#0000cc;">&lt; times <span style="color:#0000cc;">; i<span style="color:#0000cc;">+<span style="color:#0000cc;">+<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if<span style="color:#0000cc;">(kill<span style="color:#0000cc;">(pid<span style="color:#0000cc;">,signo<span style="color:#0000cc;">) <span style="color:#0000cc;">=<span style="color:#0000cc;">= <span style="color:#0000cc;">-1<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stderr<span style="color:#0000cc;">, <span style="color:#ff00ff;">"send signo(%d) to pid(%ld) failed,reason(%s)\n"<span style="color:#0000cc;">,signo<span style="color:#0000cc;">,pid<span style="color:#0000cc;">,strerror<span style="color:#0000cc;">(errno<span style="color:#0000cc;">)<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return <span style="color:#0000cc;">-2<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">}<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;fprintf<span style="color:#0000cc;">(stdout<span style="color:#0000cc;">,<span style="color:#ff00ff;">"done\n"<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;return 0<span style="color:#0000cc;">;<br></span> </li> 
+     <li> <br></li> 
+     <li> <span style="color:#0000cc;">} </span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> <span style="line-height:2;">&nbsp;&nbsp; &nbsp; signal_sender需要三个参数，pid signo times，就是向拿个进程发送什么信号多少次的意思。如 signal_sender 1234 10 10000,含义是向pid=1234的&nbsp;进程发送10号信号（SIGUSR1），连续发送10000次。<br><span style="line-height:2;"> &nbsp; &nbsp; 有这两个进程，我们就可以实验了 &nbsp;。&nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="line-height:2;">
+    <ol>
+     <li> <span style="color:#000000;">manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code<span style="color:#0000cc;">/c<span style="color:#0000cc;">/self<span style="color:#0000cc;">/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver <span style="color:#0000cc;">&amp;<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">[1<span style="color:#0000cc;">] 23416<br></span></span> </li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code<span style="color:#0000cc;">/c<span style="color:#0000cc;">/self<span style="color:#0000cc;">/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:PID <span style="color:#0000ff;">is 23416<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> signal <span style="color:#0000ff;">for signo<span style="color:#0000cc;">(32<span style="color:#0000cc;">) failed <span style="color:#0000cc;">(Invalid argument<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> signal <span style="color:#0000ff;">for signo<span style="color:#0000cc;">(33<span style="color:#0000cc;">) failed <span style="color:#0000cc;">(Invalid argument<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code<span style="color:#0000cc;">/c<span style="color:#0000cc;">/self<span style="color:#0000cc;">/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 23416 10 10000<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 23416<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 10<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 10000<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code<span style="color:#0000cc;">/c<span style="color:#0000cc;">/self<span style="color:#0000cc;">/signal$ sleep 20 <span style="color:#0000cc;">; <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 23416 2 1<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 23416<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 2<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 1<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:signal 10 caught 2507 times<br></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">[1<span style="color:#0000cc;">]<span style="color:#0000cc;">+ Done <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver </span></span></span></span></span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> <span style="line-height:2;">&nbsp; &nbsp; signal_receiver等待signal的来临，singal_sender向其发送SIGUSR1 10000次，然后sleep 20秒，确保sig_receiver处理完成。但是我们发现，其实一共才caught信号SIGUSR1 &nbsp;2507次，7000多次的发送都丢失了，所以我们称SIGUSR1 是非可靠信号，存在丢信号的问题。<br><span style="line-height:2;"> &nbsp; &nbsp; 俗话说不怕不识货，就怕货比货 ，我们让可靠信号参战，看下效果：<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="line-height:2;">
+    <ol>
+     <li> <span style="color:#000000;">manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver &amp;<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">[1<span style="color:#0000cc;">] 26067<br></span></span> </li> 
+     <li> <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:PID is 26067<br></span></span></span> </li> 
+     <li> signal <span style="color:#0000ff;">for signo<span style="color:#0000cc;">(32<span style="color:#0000cc;">) failed <span style="color:#0000cc;">(Invalid argument<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> signal <span style="color:#0000ff;">for signo<span style="color:#0000cc;">(33<span style="color:#0000cc;">) failed <span style="color:#0000cc;">(Invalid argument<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 26067 10 10000<br></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 26067<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 10<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 10000<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 26067 36 10000<br></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 26067<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 36<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 10000<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 26067 2 1<br></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 26067<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 2<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 1<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:signal 10 caught 2879 times<br></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:signal 36 caught 10000 times<br></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">[1<span style="color:#0000cc;">]<span style="color:#0000cc;">+ Done <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver </span></span></span></span></span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> <span style="line-height:2;">&nbsp; &nbsp; 可靠性信号36，发送10000次，signal_receiver全部收到，不可靠性信号10，共收到2879次。这个数字是不可预期的，取决于内核进程的调度。<br><span style="line-height:2;"> &nbsp; &nbsp; 这个如果还不够直观，我们在比较一次，让signal_receiver先屏蔽所有信号一段时间，如30s，然后解除屏蔽。<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="line-height:2;">
+    <ol>
+     <li> <span style="color:#000000;">manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver 30 &amp;<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">[1<span style="color:#0000cc;">] 27639<br></span></span> </li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:PID is 27639<br></span></span></span></span></span></span></span> </li> 
+     <li> signal <span style="color:#0000ff;">for signo<span style="color:#0000cc;">(32<span style="color:#0000cc;">) failed <span style="color:#0000cc;">(Invalid argument<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> signal <span style="color:#0000ff;">for signo<span style="color:#0000cc;">(33<span style="color:#0000cc;">) failed <span style="color:#0000cc;">(Invalid argument<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> I will <span style="color:#ff0000;">sleep 30 second<br></span> </li> 
+     <li> <br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 27639 10 10000<br></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 27639<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 10<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 10000<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 27639 36 10000<br></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 27639<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 36<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 10000<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <br></span></span></span></span> </li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ signo<span style="color:#0000cc;">(10<span style="color:#0000cc;">) <span style="color:#0000cc;">:User defined signal 1<br></span></span></span></span></span></span></span> </li> 
+     <li> signo<span style="color:#0000cc;">(36<span style="color:#0000cc;">) <span style="color:#0000cc;">:Real<span style="color:#0000cc;">-time signal 2<br></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 27639 2 1<br></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 27639<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 2<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 1<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:signal <span>10 caught <span>1 time<br></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:signal <span>36 caught <span>10<span>000 times<br></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">[1<span style="color:#0000cc;">]<span style="color:#0000cc;">+ Done <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver 30 </span></span></span></span></span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> <span style="line-height:2;">&nbsp;&nbsp;&nbsp; &nbsp; 这个比较反差比较大，不可靠signal10 共收到1次，可靠性信号36 共caught到10000次。原因就在于sigprocmask将所有的信号都屏蔽了，造成所有的信号都不能delivery。对1～31的信号，内核发现已经有相应的挂起信号，则ignore到新来的信号。但是可靠性信号则不同，会添加队列中去，尽管已经有了相同的信号。需要注意的是，signal pending有上限，并不能无限制的发：<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText">
+    <ol>
+     <li> <span style="color:#000000;">manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ ulimit <span style="color:#0000cc;">-a<br></span></span></span></span></span></span> </li> 
+     <li> core file <span style="color:#0000ff;">size <span style="color:#0000cc;">(blocks<span style="color:#0000cc;">, <span style="color:#0000cc;">-c<span style="color:#0000cc;">) 0<br></span></span></span></span></span> </li> 
+     <li> data seg <span style="color:#0000ff;">size <span style="color:#0000cc;">(kbytes<span style="color:#0000cc;">, <span style="color:#0000cc;">-d<span style="color:#0000cc;">) unlimited<br></span></span></span></span></span> </li> 
+     <li> scheduling priority <span style="color:#0000cc;">(<span style="color:#0000cc;">-e<span style="color:#0000cc;">) 0<br></span></span></span> </li> 
+     <li> file <span style="color:#0000ff;">size <span style="color:#0000cc;">(blocks<span style="color:#0000cc;">, <span style="color:#0000cc;">-f<span style="color:#0000cc;">) unlimited<br></span></span></span></span></span> </li> 
+     <li> <span>pending signals <span style="color:#0000cc;">(<span style="color:#0000cc;">-<span>i<span style="color:#0000cc;">)<span> 15408<br></span></span></span></span></span></span> </li> 
+     <li> max locked memory <span style="color:#0000cc;">(kbytes<span style="color:#0000cc;">, <span style="color:#0000cc;">-l<span style="color:#0000cc;">) 64<br></span></span></span></span> </li> 
+     <li> max memory <span style="color:#0000ff;">size <span style="color:#0000cc;">(kbytes<span style="color:#0000cc;">, <span style="color:#0000cc;">-m<span style="color:#0000cc;">) unlimited<br></span></span></span></span></span> </li> 
+     <li> open files <span style="color:#0000cc;">(<span style="color:#0000cc;">-n<span style="color:#0000cc;">) 1024<br></span></span></span> </li> 
+     <li> pipe <span style="color:#0000ff;">size <span style="color:#0000cc;">(512 bytes<span style="color:#0000cc;">, <span style="color:#0000cc;">-p<span style="color:#0000cc;">) 8<br></span></span></span></span></span> </li> 
+     <li> POSIX message queues <span style="color:#0000cc;">(bytes<span style="color:#0000cc;">, <span style="color:#0000cc;">-q<span style="color:#0000cc;">) 819200<br></span></span></span></span> </li> 
+     <li> real<span style="color:#0000cc;">-time priority <span style="color:#0000cc;">(<span style="color:#0000cc;">-r<span style="color:#0000cc;">) 0<br></span></span></span></span> </li> 
+     <li> stack <span style="color:#0000ff;">size <span style="color:#0000cc;">(kbytes<span style="color:#0000cc;">, <span style="color:#0000cc;">-s<span style="color:#0000cc;">) 8192<br></span></span></span></span></span> </li> 
+     <li> cpu time <span style="color:#0000cc;">(seconds<span style="color:#0000cc;">, <span style="color:#0000cc;">-t<span style="color:#0000cc;">) unlimited<br></span></span></span></span> </li> 
+     <li> max user processes <span style="color:#0000cc;">(<span style="color:#0000cc;">-u<span style="color:#0000cc;">) 15408<br></span></span></span> </li> 
+     <li> virtual memory <span style="color:#0000cc;">(kbytes<span style="color:#0000cc;">, <span style="color:#0000cc;">-v<span style="color:#0000cc;">) unlimited<br></span></span></span></span> </li> 
+     <li> file locks <span style="color:#0000cc;">(<span style="color:#0000cc;">-x<span style="color:#0000cc;">) unlimited </span></span></span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> &nbsp; &nbsp; 我发送100万，最终会收到15408个可靠信号：<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText">
+    <ol>
+     <li> <span style="color:#000000;">manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver 30 &amp;<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">[1<span style="color:#0000cc;">] 16488<br></span></span> </li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:PID is 16488<br></span></span></span></span></span></span></span> </li> 
+     <li> signal <span style="color:#0000ff;">for signo<span style="color:#0000cc;">(32<span style="color:#0000cc;">) failed <span style="color:#0000cc;">(Invalid argument<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> signal <span style="color:#0000ff;">for signo<span style="color:#0000cc;">(33<span style="color:#0000cc;">) failed <span style="color:#0000cc;">(Invalid argument<span style="color:#0000cc;">)<br></span></span></span></span></span> </li> 
+     <li> I will <span style="color:#ff0000;">sleep 30 second<br></span> </li> 
+     <li> <br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 16488 36 1000000<br></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 16488<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 36<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 1000000<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ signo<span style="color:#0000cc;">(36<span style="color:#0000cc;">) <span style="color:#0000cc;">:Real<span style="color:#0000cc;">-time signal 2<br></span></span></span></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> manu@manu<span style="color:#0000cc;">-hacks<span style="color:#0000cc;">:<span style="color:#0000cc;">~<span style="color:#0000cc;">/code/c/self/signal$ <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_sender 16488 2 1<br></span></span></span></span></span></span> </li> 
+     <li> pid <span style="color:#0000cc;">= 16488<span style="color:#0000cc;">,signo <span style="color:#0000cc;">= 2<span style="color:#0000cc;">,times <span style="color:#0000cc;">= 1<br></span></span></span></span></span> </li> 
+     <li> done<br></li> 
+     <li> <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver<span style="color:#0000cc;">:signal 36 caught <span>15408 times<br></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">[1<span style="color:#0000cc;">]<span style="color:#0000cc;">+ Done <span style="color:#0000cc;">.<span style="color:#0000cc;">/signal_receiver 30 </span></span></span></span></span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> <span style="line-height:2;"> &nbsp; &nbsp; &nbsp; 内核是怎么做到的？<br><span style="line-height:2;"> &nbsp;&nbsp;&nbsp;&nbsp;<img src="https://yqfile.alicdn.com/img_ab6039dfdc56e85449ed5bd1f2f562ee.png" alt="" width="700" height="452"><br><span style="line-height:2;"> &nbsp; &nbsp; 上图是内核中signal相关的数据结构。其中task_struct中有sigpending类型的成员变量pending<br><span style="line-height:2;"> &nbsp; &nbsp;&nbsp;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText" style="line-height:2;">
+    <ol>
+     <li> <span style="color:#000000;">struct task_struct <span style="color:#0000cc;">{<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;volatile long state<span style="color:#0000cc;">; <span style="color:#0000cc;">/<span style="color:#0000cc;">* <span style="color:#0000cc;">-1 unrunnable<span style="color:#0000cc;">, 0 runnable<span style="color:#0000cc;">, <span style="color:#0000cc;">&gt;0 stopped <span style="color:#0000cc;">*<span style="color:#0000cc;">/<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;void <span style="color:#0000cc;">*stack<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;atomic_t usage<span style="color:#0000cc;">;<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;unsigned <span style="color:#ff0000;">int flags<span style="color:#0000cc;">; <span style="color:#0000cc;">/<span style="color:#0000cc;">* per process flags<span style="color:#0000cc;">, defined below <span style="color:#0000cc;">*<span style="color:#0000cc;">/<br></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;unsigned <span style="color:#ff0000;">int ptrace<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">.<span style="color:#0000cc;">.<span style="color:#0000cc;">.<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">.<span style="color:#0000cc;">.<span style="color:#0000cc;">.<br></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">/<span style="color:#0000cc;">* signal handlers <span style="color:#0000cc;">*<span style="color:#0000cc;">/<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;struct signal_struct <span style="color:#0000cc;">*signal<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;struct sighand_struct <span style="color:#0000cc;">*sighand<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;sigset_t blocked<span style="color:#0000cc;">, real_blocked<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;sigset_t saved_sigmask<span style="color:#0000cc;">; <span style="color:#0000cc;">/<span style="color:#0000cc;">* restored <span style="color:#0000ff;">if set_restore_sigmask<span style="color:#0000cc;">(<span style="color:#0000cc;">) was used <span style="color:#0000cc;">*<span style="color:#0000cc;">/<br></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;struct sigpending <span>pending<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">.<span style="color:#0000cc;">.<span style="color:#0000cc;">.<br></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> struct signal_struct <span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;atomic_t&nbsp;&nbsp;&nbsp;&nbsp; sigcnt<span style="color:#0000cc;">;<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;atomic_t&nbsp;&nbsp;&nbsp;&nbsp; live<span style="color:#0000cc;">;<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;">int&nbsp;&nbsp;&nbsp;&nbsp; nr_threads<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">.<span style="color:#0000cc;">.<span style="color:#0000cc;">.<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">.<span style="color:#0000cc;">.<span style="color:#0000cc;">.<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">/<span style="color:#0000cc;">* shared signal handling<span style="color:#0000cc;">: <span style="color:#0000cc;">*<span style="color:#0000cc;">/<br></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;struct sigpending&nbsp;&nbsp;&nbsp;&nbsp;<span>shared_pending<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">.<span style="color:#0000cc;">.<span style="color:#0000cc;">.<br></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> struct <span>sigpending <span style="color:#0000cc;">{<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;struct list_head list<span style="color:#0000cc;">;<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;sigset_t signal<span style="color:#0000cc;">;<br></span> </li> 
+     <li> <span style="color:#0000cc;">}<span style="color:#0000cc;">;<br></span></span> </li> 
+     <li> <br></li> 
+     <li> #define _NSIG&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;64<br></li> 
+     <li> <br></li> 
+     <li> #ifdef __i386__<br></li> 
+     <li> # define _NSIG_BPW&nbsp;&nbsp;&nbsp;&nbsp;32<br></li> 
+     <li> #<span style="color:#0000ff;">else<br></span> </li> 
+     <li> # define _NSIG_BPW&nbsp;&nbsp;&nbsp;&nbsp;64<br></li> 
+     <li> #endif<br></li> 
+     <li> <br></li> 
+     <li> #define _NSIG_WORDS&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">(_NSIG <span style="color:#0000cc;">/ _NSIG_BPW<span style="color:#0000cc;">)<br></span></span></span> </li> 
+     <li> <br></li> 
+     <li> typedef unsigned long old_sigset_t<span style="color:#0000cc;">;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;">/<span style="color:#0000cc;">* at least 32 bits <span style="color:#0000cc;">*<span style="color:#0000cc;">/<br></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> typedef struct <span style="color:#0000cc;">{<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;unsigned long sig<span style="color:#0000cc;">[_NSIG_WORDS<span style="color:#0000cc;">]<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> <span style="color:#0000cc;">} sigset_t<span style="color:#0000cc;">; </span></span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> <span style="line-height:2;">&nbsp;&nbsp;&nbsp; &nbsp; task_struct中的pending，和signal-&gt;shared_pending都是记录挂起信号的数据结构，读到此处，你可能会迷惑，为何有两个这样的结构。这牵扯到thread与信号的一些问题，我们此处简化，就认为是一个就好，后面讲述线程与信号关系的时候，再展开。<br><span style="line-height:2;">&nbsp; &nbsp; <img src="https://yqfile.alicdn.com/img_f2f45df5d8827b04996b8abb1a676644.png" alt="" width="700" height="558">&nbsp;&nbsp;<br><span style="line-height:2;">&nbsp; &nbsp; 我们看到了，kill也好，tkill也罢，最终都走到了_send_signal.当然了kill系统调用根据pid的情况会分成多个分支如pid &gt;0 pid = 0 pid=-1;pid &lt; 0&amp;pid !=-1,总之了，我的图只绘制了pid &gt;0 的分支。tkill也有类似情况。<br><span style="line-height:2;">&nbsp; &nbsp; 那么kernel是怎么做到的非可靠信号和可靠信号的的这些差别的呢？<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText"> 
+    <ol style="line-height:2;">
+     <li> <span style="color:#000000;"><span style="line-height:1;">static <span style="color:#ff0000;line-height:1;">int<span style="line-height:1;"> __send_signal<span style="color:#0000cc;line-height:1;">(<span style="color:#ff0000;line-height:1;">int<span style="line-height:1;"> sig<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> struct siginfo <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> struct task_struct <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;">t<span style="color:#0000cc;line-height:1;">,<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;line-height:1;">int<span style="line-height:1;"> group<span style="color:#0000cc;line-height:1;">, <span style="color:#ff0000;line-height:1;">int<span style="line-height:1;"> from_ancestor_ns<span style="color:#0000cc;line-height:1;">)<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;line-height:1;">{<br></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;struct sigpending <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;">pending<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;struct sigqueue <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;">q<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;line-height:1;">int<span style="line-height:1;"> override_rlimit<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#ff0000;line-height:1;">int<span style="line-height:1;"> ret <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> 0<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> result<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;assert_spin_locked<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">t<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">sighand<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">siglock<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;result <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> TRACE_SIGNAL_IGNORED<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">if <span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">!<span style="line-height:1;">prepare_signal<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">sig<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> t<span style="color:#0000cc;line-height:1;">,<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;from_ancestor_ns <span style="color:#0000cc;line-height:1;">|<span style="color:#0000cc;line-height:1;">| <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">info <span style="color:#0000cc;line-height:1;">=<span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> SEND_SIG_FORCED<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">)<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto ret<span style="color:#0000cc;line-height:1;">;<br></span></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;pending <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> group <span style="color:#0000cc;line-height:1;">? <span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">t<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">signal<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">shared_pending <span style="color:#0000cc;line-height:1;">: <span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">t<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">pending<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">/<span style="color:#0000cc;line-height:1;">*<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> Short<span style="color:#0000cc;line-height:1;">-<span style="line-height:1;">circuit ignored signals <span style="color:#0000ff;line-height:1;">and<span style="line-height:1;"> support queuing<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> exactly one non<span style="color:#0000cc;line-height:1;">-<span style="line-height:1;">rt signal<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> so that we can <span style="color:#0000ff;line-height:1;">get<span style="line-height:1;"> more<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> detailed information about the cause of the signal<span style="color:#0000cc;line-height:1;">.<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="color:#0000cc;line-height:1;">/<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;result <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> TRACE_SIGNAL_ALREADY_PENDING<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">if <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">legacy_queue<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">pending<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> sig<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">) //如果是低于32的信号，并且已经在pending中出现了的信号，就直接返回了，ignore<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto ret<span style="color:#0000cc;line-height:1;">;<br></span></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;result <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> TRACE_SIGNAL_DELIVERED<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">/<span style="color:#0000cc;line-height:1;">*<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> fast<span style="color:#0000cc;line-height:1;">-<span style="line-height:1;">pathed signals <span style="color:#0000ff;line-height:1;">for<span style="line-height:1;"> kernel<span style="color:#0000cc;line-height:1;">-<span style="line-height:1;">internal things like SIGSTOP<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">* <span style="color:#0000ff;line-height:1;">or<span style="line-height:1;"> SIGKILL<span style="color:#0000cc;line-height:1;">.<br></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="color:#0000cc;line-height:1;">/<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">if <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">info <span style="color:#0000cc;line-height:1;">=<span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> SEND_SIG_FORCED<span style="color:#0000cc;line-height:1;">)<br></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto out_set<span style="color:#0000cc;line-height:1;">;<br></span></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">/<span style="color:#0000cc;line-height:1;">*<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> Real<span style="color:#0000cc;line-height:1;">-<span style="color:#ff0000;line-height:1;">time<span style="line-height:1;"> signals must be queued <span style="color:#0000ff;line-height:1;">if<span style="line-height:1;"> sent by sigqueue<span style="color:#0000cc;line-height:1;">, <span style="color:#0000ff;line-height:1;">or<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> some other real<span style="color:#0000cc;line-height:1;">-<span style="color:#ff0000;line-height:1;">time<span style="line-height:1;"> mechanism<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;"> It <span style="color:#0000ff;line-height:1;">is<span style="line-height:1;"> implementation<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> defined whether kill<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">)<span style="line-height:1;"> does so<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;"> We attempt <span style="color:#0000ff;line-height:1;">to <span style="color:#0000ff;line-height:1;">do<span style="line-height:1;"> so<span style="color:#0000cc;line-height:1;">, <span style="color:#0000ff;line-height:1;">on<br></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> the principle of least surprise<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> but since kill <span style="color:#0000ff;line-height:1;">is <span style="color:#0000ff;line-height:1;">not<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> allowed <span style="color:#0000ff;line-height:1;">to<span style="line-height:1;"> fail with EAGAIN when low <span style="color:#0000ff;line-height:1;">on<span style="line-height:1;"> memory we just<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> make sure at least one signal gets delivered <span style="color:#0000ff;line-height:1;">and<span style="line-height:1;"> don<span style="color:#0000cc;line-height:1;">'<span style="line-height:1;">t<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> pass <span style="color:#0000ff;line-height:1;">on<span style="line-height:1;"> the info struct<span style="color:#0000cc;line-height:1;">.<br></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="color:#0000cc;line-height:1;">/<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">if <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">sig <span style="color:#0000cc;line-height:1;">&lt;<span style="line-height:1;"> SIGRTMIN<span style="color:#0000cc;line-height:1;">)<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;override_rlimit <span style="color:#0000cc;line-height:1;">= <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">is_si_special<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">) <span style="color:#0000cc;line-height:1;">|<span style="color:#0000cc;line-height:1;">|<span style="line-height:1;"> info<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">si_code <span style="color:#0000cc;line-height:1;">&gt;<span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> 0<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">else<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;override_rlimit <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> 0<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+    </ol>
+    <div> 
+     <span style="color:#5c5c5c;"><span style="line-height:12px;"><span style="line-height:1;">&nbsp; &nbsp; &nbsp; //分配sigqueue结构，并且链入到相应的pending。<br></span></span></span> 
+    </div> 
+    <ol style="line-height:2;">
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;q <span style="color:#0000cc;line-height:1;">= <span style="line-height:1;">__sigqueue_alloc<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">sig<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> t<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> GFP_ATOMIC <span style="color:#0000cc;line-height:1;">|<span style="line-height:1;"> __GFP_NOTRACK_FALSE_POSITIVE<span style="color:#0000cc;line-height:1;">,<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;override_rlimit<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">if <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">q<span style="color:#0000cc;line-height:1;">) <span style="color:#0000cc;line-height:1;">{<br></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;list_add_tail<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">list<span style="color:#0000cc;line-height:1;">, <span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">pending<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">list<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;switch <span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">unsigned long<span style="color:#0000cc;line-height:1;">)<span style="line-height:1;"> info<span style="color:#0000cc;line-height:1;">) <span style="color:#0000cc;line-height:1;">{<br></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">case <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">unsigned long<span style="color:#0000cc;line-height:1;">)<span style="line-height:1;"> SEND_SIG_NOINFO<span style="color:#0000cc;line-height:1;">:<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_signo <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> sig<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_errno <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> 0<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_code <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> SI_USER<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_pid <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> task_tgid_nr_ns<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">current<span style="color:#0000cc;line-height:1;">,<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;task_active_pid_ns<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">t<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_uid <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> from_kuid_munged<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">current_user_ns<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> current_uid<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:#0000cc;line-height:1;">;<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">case <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">unsigned long<span style="color:#0000cc;line-height:1;">)<span style="line-height:1;"> SEND_SIG_PRIV<span style="color:#0000cc;line-height:1;">:<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_signo <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> sig<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_errno <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> 0<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_code <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> SI_KERNEL<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_pid <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> 0<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_uid <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> 0<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:#0000cc;line-height:1;">;<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;default<span style="color:#0000cc;line-height:1;">:<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;copy_siginfo<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> info<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">if <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">from_ancestor_ns<span style="color:#0000cc;line-height:1;">)<br></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;">si_pid <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> 0<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break<span style="color:#0000cc;line-height:1;">;<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">}<br></span></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;userns_fixup_signal_uid<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">q<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> t<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">} <span style="color:#0000ff;line-height:1;">else <span style="color:#0000ff;line-height:1;">if <span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">!<span style="line-height:1;">is_si_special<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">info<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">) <span style="color:#0000cc;line-height:1;">{<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;line-height:1;">if <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">sig <span style="color:#0000cc;line-height:1;">&gt;<span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> SIGRTMIN <span style="color:#0000cc;line-height:1;">&amp;<span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;"> info<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">si_code <span style="color:#0000cc;line-height:1;">!<span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> SI_USER<span style="color:#0000cc;line-height:1;">) <span style="color:#0000cc;line-height:1;">{<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">/<span style="color:#0000cc;line-height:1;">*<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> Queue overflow<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> abort<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;"> We may abort <span style="color:#0000ff;line-height:1;">if<span style="line-height:1;"> the<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> signal was rt <span style="color:#0000ff;line-height:1;">and<span style="line-height:1;"> sent by user using something<br></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> other than kill<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">.<br></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="color:#0000cc;line-height:1;">/<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;result <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> TRACE_SIGNAL_OVERFLOW_FAIL<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ret <span style="color:#0000cc;line-height:1;">= <span style="color:#0000cc;line-height:1;">-<span style="line-height:1;">EAGAIN<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto ret<span style="color:#0000cc;line-height:1;">;<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">} <span style="color:#0000ff;line-height:1;">else <span style="color:#0000cc;line-height:1;">{<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">/<span style="color:#0000cc;line-height:1;">*<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> This <span style="color:#0000ff;line-height:1;">is<span style="line-height:1;"> a silent loss of information<span style="color:#0000cc;line-height:1;">.<span style="line-height:1;"> We still<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;"> send the signal<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> but the <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;">info bits are lost<span style="color:#0000cc;line-height:1;">.<br></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;line-height:1;">*<span style="color:#0000cc;line-height:1;">/<br></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;result <span style="color:#0000cc;line-height:1;">=<span style="line-height:1;"> TRACE_SIGNAL_LOSE_INFO<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">}<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000cc;line-height:1;">}<br></span></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">out_set<span style="color:#0000cc;line-height:1;">:<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;signalfd_notify<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">t<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> sig<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;<span style="line-height:1;">sigaddset<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">pending<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">signal<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> sig<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">; &nbsp;//加入位图<br></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;complete_signal<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">sig<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> t<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> group<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">ret<span style="color:#0000cc;line-height:1;">:<br></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;trace_signal_generate<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">sig<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> info<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> t<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> group<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> result<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">;<br></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;return ret<span style="color:#0000cc;line-height:1;">;<br></span></span> </li> 
+     <li> <span style="color:#0000cc;line-height:1;">}<br></span> </li> 
+     <li> <br></li> 
+     <li> <span style="line-height:1;">static inline <span style="color:#ff0000;line-height:1;">int <span style="line-height:1;">legacy_queue<span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">struct sigpending <span style="color:#0000cc;line-height:1;">*<span style="line-height:1;">signals<span style="color:#0000cc;line-height:1;">, <span style="color:#ff0000;line-height:1;">int<span style="line-height:1;"> sig<span style="color:#0000cc;line-height:1;">)<br></span></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span style="color:#0000cc;line-height:1;">{<br></span> </li> 
+     <li> <span style="line-height:1;">&nbsp;&nbsp;&nbsp;&nbsp;return <span style="color:#0000cc;line-height:1;">(<span style="line-height:1;">sig <span style="color:#0000cc;line-height:1;">&lt;<span style="line-height:1;"> SIGRTMIN<span style="color:#0000cc;line-height:1;">) <span style="color:#0000cc;line-height:1;">&amp;<span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;"> sigismember<span style="color:#0000cc;line-height:1;">(<span style="color:#0000cc;line-height:1;">&amp;<span style="line-height:1;">signals<span style="color:#0000cc;line-height:1;">-<span style="color:#0000cc;line-height:1;">&gt;<span style="line-height:1;">signal<span style="color:#0000cc;line-height:1;">,<span style="line-height:1;"> sig<span style="color:#0000cc;line-height:1;">)<span style="color:#0000cc;line-height:1;">; //是不可靠信号，并且该信号已经存在挂起信号， </span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span> </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"> &nbsp; &nbsp; 那么15408的限制是在哪里呢？在<span style="font-family:Consolas, monospace;letter-spacing:.10000000149011612px;line-height:19.200000762939453px;">__sigqueue_alloc<span style="font-size:14px;"> 里面。<br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div class="codeText">
+    <ol>
+     <li> <span style="color:#000000;">static <span style="color:#0000ff;">struct sigqueue <span style="color:#0000cc;">*<br></span></span></span> </li> 
+     <li> __sigqueue_alloc<span style="color:#0000cc;">(<span style="color:#0000ff;">int sig<span style="color:#0000cc;">, <span style="color:#0000ff;">struct task_struct <span style="color:#0000cc;">*t<span style="color:#0000cc;">, gfp_t flags<span style="color:#0000cc;">, <span style="color:#0000ff;">int override_rlimit<span style="color:#0000cc;">)<br></span></span></span></span></span></span></span></span></span> </li> 
+     <li> {<br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">struct sigqueue <span style="color:#0000cc;">*q <span style="color:#0000cc;">= NULL<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">struct user_struct <span style="color:#0000cc;">*user<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;/<span style="color:#0000cc;">*<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;">* Protect access to @t credentials<span style="color:#0000cc;">. <span style="color:#0000ff;">This can go away when all<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;">* callers hold rcu read <span style="color:#0000ff;">lock<span style="color:#0000cc;">.<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#0000cc;">*<span style="color:#0000cc;">/<br></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;rcu_read_lock<span style="color:#0000cc;">(<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;user <span style="color:#0000cc;">= get_uid<span style="color:#0000cc;">(__task_cred<span style="color:#0000cc;">(t<span style="color:#0000cc;">)<span style="color:#0000cc;">-<span style="color:#0000cc;">&gt;user<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span>atomic_inc<span style="color:#0000cc;">(<span style="color:#0000cc;">&amp;<span>user<span style="color:#0000cc;">-<span style="color:#0000cc;">&gt;<span>sigpending<span style="color:#0000cc;">)<span style="color:#0000cc;">; &nbsp; &nbsp;//计数器+1 </span></span></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;rcu_read_unlock<span style="color:#0000cc;">(<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if <span style="color:#0000cc;">(override_rlimit <span style="color:#0000cc;">|<span style="color:#0000cc;">|<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span> atomic_read<span style="color:#0000cc;">(<span style="color:#0000cc;">&amp;<span>user<span style="color:#0000cc;">-<span style="color:#0000cc;">&gt;<span>sigpending<span style="color:#0000cc;">) <span style="color:#0000cc;">&lt;<span style="color:#0000cc;">=<br></span></span></span></span></span></span></span></span></span></span> </li> 
+     <li> <span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;task_rlimit<span style="color:#0000cc;">(<span>t<span style="color:#0000cc;">,<span> RLIMIT_SIGPENDING<span style="color:#0000cc;">)<span style="color:#0000cc;">) {<br></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q <span style="color:#0000cc;">= kmem_cache_alloc<span style="color:#0000cc;">(sigqueue_cachep<span style="color:#0000cc;">, flags<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;} <span style="color:#0000ff;">else {<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;print_dropped_signal<span style="color:#0000cc;">(sig<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;}<br></li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#0000ff;">if <span style="color:#0000cc;">(unlikely<span style="color:#0000cc;">(q <span style="color:#0000cc;">=<span style="color:#0000cc;">= NULL<span style="color:#0000cc;">)<span style="color:#0000cc;">) {<br></span></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;atomic_dec<span style="color:#0000cc;">(<span style="color:#0000cc;">&amp;user<span style="color:#0000cc;">-<span style="color:#0000cc;">&gt;sigpending<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;free_uid<span style="color:#0000cc;">(user<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;} <span style="color:#0000ff;">else {<br></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;INIT_LIST_HEAD<span style="color:#0000cc;">(<span style="color:#0000cc;">&amp;q<span style="color:#0000cc;">-<span style="color:#0000cc;">&gt;list<span style="color:#0000cc;">)<span style="color:#0000cc;">;<br></span></span></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;">-<span style="color:#0000cc;">&gt;flags <span style="color:#0000cc;">= 0<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;q<span style="color:#0000cc;">-<span style="color:#0000cc;">&gt;user <span style="color:#0000cc;">= user<span style="color:#0000cc;">;<br></span></span></span></span> </li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;}<br></li> 
+     <li> <br></li> 
+     <li> &nbsp;&nbsp;&nbsp;&nbsp;return q<span style="color:#0000cc;">;<br></span> </li> 
+     <li> } </li> 
+    </ol>
+   </div> 
+   <p> <span style="font-size:14px;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="line-height:2;"><span style="font-family:Consolas, monospace;letter-spacing:.10000000149011612px;line-height:19.200000762939453px;"><span style="font-size:14px;"> &nbsp;&nbsp; &nbsp; 我们看到，legacy_queue就是用来判断是否是非可靠信号（signo低于32），并且相同signo值已经存在在挂起信号之中，如果是，直接返回。<br> &nbsp; &nbsp; &nbsp;而对于可靠信号，会分配一个sigqueue的结构，然后讲sigqueue链入到sigpending结构的中链表中。从而就不会丢失信号。当然对pending信号的总数作了限制，限制最多不可超过15408.当然了这个值是可以修改的：<br> &nbsp;&nbsp;&nbsp;&nbsp;<img src="https://yqfile.alicdn.com/img_c60af9526fca5c49bae7983a3fcf73af.png" alt="" width="600" height="194"><br><br><br> 参考文献：<br> 1 Linux programming interface<br> 2 深入理解linux内核<br> 3 linux kernel 3.8.0 内核源码&nbsp; <br></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

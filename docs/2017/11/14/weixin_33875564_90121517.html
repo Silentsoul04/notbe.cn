@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>左求值表达式，堆栈，调试陷阱与ORM查询语言的设计 « NotBeCN</title>
+  <meta name="description" content="             1，表达式的求值顺序与堆栈结构    “表达式”&nbsp;是程序语言一个很重要的术语，也是大家天天写的程序中很常见的东西，但是表达式的求值顺序一定是从左到右么？&nbsp;C/C++语言中没有明确规定表达式的运算顺序(从左到右，或是从右到左)，这点与C#及Java语言都不同。不过可以确...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/14/weixin_33875564_90121517.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">左求值表达式，堆栈，调试陷阱与ORM查询语言的设计</h1>
+    <p class="post-meta">Nov 14, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">1，表达式的求值顺序与堆栈结构</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><strong>“表达式”</strong>&nbsp;是程序语言一个很重要的术语，也是大家天天写的程序中很常见的东西，但是表达式的求值顺序一定是从左到右么？&nbsp;<a href="http://blog.sina.com.cn/s/blog_7176c8440100mbyg.html" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">C/C++语言中没有明确规定表达式的运算顺序(从左到右，或是从右到左)</a>，这点与C#及Java语言都不同。不过可以确定的是，C#表达式的求值顺序一定是从左到右的。这个问题虽然对于大多数情况来说不重要，甚至很多普通C#，Java开发者都会忽略的问题，但是对于语言设计者，框架设计者，这是有可能需要考虑的问题。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><strong>堆栈</strong>是2种数据结构，“栈” 是一种后进先出的数据结构，也就是说后存放的先取，先存放的后取。这就如同我们要取出放在箱子里面底下的东西，我们首先要移开压在它上面的物体。这个特点常用于函数的嵌套调用，用于记录每一次函数调用的点，以便下级函数调用完毕后返回该记录点继续执行，最典型的应用就是函数的递归调用。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">根据表达式的求值顺序，再结合堆栈结构，程序语言就可以知道表达式的调用结构，知道方法参数的求值顺序，<a href="http://pwmis.codeplex.com/" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">SOD框架</a>恰好利用了这个特征来构建<a href="http://www.cnblogs.com/bluedoctor/p/3225176.html" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">ORM查询语言--OQL&nbsp;</a>。</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">2，“字段堆栈”与实体类属性调用的“秘密”</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">OQL内置了一个堆栈对象：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre> <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+<span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 字段堆栈
+</span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">protected</span> <span style="color:rgb(0,0,255);line-height:1.5;">internal</span> Stack&lt;TableNameField&gt; fieldStack = <span style="color:rgb(0,0,255);line-height:1.5;">new</span> Stack&lt;TableNameField&gt;();</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这个堆栈内存放的是表名称字段对象，它的定义是：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <img class="code_img_closed" src="https://images.cnblogs.com/OutliningIndicators/ContractedBlock.gif" alt="" style="border:0px;vertical-align:middle;">&nbsp;
+    <span class="cnblogs_code_collapse" style="border-width:1px;border-style:solid;border-color:#808080;font-size:12px;line-height:1.5;">TableNameField</span> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在每一个OQL对象上，都有关联的SOD框架的实体类，它有一个“属性访问事件”，OQL对象订阅了该事件：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">class</span><span style="line-height:1.5;"> OQL
+{
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 字段堆栈
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">protected</span> <span style="color:rgb(0,0,255);line-height:1.5;">internal</span> Stack&lt;TableNameField&gt; fieldStack = <span style="color:rgb(0,0,255);line-height:1.5;">new</span> Stack&lt;TableNameField&gt;<span style="line-height:1.5;">();
+
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span><span style="line-height:1.5;"> OQL(EntityBase e)
+        {
+            </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">其它略</span>
+            e.PropertyGetting += <span style="color:rgb(0,0,255);line-height:1.5;">new</span> EventHandler&lt;PropertyGettingEventArgs&gt;<span style="line-height:1.5;">(e_PropertyGetting);
+        }
+
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">void</span> e_PropertyGetting(<span style="color:rgb(0,0,255);line-height:1.5;">object</span><span style="line-height:1.5;"> sender, PropertyGettingEventArgs e)
+        {
+            TableNameField tnf </span>= <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> TableNameField()
+            {
+                Field </span>=<span style="line-height:1.5;"> e.PropertyName,
+                Entity </span>=<span style="line-height:1.5;"> (EntityBase)sender,
+                Index </span>= <span style="color:rgb(0,0,255);line-height:1.5;">this</span><span style="line-height:1.5;">.GetFieldGettingIndex()
+            };
+         
+            fieldStack.Push(tnf);
+        }
+
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">其它方法略</span>
+}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这样，在OQL实例表达式中，每一次调用关联的实体类的属性，就会将该属性对应的字段名信息，压入字段堆栈。这些字段信息，将用来构造SQL的 Select,Where,Order 子句，本篇将讲解它是如何构造Where条件子句的。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">OQL的Where方法支持多种条件构造方式，其中一种是使用OQLCompare对象来做条件。由于OQLCompare 对象设计成了OQL的子对象，因此它也能访问 fieldStack 对象，利用它提供的信息，构造条件信息。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>    <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+    <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 实体对象条件比较类，用于复杂条件比较表达式
+    </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+    <span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">class</span> OQLCompare <span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">: IDisposable</span>
+<span style="line-height:1.5;">    {
+       </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 关联的OQL对象
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">public</span> OQL LinkedOQL { <span style="color:rgb(0,0,255);line-height:1.5;">get</span>;<span style="color:rgb(0,0,255);line-height:1.5;">protected</span> <span style="color:rgb(0,0,255);line-height:1.5;">internal</span> <span style="color:rgb(0,0,255);line-height:1.5;">set</span><span style="line-height:1.5;">; }
+
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span><span style="line-height:1.5;"> OQLCompare(OQL oql)
+        {
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (oql == <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">)
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">throw</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span> ArgumentException(<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">OQLCompare 关联的OQL对象为空！</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">this</span>.LinkedOQL =<span style="line-height:1.5;"> oql;
+        }
+
+       </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">其它内容略</span>
+   }</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br> 此后，就可以像下面这样构造并使用一个OQL查询对象：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>User user=<span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> User();
+OQL q</span>=<span style="line-height:1.5;">OQL.From(user)
+  .Select(user.ID,user.Name)
+  .Where(cmp</span>=&gt;cmp.Comparer(user.Age,<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">&gt;</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>,<span style="color:rgb(128,0,128);line-height:1.5;">18</span><span style="line-height:1.5;">))
+.END;
+List</span>&lt;User&gt; users=EntityQuery&lt;User&gt;.QueryList(q);</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这个OQL查询是在查询所有年龄大于18岁的用户，在Where方法中，cmp对象就是一个OQLCompare 对象，它的Comparer方法使用了user对象的Age属性，在方法执行的时候，user.Age 被求值，字段名“Age” 被压入OQL的字段堆栈，</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>Stack:（<span style="color:rgb(128,0,128);line-height:1.5;">0</span>--“Age”）</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">于是，OQL可以构造出类似下面的SQL语句：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">Select</span> ID ,Name <span style="color:rgb(0,0,255);line-height:1.5;">From</span><span style="line-height:1.5;"> Tb_User
+  </span><span style="color:rgb(0,0,255);line-height:1.5;">Where</span> Age <span style="color:rgb(128,128,128);line-height:1.5;">&gt;</span> <span style="color:rgb(0,128,0);line-height:1.5;">@P0</span>
+<span style="color:rgb(0,128,128);line-height:1.5;">--</span><span style="color:rgb(0,128,128);line-height:1.5;"> P0 = 18</span></pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">当然我们可以直接调用OQL的方法，打印出SQL语句和参数信息，下面会说。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">聪明的读者你可能想到了，这是在利用表达式求值得“副作用”啊，本来只是对 user.Age 属性求值而已，但却利用该属性求值过程中引发的事件，得到了使用的字段信息，然后利用这个信息来构造SQL语句！</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这是一个“巧妙”的运用，<span style="color:rgb(0,0,255);">OQL避开了反射，也没有使用"表达式树"，所以OQL生成SQL的过程非常高效，不会有EF的第一次查询非常慢的问题。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在OQLCompare对象的Comparer方法上，第三个参数除了是一个要比较的值，也可以是另外一个字段，例如下面的查询规则定义的符合最低年龄设置的用户：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>User user=<span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> User();
+Rule rule </span>= <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> Rule();
+OQL q</span>=<span style="line-height:1.5;">OQL.From(user)
+  .InnerJoin(rule).On(user.RuleID,rule.ID)
+  .Select(user.ID,user.Name)
+  .Where(cmp</span>=&gt;cmp.Comparer(user.Age,<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">&gt;</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,rule.LowAge))
+.END;
+List</span>&lt;User&gt; users=EntityQuery&lt;User&gt;.QueryList(q);</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">该查询会生成下面的SQL语句：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">Select</span><span style="line-height:1.5;"> M.ID,M.Name
+  </span><span style="color:rgb(0,0,255);line-height:1.5;">From</span><span style="line-height:1.5;"> Tb_User M
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">Inner</span> <span style="color:rgb(128,128,128);line-height:1.5;">Join</span> Tb_Rule T0 <span style="color:rgb(0,0,255);line-height:1.5;">ON</span> M.RuleID <span style="color:rgb(128,128,128);line-height:1.5;">=</span><span style="line-height:1.5;"> T0.ID 
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">Where</span> M.Age <span style="color:rgb(128,128,128);line-height:1.5;">&gt;</span> T0.LowAge</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;在这个查询中，OQLCompare对象使用的OQL字段堆栈的情况是：</p> 
+   <ol style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">
+    <li style="list-style-type:decimal;">调用方法 Comparer</li> 
+    <li style="list-style-type:decimal;">求取 uer.Age属性，得到 "M.Age"&nbsp;字段名，压入字段堆栈；</li> 
+    <li style="list-style-type:decimal;">求取 rule.LowAg属性，&nbsp;得到 "T0.LowAge"&nbsp;字段名，压入字段堆栈；</li> 
+   </ol>
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">假设此时程序运行在调试状态，在这里有一个断点中断了，在VS的IDE 上查看了其它属性的值，比如看了下 user.ID,user.Name,那么此时OQL的堆栈数据是：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>Stack:（<span style="color:rgb(128,0,128);line-height:1.5;">0</span>--“M.ID”,<span style="color:rgb(128,0,128);line-height:1.5;">1</span>--“M.Name”）</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">当方法Comparer 执行后，堆栈的结果是：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>Stack:（<span style="color:rgb(128,0,128);line-height:1.5;">0</span>--“T0.LowAge”，<span style="color:rgb(128,0,128);line-height:1.5;">1</span>--“M.Age”, <span style="color:rgb(128,0,128);line-height:1.5;">2</span>--“M.ID”,<span style="color:rgb(128,0,128);line-height:1.5;">3</span>--“M.Name”）</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">调用OQL方法，生成条件字符串的时候，从该堆栈弹出字段信息：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>Pop Stack:<span style="color:rgb(128,0,128);line-height:1.5;">0</span>--<span style="line-height:1.5;">“T0.LowAge”
+
+Pop Stack:</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span>--“M.Age”</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;实际上，在OQLComare对象的Comparer方法中进行了上面的堆栈“弹出”操作，并且返回了一个新的 OQLCompare 对象，根据C#语言的“<strong>左求值表达式</strong>”原则 ，这个新的OQLCompare 对象获得了下面的信息：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>compare.ComparedFieldName =<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">M.Age</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;"> ;
+compare.ComparedParameterName </span>=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">T0.LowAge</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;"> ;
+compare.ComparedType </span>=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">&gt;</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> ;</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">该信息完全表达了构建OQL查询的“原意“，并指导生成正确的查询条件：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>M.Age <span style="color:rgb(128,128,128);line-height:1.5;">&gt;</span> T0.LowAge</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">由于每次调用Comparer方法都生成了这样的一个新的&nbsp;OQLCompare 对象，所以整个OQLCompare 对象是一个“<strong>组合对象</strong>”，组合中有根，有枝条，有叶子，组合成为一个“条件对象树”，有这样一棵树，那么再复杂的查询条件，都可以表示了。</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">3，动态构造查询条件与“调试陷阱”</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">从上面的举例，我们发现OQLCompare对象即能够进行【字段与值】进行比较，又能够进行【字段与字段】的条件比较，而且也能识别不同表的字段在一起进行比较。&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">但是，在这个过程中，有可能遭遇”调试陷阱“。</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">3.1，字段堆栈--避免“调试陷阱”</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">回看开始的例子：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>User user=<span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> User();
+OQL q</span>=<span style="line-height:1.5;">OQL.From(user)
+  .Select(user.<span style="color:rgb(255,0,0);line-height:1.5;">ID</span>,user.Name)
+  .Where(cmp</span>=&gt;<span style="line-height:1.5;">cmp.Comparer(user.Age,<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">&gt;</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>,<span style="color:rgb(128,0,128);line-height:1.5;">18</span></span><span style="line-height:1.5;"><span style="line-height:1.5;">)</span>)
+.END;
+List</span>&lt;User&gt; users=EntityQuery&lt;User&gt;.QueryList(q);</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">加入有色背景处是一个断点，程序运行到这里进入调试模式，而此时鼠标放在了 user.ID上面，那么当方法执行到 Comparer里面去以后，我们来看看堆栈的结果：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>Stack:（<span style="color:rgb(128,0,128);line-height:1.5;">0</span>--“Age”,<span style="color:rgb(128,0,128);line-height:1.5;">1</span>--“ID”）</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在方法执行过程中，首先弹出第一个值：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>Pop Stack:<span style="color:rgb(128,0,128);line-height:1.5;">0</span>--“Age”</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">但是SOD框架并不知道这个字段信息是 Comparer方法的第一个参数，还是第三个参数，不过拿 user.Age 的值跟第三个参数的值 18 进行比较，user.Age !=18 ，所以可以断定，字段信息”Age“ 发生在方法的第一个参数调用上，而不是第三个参数，因此，字段堆栈的第二个元素，（1-- ”ID“） 也就没有必要弹出了，等到方法执行完成，将Stack&nbsp;字段堆栈清除即可，这样在下一次调用开始的时候，不会造成干扰。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">所以这里的情况是在调试的时候，给字段堆栈增加了新的元素，如果此时 user.Age==18 ,那么 cmp.Comparer(user.Age,"&gt;",18) 不会生成预期的SQL，从而产生”<strong>调试陷阱</strong>“。产生这个问题的具体原因，请看下面的内容。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">当然，当前小节这个OQL查询在非调试状态下运行是没有问题的，字段堆栈的执行原理可以避免”调试陷阱“的问题。</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">3.2，动态构造查询条件的 类“调试陷阱”</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">上面的字段堆栈处理方案并不能完全化解”调试陷阱“的问题，而且，有时候这个问题不是发生在调试状态，也有可能发生在动态构造条件的过程中，请参考下面的例子：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">        void</span><span style="line-height:1.5;"> TestIfCondition2()
+        {
+            Users user </span>= <span style="color:rgb(0,0,255);line-height:1.5;">new</span> Users() { ID = <span style="color:rgb(128,0,128);line-height:1.5;">0</span>, NickName = <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">abc</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, UserName=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">zhang san</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, Password=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">pwd111</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;"> };
+            OQL q7 </span>=<span style="line-height:1.5;"> OQL.From(user)
+                .Select()
+                .Where</span>&lt;Users&gt;<span style="line-height:1.5;">(CreateCondition)
+                .END;
+            Console.WriteLine(</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">OQL by 动态构建 OQLCompare Test(委托函数方式):\r\n{0}</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, q7);
+            Console.WriteLine(q7.PrintParameterInfo());
+        }
+
+        OQLCompare CreateCondition(OQLCompare cmp, Users user)
+        {
+            OQLCompare cmpResult </span>= <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">;
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (user.NickName != <span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">)
+                cmpResult </span>= cmp.Comparer(user.NickName, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.NickName);
+            </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 上面一行，也可以采用这样的写法： cmpResult = cmp.EqualValue(user.NickName);</span>
+            <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (user.ID &gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+                cmpResult </span>= cmpResult &amp; cmp.Comparer(user.ID, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.ID);
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+                cmpResult </span>= cmpResult &amp; cmp.Comparer(user.UserName, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">zhang san</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">)  
+                                      </span>&amp; cmp.Comparer(user.Password, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">pwd111</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> cmpResult;
+        }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">运行这个程序，会输出下面的SQL语句和参数信息：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>OQL <span style="color:rgb(0,0,255);line-height:1.5;">by</span><span style="line-height:1.5;"> 动态构建 OQLCompare Test(委托函数方式):
+</span><span style="color:rgb(0,0,255);line-height:1.5;">SELECT</span>  <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">ID</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">UserName</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">Password</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">NickName</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">RoleID</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">Authority</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">IsEnable</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span><span style="line-height:1.5;">,
+</span><span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">LastLoginTime</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">LastLoginIP</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">Remarks</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">AddTime</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">FROM</span> <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">LT_Users</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>
+     <span style="color:rgb(0,0,255);line-height:1.5;">WHERE</span>    <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">NickName</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span> <span style="color:rgb(128,128,128);line-height:1.5;">=</span> <span style="color:rgb(0,128,0);line-height:1.5;">@P0</span> <span style="color:rgb(128,128,128);line-height:1.5;">AND</span>  <span style="line-height:1.5;"><span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">ID</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span> <span style="color:rgb(128,128,128);line-height:1.5;">=</span>  <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">UserName</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span> </span> <span style="color:rgb(128,128,128);line-height:1.5;">AND</span>  <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">Password</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span> <span style="color:rgb(128,128,128);line-height:1.5;">=</span> <span style="color:rgb(0,128,0);line-height:1.5;">@P1</span>
+<span style="color:rgb(0,128,128);line-height:1.5;">--</span><span style="color:rgb(0,128,128);line-height:1.5;">------OQL Parameters information----------</span>
+ have <span style="color:rgb(128,0,0);font-weight:bold;line-height:1.5;">2</span><span style="line-height:1.5;"> parameter,detail:
+  </span><span style="color:rgb(0,128,0);line-height:1.5;">@P0</span><span style="color:rgb(128,128,128);line-height:1.5;">=</span><span style="line-height:1.5;">abc        Type:String
+  </span><span style="color:rgb(0,128,0);line-height:1.5;">@P1</span><span style="color:rgb(128,128,128);line-height:1.5;">=</span><span style="line-height:1.5;">pwd111     Type:String
+</span><span style="color:rgb(0,128,128);line-height:1.5;">--</span><span style="color:rgb(0,128,128);line-height:1.5;">----------------End------------------------</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">请注意SQL条件中的背景标注部分，[ID] =&nbsp; [UserName] 这个条件，显然不是我们期望的，出现这个问题的原因是什么呢？<br> 原来问题出在这个程序段：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (<span style="color:rgb(255,0,255);line-height:1.5;">user</span>.ID <span style="color:rgb(128,128,128);line-height:1.5;">&gt;</span> <span style="color:rgb(128,0,0);font-weight:bold;line-height:1.5;">0</span><span style="line-height:1.5;">)
+                cmpResult </span><span style="color:rgb(128,128,128);line-height:1.5;">=</span> cmpResult <span style="color:rgb(128,128,128);line-height:1.5;">&amp;</span> cmp.Comparer(<span style="color:rgb(255,0,255);line-height:1.5;">user</span>.ID, "<span style="color:rgb(128,128,128);line-height:1.5;">=</span>", <span style="color:rgb(255,0,255);line-height:1.5;">user</span><span style="line-height:1.5;">.ID);
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+                cmpResult </span><span style="color:rgb(128,128,128);line-height:1.5;">=</span> cmpResult <span style="color:rgb(128,128,128);line-height:1.5;">&amp;</span> cmp.Comparer(<span style="color:rgb(255,0,255);line-height:1.5;">user</span>.UserName, "<span style="color:rgb(128,128,128);line-height:1.5;">=</span><span style="line-height:1.5;">", "zhang san")  
+                                      </span><span style="color:rgb(128,128,128);line-height:1.5;">&amp;</span> cmp.Comparer(<span style="color:rgb(255,0,255);line-height:1.5;">user</span>.Password, "<span style="color:rgb(128,128,128);line-height:1.5;">=</span>", "pwd111");</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">程序选择了 else 分支，执行了cmp.Comparer(<span style="color:rgb(255,0,255);">user.UserName, "<span style="color:rgb(128,128,128);">=<span style="color:rgb(0,0,0);">", "zhang san")&nbsp; 这句，但是，在本例中，user.UserName 的值恰好就是 “zhang san”，所以 Comparer方法的第一个参数和第三个参数的值是一样的，而此时的OQL堆栈的数据是：</span></span></span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>Stack:（<span style="color:rgb(128,0,128);line-height:1.5;">0</span>--“UserName”,<span style="color:rgb(128,0,128);line-height:1.5;">1</span>--“ID”）</pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">OQL会首先弹出堆栈的元素 "UserName" 字段，然后让它对应的实体类属性值与Comparer方法的第三个参数值进行比较，发现这2个值是相同的，于是假设"UserName"字段调用发生在Comparer方法的第三个参数上，于是继续弹出OQL字段堆栈的下一个元素：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>Pop Stack:<span style="color:rgb(128,0,128);line-height:1.5;">1--“ID”</span></pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">于是将字段名“ID” 作为Comparer方法的第一个参数调用的“副作用”结果，构造成了 [ID] =&nbsp; [UserName] 这个条件。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这个错误出现的情况并不常见，简单说就是<strong>只有完全且同时符合</strong>以下的情况，才会产生问题：</p> 
+   <ol style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">
+    <li style="list-style-type:decimal;"><span style="color:rgb(0,0,255);text-decoration:underline;">当Comparer方法执行前，调用过OQL关联的实体类的属性（既属性求值），(如果最近的一次实体类属性调用发生在OQLCompare对象的某个方法内则不符合本条件)</span></li> 
+    <li style="list-style-type:decimal;"><span style="color:rgb(0,0,255);text-decoration:underline;">且方法的第一个参数和第三个参数的值一样的时候，</span></li> 
+    <li style="list-style-type:decimal;"><span style="color:rgb(0,0,255);text-decoration:underline;">第三个参数不是一个实体类属性调用，而是一个单纯变量或者值</span></li> 
+   </ol>
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">3.3，消除复杂查询条件的“字段堆栈“干扰</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">要解决这个问题也很容易，将上面的代码改写成下面这个样子：</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;"> OQLCompare CreateCondition(OQLCompare cmp, Users user)
+ {
+     OQLCompare cmpResult </span>= <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">;
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (user.NickName != <span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">)
+         cmpResult </span>= cmp.Comparer(user.NickName, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.NickName);
+     </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 上面一行，也可以采用这样的写法： cmpResult = cmp.EqualValue(user.NickName);</span>
+     <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (user.ID &gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+         cmpResult </span>= cmpResult &amp; cmp.Comparer(user.ID, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.ID);
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+         cmpResult </span>= cmpResult &amp;<span style="line-height:1.5;"> cmp.EqualValue(user.UserName)  
+                               </span>&amp; cmp.Comparer(user.Password, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">pwd111</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> cmpResult;
+ }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这里将使用 user.UserName 自身的值进行相等比较，避免了字段堆栈的影响。如果不是自身的值相等比较，那么还可以利用操作符重载，进行更多的比较方式，比如大于，小于等：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;"> OQLCompare CreateCondition(OQLCompare cmp, Users user)
+ {
+     OQLCompare cmpResult </span>= <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">;
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (user.NickName != <span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">)
+         cmpResult </span>= cmp.Comparer(user.NickName, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.NickName);
+     </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 上面一行，也可以采用这样的写法： cmpResult = cmp.EqualValue(user.NickName);</span>
+     <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (user.ID &gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+         cmpResult </span>= cmpResult &amp; cmp.Comparer(user.ID, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.ID);
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+         cmpResult </span>= cmpResult &amp; <span style="line-height:1.5;">cmp.Property(user.UserName)</span> == <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">zhang san</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> 
+                               &amp; cmp.Comparer(user.Password, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">pwd111</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> cmpResult;
+ }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">如果出于性能上的考虑或者进行Like 查询等，必须使用Comparer 方法，要解决这种“属性与比较的值相等”的OQL堆栈字段干扰问题，还可调用OQLCompare对象的的NewCompare方法：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;"> OQLCompare CreateCondition(OQLCompare cmp, Users user)
+ {
+     OQLCompare cmpResult </span>= <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">;
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (user.NickName != <span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">)
+         cmpResult </span>= cmp.Comparer(user.NickName, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.NickName);
+     </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 上面一行，也可以采用这样的写法： cmpResult = cmp.EqualValue(user.NickName);</span>
+     <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (user.ID &gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+         cmpResult </span>= cmpResult &amp; cmp.Comparer(user.ID, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.ID);
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+         cmpResult </span>= cmpResult &amp; cmp.<span style="line-height:1.5;">NewCompare().</span>Comparer(user.UserName,<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">zhang san</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">) 
+                               </span>&amp; cmp.Comparer(user.Password, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">pwd111</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> cmpResult;
+ }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">如果觉得上面的方式繁琐，那么还有一个更直接的办法，就是动态构造条件的时候，不在<span style="text-decoration:underline;">关联的实体类上调用属性</span>进行条件判断，而是<strong>创建另外一个实体类对象</strong>（不可以使用克隆的方式）：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;"> OQLCompare CreateCondition(OQLCompare cmp, Users user)
+ {
+     Users testUser </span>= <span style="color:rgb(0,0,255);line-height:1.5;">new</span> Users {  NickName =user.NickName , ID =<span style="line-height:1.5;">user.ID};
+
+     OQLCompare cmpResult </span>= <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">;
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (testUser.NickName != <span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">)
+         cmpResult </span>= cmp.Comparer(user.NickName, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.NickName);
+     </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 上面一行，也可以采用这样的写法： cmpResult = cmp.EqualValue(user.NickName);</span>
+     <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (<span style="line-height:1.5;">testUser.ID</span> &gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+         cmpResult </span>= cmpResult &amp; cmp.Comparer(user.ID, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">, user.ID);
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+         cmpResult </span>= cmpResult &amp; cmp.Comparer(user.UserName,<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">zhang san</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">) 
+                               </span>&amp; cmp.Comparer(user.Password, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">=</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>, <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">pwd111</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+     </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> cmpResult;
+ }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">当然，可能最简单的方式，还是你有意让Comparer 方法的第一实体类属性值参数和第三个普通值参数的值不要相等，这在大多数情况下都是可以做到的。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">采用上面的方式处理后，对于OQL动态构造查询条件，可以得到下面正确的SQL信息：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>OQL <span style="color:rgb(0,0,255);line-height:1.5;">by</span><span style="line-height:1.5;"> 动态构建 OQLCompare Test(委托函数方式):
+</span><span style="color:rgb(0,0,255);line-height:1.5;">SELECT</span>  <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">ID</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">UserName</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">Password</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">NickName</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">RoleID</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">Authority</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">IsEnable</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span><span style="line-height:1.5;">,
+</span><span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">LastLoginTime</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">LastLoginIP</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">Remarks</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>,<span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">AddTime</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">FROM</span> <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">LT_Users</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span>
+     <span style="color:rgb(0,0,255);line-height:1.5;">WHERE</span>    <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">NickName</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span> <span style="color:rgb(128,128,128);line-height:1.5;">=</span> <span style="color:rgb(0,128,0);line-height:1.5;">@P0</span> <span style="color:rgb(128,128,128);line-height:1.5;">AND</span>  <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">UserName</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span> <span style="color:rgb(128,128,128);line-height:1.5;">=</span> <span style="color:rgb(0,128,0);line-height:1.5;">@P1</span>  <span style="color:rgb(128,128,128);line-height:1.5;">AND</span>  <span style="color:rgb(255,0,0);line-height:1.5;">[</span><span style="color:rgb(255,0,0);line-height:1.5;">Password</span><span style="color:rgb(255,0,0);line-height:1.5;">]</span> <span style="color:rgb(128,128,128);line-height:1.5;">=</span> <span style="color:rgb(0,128,0);line-height:1.5;">@P2</span>
+<span style="color:rgb(0,128,128);line-height:1.5;">--</span><span style="color:rgb(0,128,128);line-height:1.5;">------OQL Parameters information----------</span>
+ have <span style="color:rgb(128,0,0);font-weight:bold;line-height:1.5;">3</span><span style="line-height:1.5;"> parameter,detail:
+  </span><span style="color:rgb(0,128,0);line-height:1.5;">@P0</span><span style="color:rgb(128,128,128);line-height:1.5;">=</span><span style="line-height:1.5;">abc        Type:String
+  </span><span style="color:rgb(0,128,0);line-height:1.5;">@P1</span><span style="color:rgb(128,128,128);line-height:1.5;">=</span><span style="line-height:1.5;">zhang san          Type:String
+  </span><span style="color:rgb(0,128,0);line-height:1.5;">@P2</span><span style="color:rgb(128,128,128);line-height:1.5;">=</span><span style="line-height:1.5;">pwd111     Type:String
+</span><span style="color:rgb(0,128,128);line-height:1.5;">--</span><span style="color:rgb(0,128,128);line-height:1.5;">----------------End------------------------</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="color:rgb(29,88,209);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">&nbsp;小节</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">本篇说明了编程语言左求值表达式规则，堆栈数据结构，并利用这两个特征，结合属性调用事件 ，巧妙的设计了SOD框架的”ORM查询语言“--OQL，并详细的分析了可能产生的问题与解决方案。如果使用PDF.NET SOD框架来处理动态的查询条件，那么本篇文章一定要仔细阅读一下。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">感谢大家一直以来对于PDF.NET SOD框架的支持，</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">框架官网地址：http://www.pwmis.com/sqlmap</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">开源项目地址：http://pwms.codeplex.com</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><span style="color:rgb(255,0,255);">注意：本文的解决方案和实例程序，需要SOD框架的新版本 5.2.3.0429 以上支持，如果程序中有动态构造查询条件的情况，请大家及时获取最新的源代码。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p><font><span style="font-size:15px;">&nbsp; &nbsp; 本文转自深蓝医生博客园博客，原文链接：http://www.cnblogs.com/bluedoctor/p/4470526.html</span></font><span style="font-size:15px;font-family:Verdana, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <div>
+    <br>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

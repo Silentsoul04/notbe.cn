@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>pgpool-II3.1 的内存泄漏（四） « NotBeCN</title>
+  <meta name="description" content="                 磨砺技术珠矶，践行数据之道，追求卓越价值           回到上一级页面： PostgreSQL集群方案相关索引页 &nbsp; &nbsp; 回到顶级页面：PostgreSQL索引页           [作者 高健@博客园 &nbsp;luckyjackgao@gmail...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/06/weixin_34001430_90123681.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">pgpool-II3.1 的内存泄漏（四）</h1>
+    <p class="post-meta">Dec 6, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div>
+    磨砺技术珠矶，践行数据之道，追求卓越价值
+   </div> 
+   <div>
+    回到上一级页面： PostgreSQL集群方案相关索引页 &nbsp; &nbsp; 回到顶级页面：PostgreSQL索引页
+   </div> 
+   <div>
+    [作者 高健@博客园 &nbsp;luckyjackgao@gmail.com]
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    接上文，继续对pgpool-II3.1的内存泄漏进行分析。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    情形A extract_string 调用 strdup&nbsp;
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    ==27927== 3 bytes in 1 blocks are possibly lost in loss record 3 of 100
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    ==27927== at 0x4A05E1C: malloc (vg_replace_malloc.c:195)
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    ==27927== by 0x3C51E798C1: strdup (in /lib64/libc-2.5.so)
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    ==27927== by 0x40C9C4: extract_string (pool_config.l:2065)
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    ==27927== by 0x410D52: pool_get_config (pool_config.l:1756)
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    ==27927== by 0x4066B5: main (main.c:320)
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    ==27927==&nbsp;
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    从上述log可知, 调用关系如下：
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    main-&gt;pool_get_config -&gt; extract_string -&gt; strdup-&gt;malloc
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    以下是各个函数的主要相关逻辑：&nbsp;
+   </div> 
+   <div>
+    pool_get_config函数（中间省略了很多）：
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    复制代码
+   </div> 
+   <div>
+    int pool_get_config(char *confpath, POOL_CONFIG_CONTEXT context){ &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; ...... &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; #define PARSE_ERROR() &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;pool_error("pool_config: parse error at line %d '%s'", Lineno, yytext) &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; /* open config file */ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; fd = fopen(confpath, "r"); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; if (!fd){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; fprintf(stderr, "pool_config: could not open configuration file (%s)\n",&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; POOL_CONF_FILE_NAME); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; fprintf(stderr, "pool_config: using default values...\n");&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; return 0; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; yyin = fd; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; Lineno = 1; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; for(;;) &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; { &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; token = yylex(); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; if (token == 0){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; break; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; if (token == POOL_PARSE_ERROR){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; PARSE_ERROR(); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fclose(fd); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return(-1); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; if (token == POOL_EOL) &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; continue; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; if (token != POOL_KEY){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; PARSE_ERROR(); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fclose(fd); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return(-1); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; …… &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; if (!strcmp(key, "allow_inet_domain_socket") &amp;&amp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;CHECK_CONTEXT(INIT_CONFIG, context)){&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; …… &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; else if (!strcmp(key, "listen_addresses") &amp;&amp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; CHECK_CONTEXT(INIT_CONFIG, context)){&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; char *str; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (token != POOL_STRING &amp;&amp; token != POOL_UNQUOTED_STRING &amp;&amp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;token != POOL_KEY){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; PARSE_ERROR(); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fclose(fd); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return(-1); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; str = extract_string(yytext, token); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (str == NULL){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fclose(fd); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return(-1); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; pool_config-&gt;listen_addresses = str; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; …… &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; else if (!strncmp(key, "backend_hostname", 16) &amp;&amp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;CHECK_CONTEXT(INIT_CONFIG|RELOAD_CONFIG, context) &amp;&amp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;mypid == getpid())&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;/* this parameter must be modified by parent pid */ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; { &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; int slot; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; char *str; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; slot = atoi(key + 16); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (slot &lt; 0 || slot &gt;= MAX_CONNECTION_SLOTS)
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; { &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; pool_error("pool_config:&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;backend number %s for backend_hostname out of range", key);
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fclose(fd); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return(-1); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; str = extract_string(yytext, token); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (str == NULL){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fclose(fd); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return(-1); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (context == INIT_CONFIG || (context == RELOAD_CONFIG &amp;&amp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;BACKEND_INFO(slot).backend_status == CON_UNUSED))&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; strncpy(BACKEND_INFO(slot).backend_hostname, str,
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; MAX_DB_HOST_NAMELEN); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; …… &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; else if (!strcmp(key, "relcache_expire") &amp;&amp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;CHECK_CONTEXT(INIT_CONFIG|RELOAD_CONFIG, context)){&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; int v = atoi(yytext); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (token != POOL_INTEGER || v &lt; 0){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; pool_error("pool_config: %s&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;must be equal or higher than 0 numeric value", key); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;fclose(fd); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return(-1); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; pool_config-&gt;relcache_expire = v; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; fclose(fd); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; …… &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; return 0; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    复制代码
+   </div> 
+   <div>
+    &nbsp;extract_string 函数：
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    复制代码
+   </div> 
+   <div>
+    static char *extract_string(char *value, POOL_TOKEN token){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; char *ret; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; ret = strdup(value); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; if (!ret){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; pool_error("extract_string: out of memory"); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; return NULL; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; if (token == POOL_STRING){ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; ret[strlen(ret)-1] = '\0'; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; return (ret+1); &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; } &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; return ret; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    复制代码
+   </div> 
+   <div>
+    strdup 是C 语言的标准函数， 是字符串复制。&nbsp;
+   </div> 
+   <div>
+    其内部调用了 malloc　，在运行结束的时候，应当释放。
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    但是！　　
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    由于其　是在　pool_config.c 的 pool_get_config 中被调用，
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    这个函数 是要实现 把配置文件中的各项内容读取出来。
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    配置文件项内容的地址，就存储在 strdup 返回的 指针里面。
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    在pgpool 运行结束以前， 都是需要能随时访问 配置文件向内容的。
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    所以，在pgpool运行结束以前，都是不能随意 释放 strdup返回 值的。
+    <span class="Apple-tab-span"> </span> 
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    至于运行结束的那一刻 是否 有代码专门来释放了，前面我们的分析已经说过，不在我们的讨论范围内。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    [作者 高健@博客园 &nbsp;luckyjackgao@gmail.com]
+   </div> 
+   <div>
+    回到上一级页面： PostgreSQL集群方案相关索引页 &nbsp; &nbsp; 回到顶级页面：PostgreSQL索引页
+   </div> 
+   <div>
+    磨砺技术珠矶，践行数据之道，追求卓越价值
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    本文转自健哥的数据花园博客园博客，原文链接：http://www.cnblogs.com/gaojian/archive/2012/08/21/2649037.html，如需转载请自行联系原作者
+    <br>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

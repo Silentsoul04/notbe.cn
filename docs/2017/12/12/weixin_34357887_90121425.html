@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>关于linux系统如何实现fork的研究(一)【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.aichengxu.com/linux/4157180.htm    引言    fork函数是用于在linux系统中创建进程所使用，而最近看了看一个fork()调用是怎么从应用到glibc，最后到内核中实现的，这片文章就聊聊最近对这方面研究的收获吧。我们主要...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/12/weixin_34357887_90121425.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">关于linux系统如何实现fork的研究(一)【转】</h1>
+    <p class="post-meta">Dec 12, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://www.aichengxu.com/linux/4157180.htm" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.aichengxu.com/linux/4157180.htm</a></p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">引言</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">fork函数是用于在linux系统中创建进程所使用，而最近看了看一个fork()调用是怎么从应用到glibc，最后到内核中实现的，这片文章就聊聊最近对这方面研究的收获吧。我们主要聊聊从glibc库进入内核，再从内核出来的情景，而从应用到glibc这部分本片文章就不详细说明了。为了方便期间，我们的硬件平台为arm，linux内核为3.18.3，glibc库版本为2.20，可从<a href="http://ftp.gnu.org/gnu/glibc/" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://ftp.gnu.org/gnu/glibc/</a>下载源码。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">Glibc到kernel</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">我们设定硬件平台为arm，glibc库版本为2.20，因为不同的CPU体系结构中，glibc库通过系统调用进入kernel库的方法是不一样的。当glibc准备进入kernel时，流程如下</p> 
+   <pre>/* glibc最后会调用到一个INLINE_SYSCALL宏，参数如下 */
+ INLINE_SYSCALL (clone, 5, CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD, NULL, NULL, NULL, &amp;THREAD_SELF-&gt;tid)；
+ 
+  /* INLINE_SYSCALL的宏定义如下,可以看出在INLINE_SYSCALL宏中又使用到了INTERNAL_SYSCALL宏，而INTERNAL_SYSCALL宏最终会调用INTERNAL_SYSCALL_RAW */
+ #define INLINE_SYSCALL(name, nr, args...) \
+   ({ unsigned int _sys_result = INTERNAL_SYSCALL (name, , nr, args); \
+      if (__builtin_expect (INTERNAL_SYSCALL_ERROR_P (_sys_result, ), 0)) \
+        { \
+      __set_errno (INTERNAL_SYSCALL_ERRNO (_sys_result, )); \
+      _sys_result = (unsigned int) -1; \
+        } \
+      (int) _sys_result; })
+ 
+  /* 为了方便大家理解，将此宏写为伪代码形式 */
+  int INLINE_SYSCALL (name, nr, args...)
+  {
+     unsigned int _sys_result = INTERNAL_SYSCALL (name, , nr, args);
+ 
+     if (__builtin_expect (INTERNAL_SYSCALL_ERROR_P (_sys_result, ), 0)) {
+         __set_error (INTERNAL_SYSCALL_ERRNO (_sys_result, ));
+         _sys_result = (unsigned int) -1;
+     }
+     return (int)_sys_result;
+  }
+ 
+ /* 这里我们不需要看INTERNAL_SYSCALL宏，只需要看其最终调用的INTERNAL_SYSCALL_RAW宏，需要注意的是，INTERNAL_SYSCALL调用INTERNAL_SYSCALL_RAW时，通过SYS_ify(name)宏将name转为了系统调用号
+  * name: 120（通过SYS_ify(name)宏已经将clone转为了系统调用号120）
+  * err: NULL
+  * nr: 5
+  * args[0]: CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD
+  * args[1]: NULL
+  * args[2]: NULL
+  * args[3]: NULL
+  * args[4]: &amp;THREAD_SELF-&gt;tid
+   */
+  # define INTERNAL_SYSCALL_RAW(name, err, nr, args...)     \
+   ({     \
+        register int _a1 asm ("r0"), _nr asm ("r7");     \
+        LOAD_ARGS_##nr (args)     \
+        _nr = name;     \
+        asm volatile ("swi    0x0    @ syscall " #name    \
+     : "=r" (_a1)     \
+     : "r" (_nr) ASM_ARGS_##nr     \
+     : "memory");     \
+        _a1; })
+  #endif</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> INTERNAL_SYSCALL_RAW实现的结果就是将args[0]存到了r0...args[4]存到了r4中，并将name(120)绑定到r7寄存器。然后通过swi 0x0指令进行了软中断。0x0是一个24位的立即数，用于软中断执行程序判断执行什么操作。当执行这条指令时，CPU会跳转至中断向量表的软中断指令处，执行该处保存的调用函数，而在函数中会根据swi后面的24位立即数(在我们的例子中是0x0)执行不同操作。在这时候CPU已经处于保护模式，陷入内核中。现在进入到linux内核中后，具体看此时内核是怎么操作的吧。</p> 
+   <pre>/* 源文件地址: 内核目录/arch/arm/kernel/entry-common.S */
+ 
+ ENTRY(vector_swi)
+     /*
+      * 保存现场
+      */
+ #ifdef CONFIG_CPU_V7M
+     v7m_exception_entry
+ #else
+     sub    sp, sp, #S_FRAME_SIZE
+     stmia    sp, {r0 - r12}            @ 将r0~r12保存到栈中
+  ARM(    add    r8, sp, #S_PC        )
+  ARM(    stmdb    r8, {sp, lr}^        )    @ Calling sp, lr
+  THUMB(    mov    r8, sp            )
+  THUMB(    store_user_sp_lr r8, r10, S_SP    )    @ calling sp, lr
+     mrs    r8, spsr            @ called from non-FIQ mode, so ok.
+     str    lr, [sp, #S_PC]            @ Save calling PC
+     str    r8, [sp, #S_PSR]        @ Save CPSR
+     str    r0, [sp, #S_OLD_R0]        @ Save OLD_R0
+ #endif
+     zero_fp
+     alignment_trap r10, ip, __cr_alignment
+     enable_irq
+     ct_user_exit
+     get_thread_info tsk
+ 
+     /*
+      * 以下代码根据不同arm体系结构获取系统调用号
+      */
+ 
+ #if defined(CONFIG_OABI_COMPAT)
+ 
+     /*
+      * 如果内核配置了OABI兼容选项，会先判断是否为THUMB，以下为THUMB情况（我们分析的时候可以忽略这段，一般情况是不走这一段的）
+      */
+ #ifdef CONFIG_ARM_THUMB
+     tst    r8, #PSR_T_BIT
+     movne    r10, #0                @ no thumb OABI emulation
+  USER(    ldreq    r10, [lr, #-4]        )    @ get SWI instruction
+ #else
+  USER(    ldr    r10, [lr, #-4]        )    @ get SWI instruction
+ #endif
+  ARM_BE8(rev    r10, r10)            @ little endian instruction
+ 
+ #elif defined(CONFIG_AEABI)
+ 
+     /*
+      * 我们主要看这里，EABI将系统调用号保存在r7中
+      */
+ #elif defined(CONFIG_ARM_THUMB)
+     /* 先判断是否为THUMB模式 */
+     tst    r8, #PSR_T_BIT            
+     addne    scno, r7, #__NR_SYSCALL_BASE    
+  USER(    ldreq    scno, [lr, #-4]        )
+ 
+ #else
+     /* EABI模式 */
+  USER(    ldr    scno, [lr, #-4]        )    @ 获取系统调用号
+ #endif
+ 
+     adr    tbl, sys_call_table        @ tbl为r8，这里是将sys_call_table的地址(相对于此指令的偏移量)存入r8
+ 
+ #if defined(CONFIG_OABI_COMPAT)
+     /*
+      * 在EABI体系中，如果swi跟着的立即数为0，这段代码不做处理，而如果是old abi体系，则根据系统调用号调用old abi体系的系统调用表(sys_oabi_call_table)
+      * 其实说白了，在EABI体系中，系统调用时使用swi 0x0进行软中断，r7寄存器保存系统调用号
+      * 而old abi体系中，是通过swi (系统调用号|magic)进行调用的
+      */
+     bics    r10, r10, #0xff000000
+     eorne    scno, r10, #__NR_OABI_SYSCALL_BASE
+     ldrne    tbl, =sys_oabi_call_table 
+ #elif !defined(CONFIG_AEABI)
+     bic    scno, scno, #0xff000000        
+     eor    scno, scno, #__NR_SYSCALL_BASE    
+ #endif
+ 
+ local_restart:
+     ldr    r10, [tsk, #TI_FLAGS]        @ 检查系统调用跟踪
+     stmdb     {r4, r5}            @ 将第5和第6个参数压入栈
+ 
+     tst    r10, #_TIF_SYSCALL_WORK        @ 判断是否在跟踪系统调用
+     bne    __sys_trace
+ 
+     cmp    scno, #NR_syscalls        @ 检测系统调用号是否在范围内，NR_syscalls保存系统调用总数
+     adr    lr, BSYM(ret_fast_syscall)    @ 将返回地址保存到lr寄存器中，lr寄存器是用于函数返回的。
+     ldrcc    pc, [tbl, scno, lsl #2]        @ 调用相应系统调用例程，tbl(r8)保存着系统调用表(sys_call_table)地址，scno(r7)保存着系统调用号120，这里就转到相应的处理例程上了。
+ 
+     add    r1, sp, #S_OFF
+ 2:    cmp    scno, #(__ARM_NR_BASE - __NR_SYSCALL_BASE)
+     eor    r0, scno, #__NR_SYSCALL_BASE    @ put OS number back
+     bcs    arm_syscall
+     mov    why, #0                @ no longer a real syscall
+     b    sys_ni_syscall            @ not private func
+ 
+ #if defined(CONFIG_OABI_COMPAT) || !defined(CONFIG_AEABI)
+     /*
+      * We failed to handle a fault trying to access the page
+      * containing the swi instruction, but we're not really in a
+      * position to return -EFAULT. Instead, return back to the
+      * instruction and re-enter the user fault handling path trying
+      * to page it in. This will likely result in sending SEGV to the
+      * current task.
+      */
+ 9001:
+     sub    lr, lr, #4
+     str    lr, [sp, #S_PC]
+     b    ret_fast_syscall
+ #endif
+ ENDPROC(vector_swi)            @ 返回</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 好的，终于跳转到了系统调用表，现在我们看看系统调用表是怎么样的一个形式</p> 
+   <pre>/* 文件地址: linux内核目录/arch/arm/kernel/calls.S */
+ 
+ /* 0 */        CALL(sys_restart_syscall)
+         CALL(sys_exit)
+         CALL(sys_fork)
+         CALL(sys_read)
+         CALL(sys_write)
+ /* 5 */        CALL(sys_open)
+         CALL(sys_close)
+         CALL(sys_ni_syscall)        /* was sys_waitpid */
+         CALL(sys_creat)
+         CALL(sys_link)
+ /* 10 */    CALL(sys_unlink)
+         CALL(sys_execve)
+         CALL(sys_chdir)
+         CALL(OBSOLETE(sys_time))    /* used by libc4 */
+         CALL(sys_mknod)
+ /* 15 */    CALL(sys_chmod)
+         CALL(sys_lchown16)
+         CALL(sys_ni_syscall)        /* was sys_break */
+         CALL(sys_ni_syscall)        /* was sys_stat */
+         CALL(sys_lseek)
+ /* 20 */    CALL(sys_getpid)
+         CALL(sys_mount)
+         CALL(OBSOLETE(sys_oldumount))    /* used by libc4 */
+         CALL(sys_setuid16)
+         CALL(sys_getuid16)
+ /* 25 */    CALL(OBSOLETE(sys_stime))
+         CALL(sys_ptrace)
+         CALL(OBSOLETE(sys_alarm))    /* used by libc4 */
+         CALL(sys_ni_syscall)        /* was sys_fstat */
+         CALL(sys_pause)
+ 
+         ......................
+         ......................
+        
+ /* 120 */    CALL(sys_clone)        /* 120在此，之前传进来的系统调用号120进入内核后会到这 */
+         CALL(sys_setdomainname)
+         CALL(sys_newuname)
+         CALL(sys_ni_syscall)        /* modify_ldt */
+         CALL(sys_adjtimex)
+ /* 125 */    CALL(sys_mprotect)
+         CALL(sys_sigprocmask)
+         CALL(sys_ni_syscall)        /* was sys_create_module */
+         CALL(sys_init_module)
+         CALL(sys_delete_module)
+   
+         ......................
+         ......................
+        
+ /* 375 */    CALL(sys_setns)
+         CALL(sys_process_vm_readv)
+         CALL(sys_process_vm_writev)
+         CALL(sys_kcmp)
+         CALL(sys_finit_module)
+ /* 380 */    CALL(sys_sched_setattr)
+         CALL(sys_sched_getattr)
+         CALL(sys_renameat2)
+         CALL(sys_seccomp)
+         CALL(sys_getrandom)
+ /* 385 */    CALL(sys_memfd_create)
+         CALL(sys_bpf)
+ #ifndef syscalls_counted
+ .equ syscalls_padding, ((NR_syscalls + 3) &amp; ~3) - NR_syscalls
+ #define syscalls_counted
+ #endif
+ .rept syscalls_padding
+         CALL(sys_ni_syscall)
+ .endr</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> CALL为一个宏，而我们使用的那一行CALL(sys_clone)配合ldrcc pc,[tbl,scno,lsl #2]使用的结果就是把sys_clone的地址放入pc寄存器。具体我们仔细分析一下，首先先看看CALL宏展开，然后把CALL代入ldrcc，结果就很清晰了</p> 
+   <pre>/* CALL(x)宏展开 */
+ #define CALL(x) .equ NR_syscalls,NR_syscalls+1
+ #include "calls.S"
+ 
+ .ifne NR_syscalls - __NR_syscalls
+ .error "__NR_syscalls is not equal to the size of the syscall table"
+ .endif
+ 
+ /* 主要是后面这一段，
+  * 上面一段主要用于统计系统调用数量，并将数量保存到NR_syscalls中，具体实现说明可以参考http://www.tuicool.com/articles/QFj6zq
+  */
+ 
+ #undef CALL
+ /* 其实就是生成一个数为x，相当于.long sys_clone，因为sys_clone是函数名，所以.long生成的是sys_clone函数名对应的地址 */
+ #define CALL(x) .long x
+ 
+ #ifdef CONFIG_FUNCTION_TRACER
+ 
+ 
+ /* 配合ldrcc一起看，原来ldrcc是这样 */
+ ldrcc    pc, [tbl, scno, lsl #2]    
+ 
+ /* 把CALL(x)代入ldrcc，最后是这样 */
+ ldrcc    pc, sys_clone(函数地址)</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 清楚的看出来，ldrcc最后是将sys_clone的函数地址存入了pc寄存器，而sys_clone函数内核是怎么定义的呢，如下</p> 
+   <pre>/* 文件地址: linux内核目录/kernel/Fork.c */
+ 
+ /* 以下代码根据不同的内核配置定义了不同的clone函数
+  * 其最终都调用的do_fork函数，我们先看看SYSCALL_DEFINE是怎么实现的吧，实现在此代码片段后面
+  */
+ #ifdef __ARCH_WANT_SYS_CLONE
+ #ifdef CONFIG_CLONE_BACKWARDS
+ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
+          int __user *, parent_tidptr,
+          int, tls_val,
+          int __user *, child_tidptr)
+ #elif defined(CONFIG_CLONE_BACKWARDS2)
+ SYSCALL_DEFINE5(clone, unsigned long, newsp, unsigned long, clone_flags,
+          int __user *, parent_tidptr,
+          int __user *, child_tidptr,
+          int, tls_val)
+ #elif defined(CONFIG_CLONE_BACKWARDS3)
+ SYSCALL_DEFINE6(clone, unsigned long, clone_flags, unsigned long, newsp,
+         int, stack_size,
+         int __user *, parent_tidptr,
+         int __user *, child_tidptr,
+         int, tls_val)
+ #else
+ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
+          int __user *, parent_tidptr,
+          int __user *, child_tidptr,
+          int, tls_val)
+ #endif
+ {
+     return do_fork(clone_flags, newsp, 0, parent_tidptr, child_tidptr);
+ }
+ 
+ 
+  /************************************************
+  * 我是代码分界线
+  ************************************************/
+ 
+ /* 文件地址: linux内核目录/include/linux.h */
+ 
+ #define SYSCALL_DEFINE0(sname) \
+     SYSCALL_METADATA(_##sname, 0); \
+     asmlinkage long sys_##sname(void)
+ 
+ #define SYSCALL_DEFINE1(name, ...) SYSCALL_DEFINEx(1, _##name, __VA_ARGS__)
+ #define SYSCALL_DEFINE2(name, ...) SYSCALL_DEFINEx(2, _##name, __VA_ARGS__)
+ #define SYSCALL_DEFINE3(name, ...) SYSCALL_DEFINEx(3, _##name, __VA_ARGS__)
+ #define SYSCALL_DEFINE4(name, ...) SYSCALL_DEFINEx(4, _##name, __VA_ARGS__)
+ #define SYSCALL_DEFINE5(name, ...) SYSCALL_DEFINEx(5, _##name, __VA_ARGS__)
+ #define SYSCALL_DEFINE6(name, ...) SYSCALL_DEFINEx(6, _##name, __VA_ARGS__)
+ 
+ #define SYSCALL_DEFINEx(x, sname, ...) \
+     SYSCALL_METADATA(sname, x, __VA_ARGS__) \
+     __SYSCALL_DEFINEx(x, sname, __VA_ARGS__)
+ 
+ #define __PROTECT(...) asmlinkage_protect(__VA_ARGS__)
+ #define __SYSCALL_DEFINEx</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 可以看出系统调用是使用SYSCALL_DEFINEx进行定义的，以我们的例子，实际上最后clone函数被定义为</p> 
+   <pre>/* 展开前 */
+ 
+ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
+          int __user *, parent_tidptr,
+          int __user *, child_tidptr,
+          int, tls_val)
+ #endif
+ {
+     /* 应用层默认fork参数(CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD, NULL, NULL, NULL, &amp;THREAD_SELF-&gt;tid) */
+     return do_fork(clone_flags, newsp, 0, parent_tidptr, child_tidptr);
+ }
+ 
+  /* 展开后 */
+ 
+ asmlinkage long sys_clone (unsigned long clone_flags, unsigned long newsp, int __user * parent_tidptr, int __user * child_tidptr, int tls_val)
+ {
+     return do_fork(clone_flags, newsp, 0, parent_tidptr, child_tidptr);
+ }</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 终于看到最后系统会调用do_fork函数进行操作，接下来我们看看do_fork函数</p> 
+   <pre>/* 应用层的fork最后会通过sys_clone系统调用调用到此函数 */
+ /* 应用层默认fork参数(CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD, NULL, NULL, NULL, &amp;THREAD_SELF-&gt;tid) 
+  * clone_flags: CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD
+  * stack_start: NULL
+  * stack_size: NULL
+  * parent_tidptr: NULL
+  * child_tidptr: &amp;THREAD_SELF-&gt;tid
+  * pid: NULL
+  */
+ long do_fork(unsigned long clone_flags,
+      unsigned long stack_start,
+      unsigned long stack_size,
+      int __user *parent_tidptr,
+      int __user *child_tidptr)
+ {
+     struct task_struct *p;
+     int trace = 0;
+     long nr;
+ 
+     /* 判断是否进行跟踪 */
+     if (!(clone_flags &amp; CLONE_UNTRACED)) {
+         if (clone_flags &amp; CLONE_VFORK)
+             trace = PTRACE_EVENT_VFORK;
+         else if ((clone_flags &amp; CSIGNAL) != SIGCHLD)
+             trace = PTRACE_EVENT_CLONE;
+         else
+             trace = PTRACE_EVENT_FORK;
+ 
+         if (likely(!ptrace_event_enabled(current, trace)))
+             trace = 0;
+     }
+ 
+     /* 调用copy_process进行初始化，返回初始化好的struct task_struct结构体，当我们调用fork时返回两次的原因也是在这个函数当中，下回分析 */
+     p = copy_process(clone_flags, stack_start, stack_size,
+              child_tidptr, NULL, trace);
+ 
+ 
+     if (!IS_ERR(p)) {
+         /* 创建成功 */
+         struct completion vfork;
+         struct pid *pid;
+ 
+         trace_sched_process_fork(current, p);
+ 
+         /* 获取子进程PID */
+         pid = get_task_pid(p, PIDTYPE_PID);
+         /* 返回子进程pid所属的命名空间所看到的局部PID */
+         nr = pid_vnr(pid);
+ 
+         if (clone_flags &amp; CLONE_PARENT_SETTID)
+             put_user(nr, parent_tidptr);
+ 
+         if (clone_flags &amp; CLONE_VFORK) {
+             p-&gt;vfork_done = &amp;vfork;
+             init_completion(&amp;vfork);
+             get_task_struct(p);
+         }
+ 
+         /* 将新进程加入到CPU的运行队列中 */
+         wake_up_new_task(p);
+ 
+         /* 跟踪才会用到 */
+         if (unlikely(trace))
+             ptrace_event_pid(trace, pid);
+ 
+         /* 如果是vfork调用，则在此等待vfork的进程结束 */
+         if (clone_flags &amp; CLONE_VFORK) {
+             if (!wait_for_vfork_done(p, &amp;vfork))
+                 ptrace_event_pid(PTRACE_EVENT_VFORK_DONE, pid);
+         }
+ 
+         put_pid(pid);
+     } else {
+         /* 创建失败 */
+         nr = PTR_ERR(p);
+     }
+         /* 返回新进程PID（新进程在这会返回0） */
+     return nr;
+ }</pre> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 在do_fork函数中，首先会根据clone_flags判断是否对父进程进行了跟踪（调试使用），如果进行了函数跟踪(还需要判断是否对子进程进行跟踪)，之后调用copy_process(do_fork的核心函数，之后的文章会对它进行分析)，在copy_process中会对子进程的许多结构体和参数进行初始化(同时在fork正常情况中为什么会返回两次也是在此函数中实现的)，do_fork最后就判断是否是通过vfork创建，如果是vfork创建，则会使父进程阻塞直到子进程结束释放所占内存空间后才继续执行，最后do_fork子进程pid。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">小结</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">到这里，整个系统调用的入口就分析完了，其实整个流程也不算很复杂：应用层通过swi软中断进入内核----&gt;通过系统调用表选定目标系统调用---&gt;执行系统调用---&gt;返回。之后的文章我会详细分析copy_process函数，此函数中涉及相当多的知识，作为学习linux内核的入口也是比较合适的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br></p> 
+   <p><font color="#666666"><span style="font-size:14px;"><br></span></font></p> 
+   <p><font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/8075016.html，如需转载请自行联系原作者</span></font></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

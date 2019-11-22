@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>涉及反射/内省/泛型的优化实践 « NotBeCN</title>
+  <meta name="description" content="             &nbsp;&nbsp;"当系统的每一部分都由最优解或相对优解组成，那么系统最终也将是最完美的。"    &nbsp; &nbsp;这句话是在参加莫技术分享会上听到的，这句话吸引我占在人群后面听完了她的分享，确实受益良多。    &nbsp; &nbsp;本文也旨在描述自己在项目演变中对...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/16/weixin_34124651_90132348.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">涉及反射/内省/泛型的优化实践</h1>
+    <p class="post-meta">Nov 16, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;"当系统的每一部分都由最优解或相对优解组成，那么系统最终也将是最完美的。"</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;这句话是在参加莫技术分享会上听到的，这句话吸引我占在人群后面听完了她的分享，确实受益良多。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;本文也旨在描述自己在项目演变中对一处公共处理逻辑优化的过程，周期略长最近有时间整理如下。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;业务系统数据传递过程中，会抽取一些公共的属性和方法封装为特定基类以便于后续开发进行继承。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;这些被抽象出来的拥有公共属性的基类，在业务流转过程中的赋值也应当进行统一妥善的处理。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;<img src="https://images2015.cnblogs.com/blog/362169/201707/362169-20170710180131228-542212166.png" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;看到这里的小伙伴们可能心中有点疑惑，在业务组织 Class_A/Class_B/...将基类中基本属性顺势填充不就可以了吗？</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;实际业务中 BaseClass 中的属性需要根据各种不同的场景进行演变和推算，你确定将这些公共推算方式放入业务逻辑中合适吗？？</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;随着系统扩展继承 BaseClass 的子类会膨胀，所有的子类都需要进行父类基本属性赋值，代码看起来是不是有点重复？</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;当公共属性推算方式发生变化，修改所有子类计算方式和修改公共方法，工作量孰重孰轻？</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;抽取成公共方法这点毋庸置疑的，但怎样高效和优雅的书写代码呢？</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;本文试结合实例，简述在业务流转中对拥有公共属性基类赋值的方法以及后续持续优化。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;例子将省略公共属性的判断推算过程，实际项目中的公共属性和业务对象过于复杂，自己简单抽象对象如下（关注点为公共属性的赋值）。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.8;color:rgb(0,0,255);">public</span> <span style="line-height:1.8;color:rgb(0,0,255);">class</span><span style="line-height:1.8;"> BaseStudentVO {
+    </span><span style="line-height:1.8;color:rgb(0,0,255);">private</span><span style="line-height:1.8;"> String stu_id;
+    </span><span style="line-height:1.8;color:rgb(0,0,255);">private</span><span style="line-height:1.8;"> String stu_name;
+    </span><span style="line-height:1.8;color:rgb(0,0,255);">private</span><span style="line-height:1.8;"> Integer stu_age;
+    </span><span style="line-height:1.8;color:rgb(0,0,255);">private</span><span style="line-height:1.8;"> Date stu_birthday;
+
+    .......getter</span>/<span style="line-height:1.8;">setter
+}
+
+</span><span style="line-height:1.8;color:rgb(0,0,255);">public</span> <span style="line-height:1.8;color:rgb(0,0,255);">class</span> PrimaryScholar <span style="line-height:1.8;color:rgb(0,0,255);">extends</span><span style="line-height:1.8;"> BaseStudentVO {
+     .......logicAttribute
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;BaseStudentVO 为抽取公共属性的基类，业务中使用的为&nbsp;PrimaryScholar，业务开始流转时需要将基类的公共属性填充进去。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;起初编写函数时采用反射方式，由子类反射获取超类并迭代超类公共方法，获取特定 set 方法进行调用，代码思路如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre> <span style="line-height:1.8;color:rgb(0,0,255);">private</span> Object setBaseAtrByReflect(Map&lt;String, Object&gt; baseParam, Class clazz) <span style="line-height:1.8;color:rgb(0,0,255);">throws</span><span style="line-height:1.8;"> Exception {
+        Object instance </span>=<span style="line-height:1.8;"> clazz.newInstance();
+        Class superclass </span>=<span style="line-height:1.8;"> clazz.getSuperclass();
+        Method[] declaredMethods </span>=<span style="line-height:1.8;"> superclass.getDeclaredMethods();
+        </span><span style="line-height:1.8;color:rgb(0,0,255);">for</span><span style="line-height:1.8;"> (Method declaredMethod : declaredMethods) {
+            </span><span style="line-height:1.8;color:rgb(0,0,255);">if</span> (declaredMethod.getName().contains("set"<span style="line-height:1.8;">)) {
+                </span><span style="line-height:1.8;color:rgb(0,0,255);">if</span> (declaredMethod.getName().contains("Stu_id"<span style="line-height:1.8;">)) {
+                    declaredMethod.invoke(instance, baseParam.get(</span>"stu_id"<span style="line-height:1.8;">));
+                    </span><span style="line-height:1.8;color:rgb(0,0,255);">continue</span><span style="line-height:1.8;">;
+                }
+
+                </span><span style="line-height:1.8;color:rgb(0,0,255);">if</span> (declaredMethod.getName().contains("Stu_name"<span style="line-height:1.8;">)) {
+                    declaredMethod.invoke(instance, baseParam.get(</span>"stu_name"<span style="line-height:1.8;">));
+                    </span><span style="line-height:1.8;color:rgb(0,0,255);">continue</span><span style="line-height:1.8;">;
+                }
+                </span><span style="line-height:1.8;color:rgb(0,0,255);">if</span> (declaredMethod.getName().contains("Stu_age"<span style="line-height:1.8;">)) {
+                    declaredMethod.invoke(instance, (Integer) baseParam.get(</span>"stu_age"<span style="line-height:1.8;">));
+                    </span><span style="line-height:1.8;color:rgb(0,0,255);">continue</span><span style="line-height:1.8;">;
+                }
+                </span><span style="line-height:1.8;color:rgb(0,0,255);">if</span> (declaredMethod.getName().contains("Stu_birthday"<span style="line-height:1.8;">)) {
+                    declaredMethod.invoke(instance, (Date) baseParam.get(</span>"stu_birthday"<span style="line-height:1.8;">));
+                }
+            }
+        }
+        </span><span style="line-height:1.8;color:rgb(0,0,255);">return</span><span style="line-height:1.8;"> instance;
+    }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;起初这种方式大概是最差的，需要强转类型/随属性增多的的判断/迭代超类的所有的公共方法....简直不忍直视。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;后面空闲时间采用 java 内省重新编码了函数， java 内省通俗来说是 jdk 提供给程序员一种更优雅的方式获取 java-bean 的 getter/setter 方法。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;内省和反射是两码事请区别对待，但毋容置疑内省是由反射实现，只不过代码实现由 sun 公司的 java 团队，并经过很严格测试。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>  <span style="line-height:1.8;color:rgb(0,0,255);">private</span> Object setBaseAtrByIntrospect(Map&lt;String, Object&gt; baseParam, Class clazz) <span style="line-height:1.8;color:rgb(0,0,255);">throws</span><span style="line-height:1.8;"> Exception {
+        Object instance </span>=<span style="line-height:1.8;"> clazz.newInstance();
+        Class superclass </span>=<span style="line-height:1.8;"> clazz.getSuperclass();
+        PropertyDescriptor propDesc;
+        Method methodSetUserName;
+        </span><span style="line-height:1.8;color:rgb(0,0,255);">for</span><span style="line-height:1.8;"> (Field field : superclass.getDeclaredFields()) {
+            propDesc </span>= <span style="line-height:1.8;color:rgb(0,0,255);">new</span><span style="line-height:1.8;"> PropertyDescriptor(field.getName(), clazz);
+            methodSetUserName </span>=<span style="line-height:1.8;"> propDesc.getWriteMethod();
+            methodSetUserName.invoke(instance, baseParam.get(field.getName()));
+        }
+        </span><span style="line-height:1.8;color:rgb(0,0,255);">return</span><span style="line-height:1.8;"> instance;
+    }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;采用内省后比&nbsp;assembleBaseAtrByReflect 反射时的代码是不是清爽了很多，而且摈弃了很多难堪的地方，比如 强制类型转换/随属性增多的判断。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;当后来偶然瞥见 apache.beanutil 中几个有意思的 API 时，我觉得是时候优化下原项目中对应函数的编码。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre> <span style="line-height:1.8;color:rgb(0,0,255);">private</span> Object setBaseAtrByBeanUtil(Map&lt;String, Object&gt; baseParam, Class clazz) <span style="line-height:1.8;color:rgb(0,0,255);">throws</span><span style="line-height:1.8;"> Exception {
+        Object instance </span>=<span style="line-height:1.8;"> clazz.newInstance();
+        BeanUtils.setProperty(instance, </span>"stu_id", baseParam.get("stu_id"<span style="line-height:1.8;">));
+        BeanUtils.setProperty(instance, </span>"stu_name", baseParam.get("stu_name"<span style="line-height:1.8;">));
+        BeanUtils.setProperty(instance, </span>"stu_age", baseParam.get("stu_age"<span style="line-height:1.8;">));
+        BeanUtils.setProperty(instance, </span>"stu_birthday", baseParam.get("stu_birthday"<span style="line-height:1.8;">));
+        </span><span style="line-height:1.8;color:rgb(0,0,255);">return</span><span style="line-height:1.8;"> instance;
+    }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;代码是不是简单明快了很多？看起来一目了然，而且进行了精准打击，没有多余迭代判断。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;如果你反编译 BeanUtil 中的对应方法，你还是会找到 内省的影子。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;最近瞅见了分层中对泛型的抽象使用，难免让人浮想联翩，忍不住使用泛型调整了该函数的实现。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre> <span style="line-height:1.8;color:rgb(0,0,255);">private</span> &lt;T <span style="line-height:1.8;color:rgb(0,0,255);">extends</span> BaseStudentVO&gt; T setBaseAtrByGenenic(Map&lt;String, Object&gt;<span style="line-height:1.8;"> baseParam, T t) {
+        t.setStu_id(baseParam.get(</span>"stu_id"<span style="line-height:1.8;">).toString());
+        t.setStu_name(baseParam.get(</span>"stu_name"<span style="line-height:1.8;">).toString());
+        t.setStu_age((Integer) baseParam.get(</span>"stu_age"<span style="line-height:1.8;">));
+        t.setStu_birthday((Date) baseParam.get(</span>"stu_birthday"<span style="line-height:1.8;">));
+        </span><span style="line-height:1.8;color:rgb(0,0,255);">return</span><span style="line-height:1.8;"> t;
+    }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.8;"><a title="复制代码" style="border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;泛型中的边界限定很切合了该业务场景，使入参泛型 t 能顺畅的使用基类中的 set 方法，彻底摆脱了反射。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;反射的执行效率偏低，早已成为不争的事实，使用泛型重写后出现了类型强转的问题，但这已经是最优解了。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp;从开始的反射到后面的内省到最终的泛型，想法都是在翻看其他人的分享或撸一段实现时突然蹦出来。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p><font color="#333333"><span style="font-size:14px;">本文转自Orson博客园博客，原文链接：http://www.cnblogs.com/java-class/p/7147363.html，如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

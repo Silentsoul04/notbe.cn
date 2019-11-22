@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>KVM 介绍（4）：I/O 设备直接分配和 SR-IOV [KVM PCI/PCIe Pass-Through SR-IOV] « NotBeCN</title>
+  <meta name="description" content="             学习 KVM 的系列文章：&nbsp;        （1）介绍和安装     （2）CPU 和 内存虚拟化     （3）I/O QEMU 全虚拟化和准虚拟化（Para-virtulizaiton）     （4）I/O PCI/PCIe设备直接分配和 SR-IOV     （5）li...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/06/weixin_33735077_90131469.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">KVM 介绍（4）：I/O 设备直接分配和 SR-IOV [KVM PCI/PCIe Pass-Through SR-IOV]</h1>
+    <p class="post-meta">Nov 6, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">学习 KVM 的系列文章：&nbsp;</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;"><a href="http://www.cnblogs.com/sammyliu/p/4543110.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（1）介绍和安装</a></li> 
+    <li style="list-style-type:disc;"><a href="http://www.cnblogs.com/sammyliu/p/4543597.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（2）CPU 和 内存虚拟化</a></li> 
+    <li style="list-style-type:disc;"><a href="http://www.cnblogs.com/sammyliu/p/4543657.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（3）I/O QEMU 全虚拟化和准虚拟化（Para-virtulizaiton）</a></li> 
+    <li style="list-style-type:disc;"><a href="http://www.cnblogs.com/sammyliu/p/4548194.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（4）I/O PCI/PCIe设备直接分配和 SR-IOV</a></li> 
+    <li style="list-style-type:disc;"><a href="http://www.cnblogs.com/sammyliu/p/4558638.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（5）libvirt 介绍</a></li> 
+    <li style="list-style-type:disc;"><a href="http://www.cnblogs.com/sammyliu/p/4568188.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（6）Nova 通过 libvirt 管理 QEMU/KVM 虚机</a></li> 
+    <li style="list-style-type:disc;"><a href="http://www.cnblogs.com/sammyliu/p/4468757.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（7）快照 （snapshot）</a></li> 
+    <li style="list-style-type:disc;"><a href="http://www.cnblogs.com/sammyliu/p/4572287.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">（8）迁移 （migration）</a></li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">本文将分析 PCI/PCIe 设备直接分配（Pass-through）和 SR-IOV， 以及三种 I/O 虚拟化方式的比较。</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">1. PCI/PCI-E 设备直接分配给虚机 （PCI Pass-through）</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">设备直接分配 （Device assignment）也称为 Device Pass-Through。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">先简单看看PCI 和 PCI-E 的区别（AMD CPU）：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041136014418109.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（简单点看，PCI 卡的性能没有 PCI-E 高，因为 PCI-E 是直接连在 IOMMU 上，而 PCI 卡是连在一个 IO Hub 上。）</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">主要的 PCI 设备类型：</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">Network&nbsp;cards&nbsp;(wired&nbsp;or&nbsp;wireless)</li> 
+    <li style="list-style-type:disc;">SCSI&nbsp;adapters</li> 
+    <li style="list-style-type:disc;">Bus&nbsp;controllers:&nbsp;USB,&nbsp;PCMCIA,&nbsp;I2C,&nbsp;FireWire,&nbsp;IDE</li> 
+    <li style="list-style-type:disc;">Graphics&nbsp;and&nbsp;video&nbsp;cards</li> 
+    <li style="list-style-type:disc;">Sound&nbsp;cards</li> 
+   </ul>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.1 PCI/PCIe Pass-through 原理</h3> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <div>
+     这种方式，允许将宿主机中的物理 PCI 设备直接分配给客户机使用。较新的x86平台已经支持这种类型，Intel 定义的 I/O 虚拟化技术成为 VT-d，AMD 的称为 AMD-V。KVM 支持客户机以
+     <span style="line-height:1.5;text-decoration:underline;">独占方式</span>访问这个宿主机的 PCI/PCI-E 设备。通过硬件支持的 VT-d 技术将设备分给客户机后，在客户机看来，设备是物理上连接在PCI或者PCI-E总线上的，客户机对该设备的I/O交互操作和实际的物理设备操作完全一样，不需要或者很少需要 KVM 的参与。运行在 VT-d 平台上的 QEMU/KVM，可以分配网卡、磁盘控制器、USB控制器、VGA 显卡等设备供客户机直接使用。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     几乎所有的 PCI 和 PCI-E 设备都支持直接分配，除了显卡以外（显卡的特殊性
+     <a href="http://www.linux-kvm.org/page/VGA_device_assignment" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">在这里</a>）。PCI Pass-through 需要硬件平台&nbsp;Intel VT-d 或者&nbsp;AMD IOMMU 的支持。这些特性必须在 BIOS 中被启用。Red Hat Enterprise Linux 6.0 及以上版本支持热插拔的 PCI 设备直接分配到虚拟机。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     网卡直接分配：
+    </div> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <img src="https://images0.cnblogs.com/blog2015/697113/201506/011842353792141.jpg" alt="" style="border:0px;">
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    &nbsp;
+   </div> 
+   <div> 
+    <p style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;line-height:1.5;">硬盘直接分配：</p> 
+    <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;"> 
+     <div style="font-size:15px;"> 
+      <ul style="list-style:none;font-size:12px;">
+       <li style="list-style-type:disc;">一般&nbsp;SATA 或者 SAS 等类型的硬盘的控制器都是直接接入到 PCI 或者 &nbsp;PCI-E 总线的，所以也可以将硬盘作为普通的PCI设备直接分配个客户机。需要注意的是，当分配硬盘时，实际上将其控制器作为一个整体分配到客户机中，因此需要在硬件平台上至少有另两个或者多个SATA或者 SAS控制器。<span style="line-height:1.5;">&nbsp;</span> </li>
+      </ul>
+      <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;"><span style="line-height:1.5;">1.2 在 RedHat Linux 6 上使用 virt-manger 分配一个光纤卡给虚机</span></h3> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;text-decoration:underline;"><span style="line-height:1.5;">准备工作：</span></span></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;">（1）在 BIOS 中打开&nbsp;Intel VT-d&nbsp;</span></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;">（2）在 Linux 内核中启用 PCI Pass-through</span></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;">添加&nbsp;intel_iommu=on 到&nbsp;/boot/grub/grub.conf 文件中。（在我的 RedHat Linux 6上，该文件是 /boot/grub.conf）</span></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;">（3）重启系统，使得配置生效</span></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;text-decoration:underline;"><span style="line-height:1.5;">实际分配：</span></span></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;">（1）使用 lspci -nn 命令找到待分配的 PCI 设备。这里以一个 FC 卡为例：</span></p> 
+      <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041101328941957.jpg" alt="" style="border:0px;"></p> 
+      <p style="line-height:1.5;">使用 lspci 命令得到的 PCI 数字的含义，以后使用 libvirt API 分配设备时会用到：</p> 
+      <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041142033636178.jpg" alt="" width="495" height="118" style="border:0px;"></p> 
+      <p style="line-height:1.5;">（2）使用 virsh nodedev-list 命令找到该设备的 PCI 编号</p> 
+      <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041103204267007.jpg" alt="" style="border:0px;"></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;">（3）将设备从主机上解除</span></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041104293633102.jpg" alt="" style="border:0px;"></span></p> 
+      <p style="line-height:1.5;"><span style="line-height:1.5;">（4）使用 virt-manager 将设备直接分配给一个启动了的虚拟机</span></p> 
+      <p style="line-height:1.5;">&nbsp;<img src="https://images0.cnblogs.com/blog2015/697113/201506/041059152547539.jpg" alt="" style="border:0px;"></p> 
+      <p style="line-height:1.5;">（5）添加好了后的效果</p> 
+      <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041105473631532.jpg" alt="" style="border:0px;"></p> 
+      <p style="line-height:1.5;">（6）在虚机中查看该PCI设备</p> 
+      <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041107330353981.jpg" alt="" style="border:0px;"></p> 
+      <p style="line-height:1.5;">（7）不再使用的话，需要在 virt-manager 中首先将该设备移除，然后在主机上重新挂载该设备</p> 
+      <p style="line-height:1.5;">&nbsp;<img src="https://images0.cnblogs.com/blog2015/697113/201506/041114249412888.jpg" alt="" style="border:0px;"><span style="line-height:1.5;">&nbsp;</span></p> 
+      <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.3 在 RedHat Linux 6 上使用 qemu-kvm 分配一个光纤卡给虚机</h3> 
+      <p style="line-height:1.5;">除了步骤（4），其他步骤同上面。</p> 
+      <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041126293482599.jpg" alt="" style="border:0px;"></p> 
+      <p style="line-height:1.5;">&nbsp;</p> 
+     </div> 
+     <div style="font-size:15px;"> 
+      <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.4 设备直接分配让客户机的优势和不足</h3> 
+      <ul style="list-style:none;font-size:12px;">
+       <li style="list-style-type:disc;"> <span style="line-height:1.5;text-decoration:underline;">好处</span>：在执行 I/O 操作时大量减少甚至避免 VM-Exit 陷入到 Hypervisor 中，极大地提高了性能，可以达到几乎和原生系统一样的性能。VT-d 克服了&nbsp;virtio 兼容性不好和 CPU 使用频率较高的问题。</li> 
+       <li style="list-style-type:disc;"> <span style="line-height:1.5;text-decoration:underline;">不足</span>：（1）一台服务器主板上的空间比较有限，因此允许添加的 PCI 和 PCI-E 设备是有限的。大量使用&nbsp;VT-d 独立分配设备给客户机，让硬件设备数量增加，这会增加硬件投资成本。（2）对于使用 VT-d 直接分配了设备的客户机，其动态迁移功能将受限，不过也可以使用热插拔或者libvirt 工具等方式来缓解这个问题。</li> 
+       <li style="list-style-type:disc;"> <span style="line-height:1.5;text-decoration:underline;">不足的解决方案</span>：（1）在一台物理宿主机上，仅少数 I/O 如网络性能要求较高的客户机使用 VT-d直接分配设备，其他的使用纯模拟或者 virtio 已达到多个客户机共享同一个设备的目的 （2）对于网络I/O的解决办法，可以选择 SR-IOV 是一个网卡产生多个独立的虚拟网卡，将每个虚拟网卡分配个一个客户机使用。</li> 
+      </ul>
+     </div> 
+     <h2 style="font-size:21px;line-height:1.5;">2. SR-IOV 设备分配</h2> 
+     <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.1 原理</h3> 
+     <div style="font-size:15px;">
+      &nbsp; &nbsp; VT-d 的性能非常好，但是它的物理设备只能分配给一个客户机使用。为了实现多个虚机共享一个物理设备，并且达到直接分配的目的，PCI-SIG 组织发布了 SR-IOV （Single Root I/O Virtualization and&nbsp;sharing） 规范，它定义了一个标准化的机制用以原生地支持实现多个客户机共享一个设备。不过，目前 SR-IOV （单根 I/O 虚拟化）最广泛地应用还是网卡上。&nbsp;
+     </div> 
+     <div style="font-size:15px;">
+      &nbsp;
+     </div> 
+     <div style="font-size:15px;">
+      SR-IOV 使得一个单一的功能单元（比如，一个以太网端口）能看起来像多个独立的物理设备。一个带有 SR-IOV 功能的物理设备能被配置为多个功能单元。SR-IOV 使用两种功能（function）：
+     </div> 
+     <ul style="font-size:12px;list-style:none;">
+      <li style="list-style-type:disc;">物理功能（Physical Functions，PF）：这是完整的带有 SR-IOV 能力的PCIe 设备。PF 能像普通 PCI 设备那样被发现、管理和配置。</li> 
+      <li style="list-style-type:disc;">虚拟功能（Virtual Functions，VF）：简单的 PCIe 功能，它只能处理I/O。每个 VF 都是从 PF 中分离出来的。每个物理硬件都有一个 VF 数目的限制。一个 PF，能被虚拟成多个 VF 用于分配给多个虚拟机。</li> 
+     </ul>
+     <div style="font-size:15px;">
+      &nbsp;
+     </div> 
+     <div style="font-size:15px;"> 
+      <div class="para">
+       Hypervisor 能将一个或者多个 VF 分配给一个虚机。在某一时刻，一个 VF 只能被分配给一个虚机。一个虚机可以拥有多个 VF。在虚机的操作系统看来，一个 VF 网卡看起来和一个普通网卡没有区别。SR-IOV 驱动是在内核中实现的。
+      </div> 
+      <div class="para">
+       &nbsp;
+      </div> 
+      <div class="para">
+       网卡 SR-IOV 的例子：
+      </div> 
+     </div> 
+     <div style="font-size:15px;"> 
+      <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041217128487605.jpg" alt="" style="border:0px;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/011818595515631.jpg" alt="" width="385" height="263" style="border:0px;line-height:1.5;"><span style="line-height:1.5;">&nbsp;</span></p> 
+      <p style="line-height:1.5;">光纤卡 SR-IOV 的例子：</p> 
+      <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041145313631991.jpg" alt="" width="523" height="355" style="border:0px;"></p> 
+     </div> 
+     <div> 
+      <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.2 SR-IOV 的条件</h3> 
+      <ol style="font-size:15px;">
+       <li style="list-style-type:decimal;">需要 CPU 支持 Intel VT-x 和 VT-D （或者 AMD 的 SVM 和 IOMMU）&nbsp;</li> 
+       <li style="list-style-type:decimal;">需要有支持 SR-IOV 规范的设备：目前这种设备较多，比如Intel的很多中高端网卡等。</li> 
+       <li style="list-style-type:decimal;">需要 QEMU/KAM 的支持。</li> 
+      </ol>
+      <div style="font-size:15px;">
+       &nbsp;RedHat Linux 6.0 官方只完整测试了下面的几款 SR-IOV 网卡：
+      </div> 
+      <div style="font-size:15px;"> 
+       <ul style="list-style:none;font-size:12px;">
+        <li style="list-style-type:disc;">Intel® 82576NS Gigabit Ethernet Controller (&nbsp;<strong>igb</strong>&nbsp;驱动)</li> 
+        <li style="list-style-type:disc;">Intel® 82576EB Gigabit Ethernet Controller (&nbsp;<strong>igb</strong>&nbsp;驱动)</li> 
+        <li style="list-style-type:disc;">Intel® 82599ES 10 Gigabit Ethernet Controller (&nbsp;<strong>ixgbe</strong>&nbsp;驱动)</li> 
+        <li style="list-style-type:disc;">Intel® 82599EB 10 Gigabit Ethernet Controller (&nbsp;<strong>ixgbe</strong>&nbsp;驱动)</li> 
+       </ul>
+       <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.3 分配 SR-IOV 设备的步骤</h3> 
+       <p style="line-height:1.5;"><span style="line-height:1.5;">手头没有支持SR-IOV的设备。这是 RedHat 上 SR-IOV 的配置步骤：<a href="https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/6/html/Virtualization_Host_Configuration_and_Guest_Installation_Guide/sect-Virtualization_Host_Configuration_and_Guest_Installation_Guide-SR_IOV-How_SR_IOV_Libvirt_Works.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">&nbsp;Using SR-IOV</a>。</span></p> 
+       <p style="line-height:1.5;"><span style="line-height:1.5;">简单来说，SR-IOV 分配步骤和设备直接分配相比基本类似，除了要使 PF 虚拟化成多个 VF 以外。</span></p> 
+      </div> 
+      <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.4 优势和不足</h3> 
+      <table border="0" style="font-size:15px;border:1px solid #C0C0C0;border-collapse:collapse;">
+       <tbody>
+        <tr>
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">优势</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">不足</td> 
+        </tr>
+        <tr>
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> 
+          <ol>
+           <li style="list-style-type:decimal;">真正实现设备共享 （多个客户机共享一个 SR-IOV 设备的物理端口）</li> 
+           <li style="list-style-type:decimal;">接近原生性能</li> 
+           <li style="list-style-type:decimal;">相比 VT-d， SR-IOV 可以使用更少的设备来支持更多的客户机，可以提高数据中心的空间利用率。</li> 
+          </ol></td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> 
+          <ol>
+           <li style="list-style-type:decimal;">对设备有依赖，目前只有部分设备支持 SR-IOV。RedHat Linux 只是测试了 Intel 的几款高端网卡。</li> 
+           <li style="list-style-type:decimal;">使用 SR-IOV 时不方便动态迁移客户机。 这是因为这时候虚机直接使用主机上的物理设备，因此虚机的迁移（migiration）和保存（save）目前都不支持。这个在将来有可能被改变。</li> 
+          </ol></td> 
+        </tr>
+       </tbody>
+      </table>
+      <h2 style="font-size:21px;line-height:1.5;">3. 各种设备虚拟化方式的比较</h2> 
+      <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.1 架构上的比较（以网卡为例）</h3> 
+      <p style="font-size:15px;line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041757191911525.jpg" alt="" width="432" height="266" style="border:0px;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041757434104956.jpg" alt="" width="425" height="269" style="border:0px;"></p> 
+      <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.2 性能上的比较 （以网卡为例）</h3> 
+      <p style="font-size:15px;line-height:1.5;">纯模拟网卡和物理网卡的比较：</p> 
+      <p style="font-size:15px;line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/050702425827384.jpg" alt="" style="border:0px;"></p> 
+      <p style="font-size:15px;line-height:1.5;">（来源：Evaluating and Optimizing I/O Virtualization in Kernel-based Virtual Machine (KVM), Binbin Zhang, Xiaolin Wang, Rongfeng Lai, Liang Yang, Zhenlin Wang,Yingwei Luo, Xiaoming Li）</p> 
+      <p style="font-size:15px;line-height:1.5;">（测试环境：两台物理服务器 HostA 和 HostB，都使用GB以太网。HostA 使用&nbsp;82566DC 网卡，HostB 使用&nbsp;82567LM-2 网卡，一台虚机运行在 HostB 上，使用 KVM-76.）</p> 
+      <p style="font-size:15px;line-height:1.5;">结论：</p> 
+      <ul style="font-size:12px;list-style:none;">
+       <li style="list-style-type:disc;">纯模拟网卡的性能只有物理网卡的四成到六成</li> 
+       <li style="list-style-type:disc;">纯模拟网卡的 UDP 性能比 TCP 性能高 50% 到 100%</li> 
+       <li style="list-style-type:disc;">在虚拟网卡上使用 NAPI，不但不会提高性能，反而会是性能下降</li> 
+       <li style="list-style-type:disc;">e1000 的性能比 rt18139 的性能高不少（为什么 RedHat Linux KVM 上默认的网卡是 rt18139 呢？）</li> 
+      </ul>
+      <p style="font-size:15px;line-height:1.5;">Virtio 和 vhost_net 的吞吐量比较：</p> 
+      <p style="font-size:15px;line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/041758393324340.jpg" alt="" width="423" height="241" style="border:0px;"></p> 
+      <ul style="font-size:12px;list-style:none;">
+       <li style="list-style-type:disc;">来源：CANONICAL, KVM Performance Optimization, Paul Sim,Cloud Consultant, paul.sim@canonical.com</li> 
+       <li style="list-style-type:disc;">结论： vhost_net 比 virtio 的 UDP 和 TCP 性能高 20% 左右。</li> 
+      </ul>
+      <p style="font-size:15px;line-height:1.5;">RedHat Linux 6 上 virtio，vhost_net，SR-IOV 和物理设备网络延迟的比较：</p> 
+      <p style="font-size:15px;line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/050941390661535.jpg" alt="" style="border:0px;"></p> 
+      <p style="font-size:15px;line-height:1.5;">（来源：<a href="https://www.redhat.com/promo/summit/2010/presentations/summit/decoding-the-code/wed/mwagner-2-kvm/summit_jbw_2010_kvm_performance.pdf" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">RedHat 官网</a>）</p> 
+      <p style="font-size:15px;line-height:1.5;">RedHat Linux 6 上 virtio 和 vhost_net 所消耗的主机CPU资源的比较：</p> 
+      <p style="font-size:15px;line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/050932179737918.jpg" alt="" width="690" height="378" style="border:0px;"></p> 
+      <p style="font-size:15px;line-height:1.5;">（来源同上）</p> 
+      <p style="font-size:15px;line-height:1.5;">使用 virtio 的 KVM 与物理机的 TCP 吞吐量对比：</p> 
+      <p style="font-size:15px;line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/050937114577978.jpg" alt="" width="652" height="389" style="border:0px;"></p> 
+      <p style="font-size:15px;line-height:1.5;">（数据来源：<a href="https://www.redhat.com/promo/summit/2010/presentations/summit/decoding-the-code/wed/mwagner-2-kvm/summit_jbw_2010_kvm_performance.pdf" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">RedHat 官网</a>）</p> 
+      <p style="font-size:15px;line-height:1.5;">物理机与使用 SR-IOV 的 KVM 的网络性能对比：</p> 
+      <p style="font-size:15px;line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/050938564889299.jpg" alt="" width="656" height="363" style="border:0px;"></p> 
+      <p style="font-size:15px;line-height:1.5;">（来源：同上）</p> 
+      <p style="font-size:15px;line-height:1.5;"><span style="line-height:1.5;font-size:14px;">物理机与使用 Pass-through 的KVM&nbsp;的 TCP 性能对比：</span></p> 
+      <p style="font-size:15px;line-height:1.5;"><span style="line-height:1.5;font-size:14px;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/050742513944092.jpg" alt="" width="615" height="371" style="border:0px;"></span></p> 
+      <p style="font-size:15px;line-height:1.5;">&nbsp;</p> 
+      <p style="font-size:15px;line-height:1.5;">（资料来源：Open Source Virtualization: KVM and Linux, Chris Wright, Principal Software Engineer, Red Hat,September 4, 2009）</p> 
+      <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;"><span style="line-height:1.5;font-size:1.17em;">3.3&nbsp;&nbsp;Virtio 和 Pass-Through 的详细比较</span></h3> 
+      <p style="font-size:15px;line-height:1.5;"><img src="https://images0.cnblogs.com/blog2015/697113/201506/030648412277872.jpg" alt="" style="border:0px;"></p> 
+      <p style="font-size:15px;line-height:1.5;"><br> （来源：Reconnaissance of Virtio: What’s new&nbsp;and how it’s all connected? by&nbsp;Mario Smarduch）</p> 
+      <h2 style="font-size:21px;line-height:1.5;">&nbsp;4. 综合结论</h2> 
+      <p style="font-size:15px;line-height:1.5;">KVM 依赖的Intel/AMD 处理器的各种虚拟化扩展：</p> 
+      <table border="0" style="font-size:15px;border:1px solid #C0C0C0;border-collapse:collapse;width:569px;">
+       <tbody>
+        <tr>
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">处理器</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">CPU 虚拟化</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">内存虚拟化</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">PCI Pass-through</td> 
+        </tr>
+        <tr>
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">Intel</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">VT-x</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">VPID，EPT</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">VT-d</td> 
+        </tr>
+        <tr>
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">AMD</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">AMD-V</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">ASID，NPT</td> 
+         <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">IOMMU</td> 
+        </tr>
+       </tbody>
+      </table>
+      <p style="font-size:15px;line-height:1.5;">&nbsp;</p> 
+      <p style="font-size:15px;line-height:1.5;">I/O 虚拟化方案的选择：</p> 
+      <ul style="font-size:12px;list-style:none;">
+       <li style="list-style-type:disc;">I/O设备尽量使用准虚拟化（virtio 和 vhost_net）</li> 
+       <li style="list-style-type:disc;">如果需要实时迁移，不能使用 SR-IOV</li> 
+       <li style="list-style-type:disc;">对更高I/O要求又不需要实时迁移的，可以使用 SR-IOV</li> 
+       <li style="list-style-type:disc;">每种方案都有优势和不足，在特定环境下其性能有可能反而下降，因此在生产环境中使用各种虚拟化方式前需要经过完整测试</li> 
+      </ul>
+      <p style="font-size:15px;line-height:1.5;">&nbsp;</p> 
+      <p style="font-size:15px;line-height:1.5;">其它参考资料：</p> 
+      <ul style="font-size:12px;list-style:none;">
+       <li style="list-style-type:disc;">RedHat Linux 6 官方文档</li> 
+       <li style="list-style-type:disc;">KVM 官方文档</li> 
+       <li style="list-style-type:disc;">KVM 虚拟化技术实战与解析 任永杰、单海涛 著</li> 
+       <li style="list-style-type:disc;"><a href="http://www.ibm.com/developerworks/cn/linux/l-cn-amd-virt2/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">KVM 虚拟化技术在 AMD 平台上的实现</a></li> 
+      </ul>
+      <div>
+       <span style="font-size:12px;"><br></span>
+      </div> 
+     </div> 
+    </div> 
+    <div> 
+     <div> 
+      <font color="#4b4b4b"><span style="font-size:12px;">&nbsp; &nbsp; 本文转自SammyLiu博客园博客，原文链接：http://www.cnblogs.com/sammyliu/p/4548194.html</span></font>
+      <span style="font-size:12px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span> 
+     </div> 
+     <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:12px;">
+      <br>
+     </div> 
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

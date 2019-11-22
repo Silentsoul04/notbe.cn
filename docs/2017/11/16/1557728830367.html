@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>RabbitMQ 高可用集群搭建及电商平台使用经验总结 « NotBeCN</title>
+  <meta name="description" content="                  面向EDA（事件驱动架构）的方式来设计你的消息       AMQP routing key的设计       RabbitMQ cluster搭建       Mirror queue policy设置       两个不错的RabbitMQ plugin 大型应用插件(Sh...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/16/1557728830367.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">RabbitMQ 高可用集群搭建及电商平台使用经验总结</h1>
+    <p class="post-meta">Nov 16, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <ol style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">
+    <li> <p>面向EDA（事件驱动架构）的方式来设计你的消息</p> </li> 
+    <li> <p>AMQP routing key的设计</p> </li> 
+    <li> <p>RabbitMQ cluster搭建</p> </li> 
+    <li> <p>Mirror queue policy设置</p> </li> 
+    <li> <p>两个不错的RabbitMQ plugin 大型应用插件(Sharding、Rederation)</p> </li> 
+    <li> <p>Queue镜像失败手动同步</p> </li> 
+    <li> <p>各集群配置同步方式（RabbitMQ export\import）</p> </li> 
+    <li> <p>客户端连接方式（尽量采用AMQP组来动态链接）</p> </li> 
+    <li> <p>RabbitMQ 产线二次产品化封装（消息补偿、发送消息持久化、异常处理、监控页面、重复消息剔除）</p> </li> 
+   </ol>
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">1.面向EDA（事件驱动架构）的方式来设计你的消息</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">在通常情况下你在使用消息中间件的时候，都是未经设计的使用，你没有把应用架构和系统架构边界搞清楚。消息中间件只是一个纯粹的技术工具，当你引入的时候是站在应用架构的角度引入的。这是架构的角度，也是架构的上帝视角，这样你就不会用到最后发现越来越混乱，而且也无法结合软件模式、方法论、最佳实践来综合提升系统的架构能力。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">EDA（Event Driven Architecture，<em>EDA</em>） 事件驱动架构，它是一种用来在SOA或者Micro service中进行的架构模式。它的好处有几个，柔性具有很高的伸缩性。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">（具体参考本人的SOA架构文章：<a href="http://www.cnblogs.com/wangiqngpei557/p/4486177.html" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);">SOA架构设计经验分享—架构、职责、数据一致性</a>）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">既然要EDA就要规划好你当前的系统边界之内有多少业务实体，这些实体是围绕着领域模型而得来。所以这里不要很主观的就定义一些你认为的事件，这些事件要根据业务实体中的对象来设计。业务实体起码是有唯一Identity的。比如，订单、商品，围绕着这些实体展开，订单可能有几个状态是比较常用的，创建、支付、配送、取消。商品可能有价格、关键属性修改等等。这些实体的抽象和提炼取决于你当前的业务。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">（有关这方面内容可以参考：《领域驱动设计》、《探索CQRS和事件源》）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这些是相对理论的指导思想，有了这些之后你可以落地你的Rabbitmq，这样你就不会跑偏了。比如，你的消息名称不会是看起来没结构和层次的，deliveryMssage（配送消息）。而是应该，order.delivery.ondeliveryEvented（订单.配送.配送完成事件）这样的结构。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">当你的层次结构不满足业务需求的时候，你可能还需要进一步明确事件范围，order.viporder.delivery.ondeliveryEvented（订单.VIP订单.配送.配送完成事件）。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/64/wKiom1hL7Bzz7WVrAABi5iicIVU546.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="1" alt="1" src="http://s3.51cto.com/wyfs02/M01/8B/64/wKiom1hL7Byjiv6EAABlSXgdYGg274.png" width="855" height="496" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">上图是一个事件驱动的基本场景，它最瞩目的几个特性就是这几个，首先是异步化的，可以大大提高系统的抗峰值能力。然后就是解耦，这不用说了，设计模式里的观察者模式没有人不知道它的好处。伸缩性，可以按需scaleout，比如rabbitmq的node可以很方便的加入。最终一致性解决了分布式系统的CAP定理的问题。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">2.AMQP routing key的设计</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">AMQP协议中约定了routing key的设计和交互。为了实现订阅发布功能，我们需要某种方式能够订阅自己所感兴趣的事件。所以在AMQP中的Binding中，可以根据routing key来进行模式匹配。所以，这里可以结合amqp routingkey与领域事件，发出来的事件就相当于amqp中的routingkey，这样可以完美的结合起来。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">你的事件肯定是随着业务发展逐渐增加的，而这个事件集合也没办法在一开始就定义清楚，所以这里有一个需要注意的就是，绑定的时候千万不要写死具体的routing key。比如，order.delivery.OnDeliveryEvented，这是订单配送，此时你Binding的时候routingkey就写成了”order.delivery.OnDeliveryEvented”。未来订单事件一扩展，就会很麻烦，不相关的事件都被订阅到，无法细化或者事件你无法获取到，因为routingkey改变了。所以在绑定的时候记住具体点绑定，也就是借助字符串的模式匹配绑定，比如，*.delivery.*，*.onDeliveryEvented”这样。将来越来越多的routingkey和event出来都不会影响你的绑定。你只需要根据自己的关心程度，绑定在事件的不同层级上即可。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M01/8B/60/wKioL1hL7ByjOMHiAAAshoOGWH0054.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="2" alt="2" src="http://s3.51cto.com/wyfs02/M02/8B/60/wKioL1hL7B2BebBwAAAuk1Irc8s249.png" width="645" height="202" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">上图中，orderBinding绑定了order事件，它订阅了顶级事件，也就是说未来任何类型的订单都可以被订阅到，比如，order.normalorder.delivery.onDeliveryEvent也可以被订阅到。而viporderBinding订阅了viporder事件，如果发送了一个order.normalorder.delivery.onDeliveryEvent就跟它没关系了。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">3.RabbitMQ cluster搭建</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">搞清楚了应用架构的事情，我们开始着手搭建RabbitMQ cluster。rabbitmq这款AMQP产品是用erlang开发的，那么我们稍微介绍下erlang。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我第一次正式接触erlang就是从rabbitmq开始的，一开始并没有太多感觉到特别的地方，后来才明白越明白越发现挺喜欢这门语言的。喜欢的理由就是，它是天然的分布式语言。这句话说起来好像挺平常的，但是当你明白了.erlang.cookie机制之后才恍然大悟。瞬间顿悟了，为什么要用erlang来搞rabbitmq，而是它真的很适合信息交换之类的软件。erlang是爱立信公司开发的专门用来开发高性能信息交换机的，想想也会觉得那些软件的性能和稳定性要求是极高的。RabbitMQ的节点发现和互连真的很方便，这在erlang的虚拟机中就集成了，而且具有高度容错能力。反正我对它很有好感。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">还有一点值得骄傲的是RabbitMQ是伟大的pivotal公司的，你应该知道pivotal公司是干什么的，如果你还不清楚建议你立刻google下。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M00/8B/64/wKiom1hL7B3D_9-rAAAkTmtMn6U141.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="3" alt="3" src="http://s3.51cto.com/wyfs02/M00/8B/60/wKioL1hL7B2xNbATAAAmLUrrVNc510.png" width="987" height="71" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">一开始我并没有太关注他们的copyright，后来对pivotal公司越来越佩服之后突然看到原来RabbitMQ也是他们家的，突然信心倍增。这就是影响力和口碑，看看人家公司的spring、springboot、spring cloud，佩服的五体投地。（RabbtiMQ 官网：<a title="http://www.rabbitmq.com/" href="http://www.rabbitmq.com/" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);">http://www.rabbitmq.com/</a>）</p> 
+   <h2 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">3.1.安装erlang &amp; RabbitMQ</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">要想安装RabbitMQ，首先需要安装和配置好它的宿主环境erlang。去erlang官网下载好erlang otp_src源码包，然后在本地执行源码安装。（erlang官网：<a title="http://www.erlang.org/" href="http://www.erlang.org/" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);">http://www.erlang.org/</a>）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">由于我本机已经下载好了otp_src源码包，我是使用的otp_src_19.1版本。下载好之后解压缩，然后进入目录，执行./configure --prefix=/usr/erlang/，进行环境的检查和安装路径的选择。如果你提示“No curses library functions found”错误，是因为缺少curses库，yum install –y ncurses-devel。安装后在进行configure。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">如果没有报错的话，就说明安装成功了。你还需要配置下环境变量：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">export PATH=$PATH:/usr/erlang/bin</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">source /etc/profile</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">此时使用erl命令检查下erlang是否能正常工作了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">接下来安装RabbitMQ，去官网下载运行的包就行了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">同样要配置下环境变量，这样你的命令才能被系统查找到。然后运行rabbitmq实例。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M01/8B/64/wKiom1hL7B7iC4I7AAAoqbkOf4w269.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="4" alt="4" src="http://s3.51cto.com/wyfs02/M01/8B/60/wKioL1hL7B6izocBAAArMrRZR_s777.png" width="686" height="184" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这里有一个需要注意，记得配置下hosts，在127.0.0.1里加上本机的名称。erlang进程需要host来进行连接，所以它会检查你的hosts配置。还需要设置下防火墙，三个端口要打开。15672是管理界面用的，25672是集群之间使用的端口，4369是erlang进程epmd用来做node连接的。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我配置了两个节点，192.168.0.105、192.168.0.107，现在已经全部就绪。我们添加原始账号进入rabbitmq管理界面。</p> 
+   <h2 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">3.2.配置RabbitMQ cluster</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">先保证你的各个rabbitmq节点都是可以访问的，且打开rabbitmq_management plugin，这样可以当出现某个节点挂掉之后可以切换到其他管理界面查看情况或者管理。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">打开管理界面插件：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmq-plugins enable rabbitmq_management</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">添加账号：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmqctl add_user admin admin</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">添加 权限tag</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmqctl set_user_tags admin administrator</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/64/wKiom1hL7DGCorq_AACbNY3Wl0k815.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="5" alt="5" src="http://s3.51cto.com/wyfs02/M02/8B/60/wKioL1hL7DHTanvcAACdVOGDTaI450.png" width="949" height="521" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/64/wKiom1hL7DKylctFAAB8E52Rllc945.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="6" alt="6" src="http://s3.51cto.com/wyfs02/M02/8B/60/wKioL1hL7DKRd3RHAAB-I3uRNk0262.png" width="944" height="412" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">保证两个节点都是可以正常工作的。下面我们就将这两个节点连接起来形成高可用的cluster，这样我们就可以让我们的exchange、queue在这两个节点之间复制，形成高可用的queue。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">cd 到你的home目录下，我是在root下，里面有一个隐藏的.erlang.cookie文件，这就是我在前面介绍erlang时候提到的，这个文件是erlang用来发现和互连的基础。我们需要做的很简单，将两个节点中的.erlang.cookie设置成一样的。这是erlang的约定，一样的cookie hash key他认为是合法和正确的连接。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">.erlang.cookie默认是只读的，你需要修改下写入权限，然后复制粘贴下cookie&nbsp; 字符串即可。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">chmod u+w .erlang.cookie</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">配置好了之后接下来配置hosts文件，erlang会使用hosts文件里的配置去发现节点。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">vim /etc/hosts</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">192.168.0.107 rabbitmq_node2 &nbsp; &nbsp;<br> 192.168.0.105 rabbitmq_node1</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">保证同样的配置在所有的节点上都是相同的。验证你配置的正确不正确你只需要在你的机器上ping rabbitmq_node1，试下请求的ip是不是你配置的即可。按照DNS的请求原理，hosts是最高优先权，除非浏览器有缓存，你直接用ping就不会有问题的。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">选择一个节点stop，然后连接到另外节点。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmqctl stop_app</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmqctl join_cluster rabbit@rabbitmq_node2 &nbsp; &nbsp;<br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">Clustering node rabbit@rabbitmq_node1 with rabbit@rabbitmq_node2 ... &nbsp; &nbsp;<br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmqctl start_app</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">节点已经连接成功。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M00/8B/64/wKiom1hL7DOhkM7IAAGvlaLZJJw592.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="7" alt="7" src="http://s3.51cto.com/wyfs02/M00/8B/64/wKiom1hL7DPBz5xNAACSRyY-wt0317.png" width="1117" height="434" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">默认情况下节点占用的memory是总内存的40%，可以根据自己的用途仔细研究rabbitmq的配置项。为了提高性能，不需要两个节点都是disc的节点，所以我们需要启动一个节点为RAM模式。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmqctl change_cluster_node_type&nbsp; ram</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">改变rabbitmq_node1为内存节点模式。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M00/8B/60/wKioL1hL7DSj1cstAAE5yZQ8FPA057.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="8" alt="8" src="http://s3.51cto.com/wyfs02/M01/8B/64/wKiom1hL7DSDjg_FAABxzu9leU0032.png" width="1179" height="285" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">4.Mirror queue policy设置</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">节点是准备好了，接下来我们需要设置exchange、queue 高可用策略，这样才能真的做到高可用。现在是物理上的机器或者说虚拟机节点是高可用的，但是里面的对象需要我们进行配置策略。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">RabbitMQ支持很好的策略模式，需要管理员才能操作。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">首先我们需要创建一个属于自己业务范围内的vhost，标示一个逻辑上的独立空间，所有的账号、策略、队列都是强制在某个虚拟机里的。我创建了一个common vhost。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">开始添加policie。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M01/8B/60/wKioL1hL7DTjB20oAABPka5NX18015.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="9" alt="9" src="http://s3.51cto.com/wyfs02/M02/8B/64/wKiom1hL7DWBtYCkAABR74_tfpc862.png" width="764" height="422" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">最主要是Apply to ，可以作用在exchange或者queues上，当然也可以包含这两个。策略选择还是比较丰富的，最常用的是HAmode，还有MessageTTL（消息的过期时间）。这些策略按照几个维度分组了，有跟高可用相关的，有Federation（集群之间同步消息）相关的 ，有Queue相关的，还有Exchange相关的。可以根据的业务场景进行调整。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/60/wKioL1hL7DXzAycxAAAp-NyyIy0545.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="10" alt="10" src="http://s3.51cto.com/wyfs02/M00/8B/64/wKiom1hL7DaTucF7AAAsSowAlfo404.png" width="717" height="168" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们定义了策略的匹配模式.order.，这样可以避免将所有的exchange、queue都镜像了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M00/8B/60/wKioL1hL7DaTNDdcAABuea72BNM625.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="11" alt="11" src="http://s3.51cto.com/wyfs02/M00/8B/60/wKioL1hL7DaRzRf6AABw8jFrnps408.png" width="777" height="288" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们新建了一个ex.order.topic exchange，它的features中应用了exchange_queue_ha策略。（相同的策略是无法叠加使用的。）其他的exchange并没有应用这个策略，是因为我们的pattern限定了只匹配.order.的名称。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M01/8B/64/wKiom1hL7DeCUDKZAADZCvX5Ufk421.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="12" alt="12" src="http://s3.51cto.com/wyfs02/M01/8B/60/wKioL1hL7Dej0a85AAA_MKBdwX0987.png" width="1048" height="151" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">创建一个qu.order.crm queue，注意看它的node属性里有一个”Synchronised mirrors:rabbit@rabbitmq_node2“镜像复制。features里也应用了exchange_queue_ha策略。这个时候，队列其实在两个节点里都是有的，虽然我们创建的时候是在<a href="mailto:rabbit@rabbitmq_node1" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);">rabbit@rabbitmq_node1</a>里的，但是它会复制到集群里的其他节点。在创建HAmode的时候可以提供HA params参数，来限定复制节点的个数，这通常用来提高性能和HA之间的平衡。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">5.两个不错的RabbitMQ plugin 大型应用插件(Sharding、Rederation)</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">在rabbitmq-plugins中有两个plugin还是可以试着研究研究的。rabbitmq-plugins list。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmq-plugins list &nbsp; &nbsp;<br> Configured: E = explicitly enabled; e = implicitly enabled &nbsp; &nbsp;&nbsp;<br> | Status:&nbsp;&nbsp; * = running on rabbit@rabbitmq_node1 &nbsp; &nbsp;&nbsp;<br> |/ &nbsp; &nbsp;&nbsp;<br> [e*] amqp_client&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] cowboy&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1.0.3 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] cowlib&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1.0.1 &nbsp; &nbsp;&nbsp;<br> [e*] mochiweb&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2.13.1 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_amqp1_0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_auth_backend_ldap&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_auth_mechanism_ssl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_consistent_hash_exchange 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_event_exchange&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_federation&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_federation_management&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_jms_topic_exchange&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [E*] rabbitmq_management&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [e*] rabbitmq_management_agent&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_management_visualiser&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_mqtt&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_recent_history_exchange&nbsp; 1.2.1 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_sharding&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0.1.0 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_shovel&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_shovel_management&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_stomp&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_top&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_tracing&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_trust_store&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [e*] rabbitmq_web_dispatch&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_web_stomp&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] rabbitmq_web_stomp_examples&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 3.6.5 &nbsp; &nbsp;&nbsp;<br> [&nbsp; ] sockjs&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0.3.4 &nbsp; &nbsp;&nbsp;<br> [e*] webmachine&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1.10.3</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">rabbitmq_sharding、rabbitmq_federation，rabbitmq_sharding的版本有点低了，github地址：<a title="https://github.com/rabbitmq/rabbitmq-sharding" href="https://github.com/rabbitmq/rabbitmq-sharding" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);">https://github.com/rabbitmq/rabbitmq-sharding</a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/64/wKiom1hL7DigkS70AAEd4wsCtp4951.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="13" alt="13" src="http://s3.51cto.com/wyfs02/M01/8B/64/wKiom1hL7DjAPKaRAAFwvHaw3us207.png" width="644" height="447" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">Rederation 可以用来进行跨cluster或者node之间同步消息。<a title="http://www.rabbitmq.com/federated-exchanges.html" href="http://www.rabbitmq.com/federated-exchanges.html" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);">http://www.rabbitmq.com/federated-exchanges.html</a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这个用来在不同的domain之间传递消息还是个不错的解决方案，跨机房或者跨网络区域，订阅别人的rabbitmq消息始终不太稳定，可以用这种方式来传递消息。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/60/wKioL1hL7DmQ4F4_AAD6yQ0HltA994.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="14" alt="14" src="http://s3.51cto.com/wyfs02/M00/8B/64/wKiom1hL7DqS_eT0AAD30bNIphw591.png" width="644" height="471" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">6.Queue镜像失败手动同步</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">有时候可能由于各种原因导致queue mirror失败，这个时候可以手动进行同步，而不是像其他分布式系统来重启节点或者重建数据。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M00/8B/60/wKioL1hL7DrBgeNHAAA0e1gU9CU266.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="15" alt="15" src="http://s3.51cto.com/wyfs02/M01/8B/64/wKiom1hL7DrxxaBZAAAXES8l-Kg882.png" width="1200" height="45" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M01/8B/61/wKioL1hL7DrC4Y2kAACCFV2-aco758.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="16" alt="16" src="http://s3.51cto.com/wyfs02/M02/8B/64/wKiom1hL7Duyp98MAABDtQ2jaMQ512.png" width="1200" height="242" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这个还是比较方便的，有时候总有那么几个小问题需要你手动处理的。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">7.各集群配置同步方式（RabbitMQ export\import）</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">各个环境的集群配置同步也是个日常运维的问题，还好RabbitMQ也提供了相关工具。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/61/wKioL1hL7DuyxcOtAAAtLQdXodw466.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="17" alt="17" src="http://s3.51cto.com/wyfs02/M01/8B/61/wKioL1hL7DuRMeWUAAAviwkgk9o432.png" width="613" height="357" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M00/8B/64/wKiom1hL7DyCBUiZAAAd4GniWhQ780.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="18" alt="18" src="http://s3.51cto.com/wyfs02/M02/8B/64/wKiom1hL7DyTY8hrAAAf6khuSAM271.png" width="519" height="269" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/61/wKioL1hL7Dyh2IWwAAB1gdtDyG4491.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="19" alt="19" src="http://s3.51cto.com/wyfs02/M00/8B/64/wKiom1hL7D3RGvIOAAB36MeCAhs492.png" width="581" height="586" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">8.客户端连接方式（尽量采用AMQP组来动态链接）</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">由于RabbitMQ是AMQP协议的实现，所以在进行远程连接的时候尽量采用amqp协议的方式连接。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">var amqpList = new List&lt;AmqpTcpEndpoint&gt; &nbsp; &nbsp;<br> { &nbsp; &nbsp;&nbsp;<br> &nbsp;&nbsp;&nbsp; new AmqpTcpEndpoint(new Uri("amqp://192.168.0.105:5672")), &nbsp; &nbsp;&nbsp;<br> &nbsp;&nbsp;&nbsp; new AmqpTcpEndpoint(new Uri("amqp://192.168.0.107:5672")) &nbsp; &nbsp;&nbsp;<br> }; &nbsp; &nbsp;&nbsp;<br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">关于集群的vip方案其实也是需要综合考虑的，如果是统一的地址会面临三个问题，DNS、LoadBalance、VIP，这三个点都有可能导致集群连接不上。现在越来越多的方案倾向于在客户端做负载和故障转移，这有很多好处，消除了中间节点带来的故障概率。如果这三个点加在一起出现的可用性指标肯定是比直接在客户端连接的低的多。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们碰到最多就是VIP的问题，这类系统的VIP不同于数据库，数据库的master\slave大多都是要人工check后才切换，不会随便自动的切换主从库。而非数据库的VIP大多都是Keepalived自动检测切换，这带来一些列问题，包括连接重试、心跳保持。这只是VIP的出错场景之一。还有LoadBalance带来的问题，DNS出错的可能性也是很大。所以我倾向于使用客户端来做这些。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M00/8B/61/wKioL1hL7D7hVapBAAKii4-Tnes169.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="20" alt="20" src="http://s3.51cto.com/wyfs02/M00/8B/61/wKioL1hL7D7D7zmyAACTuYDaloc313.png" width="1036" height="618" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">有几个地方很重要，第一个就是消息的Persistent持久化状态要带上，第二个就是ContentType，这个属性很实用，方便你查看消息的正文。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M01/8B/64/wKiom1hL7D-R9GTMAABtH9rXDeI854.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="21" alt="21" src="http://s3.51cto.com/wyfs02/M01/8B/61/wKioL1hL7D_RyxqAAABvwE31tHE883.png" width="636" height="569" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">如果没设置，默认是null。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">第三个就是AutomaticRecoveryEnabled，自动连接重试，这致命重要。当上面的VIP切换之后这个可以保命。第四个就是TopologyRecoveryEnabled，重新恢复Exchange、queue、binding。在出现网络断开之后，一旦恢复连接就会恢复这些设置以保证是最新的设置。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">9.RabbitMQ 产线二次产品化封装（消息补偿、发送消息持久化、异常处理、监控页面、重复消息剔除）</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">不管rabbitmq保证的多么强壮，多么高可用，记住一定要有备用方案。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">在之前我写了一篇文章，<a href="http://www.cnblogs.com/wangiqngpei557/p/6107150.html" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);">WebAPi的可视化输出模式(RabbitMQ、消息补偿相关）——所有webapi似乎都缺失的一个功能</a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">说了就是消息的持久化和补偿。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="http://s3.51cto.com/wyfs02/M02/8B/64/wKiom1hL7ECh7MIWAAL36DisVRs044.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img title="22" alt="22" src="http://s3.51cto.com/wyfs02/M02/8B/61/wKioL1hL7EOAdAVnAAF-E_IzplM950.png" width="1137" height="543" style="border-top:0px none;border-right:0px none;border-bottom:0px none;border-left:none;background-image:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">一旦将发送和接受的消息持久化之后我们能做到事情就比较多了。消息补偿是可以做的，异常也不用担心。但是在发送消息的时候一定要注意，是先持久化消息在业务逻辑处理。为了应对特殊活动的监控，还可以开发一定的业务来监控消息的接受和处理的数量，然后自动补偿。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">在开发补偿程序的时候有一个逻辑挺饶人的，当你对某一个消息进行补偿的时候会多出发送消息，而接受的消息肯定是比你发送的少。所以你在统计的时候记得DISTINCT下。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p><font color="#333333">&nbsp;本文转自 王清培 51CTO博客，原文链接：http://blog.51cto.com/wangqingpei557/1881540</font><span style="color:rgb(51,51,51);font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <div>
+    <br>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>LCD 原理和移植总结【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/uid-22915173-id-329617.html    Framebuffer：是linux的framebuffer驱动在内存开辟的一块显存，存放一帧图像数据。 IPU：是mx51的图像处理单元，里面包含DMA控制器和DI显...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/16/weixin_34357267_90134222.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">LCD 原理和移植总结【转】</h1>
+    <p class="post-meta">Nov 16, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://blog.chinaunix.net/uid-22915173-id-329617.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://blog.chinaunix.net/uid-22915173-id-329617.html</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">Framebuffer：是<a style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><span style="text-decoration:underline;"><strong>linux</strong></span></a>的framebuffer驱动在内存开辟的一块显存，存放一帧图像<a style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><span style="text-decoration:underline;"><strong>数据</strong></span></a>。<br> IPU：是mx51的图像处理单元，里面包含DMA控制器和DI显示接口等。<br> LCD<span class="t_tag">Driver：是一块和LCD屏幕整合在一起的驱动芯 片，接收IPU传过来的数据和时序信号，转化为有规律的LCD驱动电压。<br><br> 一幅图像的显示过程是这样的：用户打开/dev/fbx设备，使用mmap()系统调用映射framebuffer内存<a style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><span style="text-decoration:underline;"><strong>空间</strong></span></a>到用户空间，用户直接用 memcpy()复制图像数据到framebuffer，DMA探测到framebuffer数据发生变动，启动DMA传输图像数据到IPUI，PU再根 据framebuffer驱动<a style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><span style="text-decoration:underline;"><strong>设置</strong></span></a>的处理模式对像素数据进行一系列处理，比如framebuffer使用了overlay framebuffer那就启动overlay处理单元混合两个framebuffer的数据，另外IPU还会packing像素数据，比如 framebuffer里像素格式为RGB565，IPU会把他packing成RGB666的格式，以配合LCD模块的接口。IPU处理完数据后，送到 DI，在DI时序模块产生的时序信号同步下，一起输出到LCD驱动芯片。<br><br> 移植LCD驱动的第一步，是确保IPU输出给LCD Driver的时序、数据、供电信号是对的。<br> 时序信号一般是根据LCD的datasheet上的参数，填写fb_videomode这个结构体：<br><br> struct fb_videomode {<br> &nbsp; &nbsp; &nbsp; &nbsp; const char *name;&nbsp; &nbsp; &nbsp; &nbsp; /* optional */<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 refresh;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; /* optional */<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 xres;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; // x分辨率<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 yres;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; // y分辨率<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 pixclock;&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; // 像素时钟频率，即每个时钟周期显示一个像素点<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 left_margin;&nbsp; &nbsp; &nbsp; &nbsp; // 行扫描开始脉冲到一行像素数据开始输出的延迟 hsync&lt;==&gt;DEN<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 right_margin;&nbsp; &nbsp; &nbsp; &nbsp; // 一行像素数据输出完毕到下一行的行扫描开始脉冲间的延迟 DEN &lt;==&gt;hsync<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 upper_margin;&nbsp; &nbsp; &nbsp; &nbsp; // 帧扫描开始脉冲到第一行像素数据开始输出的延迟 vsync&lt;==&gt;DEN(1st line)<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 lower_margin;&nbsp; &nbsp; &nbsp; &nbsp; // 最后一行像素数据输出结束到下一帧的那帧扫描开始脉冲间的延迟DEN(last line)&lt;==&gt;vsync<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 hsync_len; // 行扫描脉冲宽度，单位为pixclock<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 vsync_len; // 帧扫描脉冲宽度，单位为line<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 sync; // 各同步信号的极性定义，如hsync、vsync、DEN的极性等。<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 vmode; // 显示模式，逐行还是隔行扫描<br> &nbsp; &nbsp; &nbsp; &nbsp; u32 flag; // 一般为0<br> };<br><br> 这个结构体定义完之后，对于一般的LCD，在连线正确的情况下，系统启动后应该就出来图像了，此时图像可能是上下跳动或者左右有偏移，这就需要再调整一下 fb_videomode中left/right/upper/lower margin参数。如果上电后没有图像，则首先用示波器检测hsync, vsync,DEN,pclk等波形是否正确，使用双踪示波器通过hsync、vsync与DEN的比对查看left/right/upper /lower margin是否合适。如果这些信号都没有问题，那么说明LCD需要通过spi总线发送<a style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><span style="text-decoration:underline;"><strong>命令</strong></span></a>对其进行初始化。初始化代码一般由LCD厂商提供，不过很多厂 商提供的初始化代码都有问题，会导致LCD白屏或者其他不正常的现象。<br><br> TFT LCD的<a style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><span style="text-decoration:underline;"><strong>原理</strong></span></a>：<br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img title="点击图片可在新窗口打开" src="http://192.168.1.11/uchome/attachment/200907/6/15_1246843713uDdh.jpg" alt="" width="600" height="375" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">图2. TFT LCD截面图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br> TFT LCD主要由两个透明电极，中间的液晶分子和一个有色玻璃组成。在没有通电的情况下，液晶分子呈无规则排列，背光无法透过液晶层。当有外加电场时，液晶分 子顺着电场的方向有序排列，背光可以通过，并且由于有色玻璃的滤光，呈现红，绿，蓝色调，不过，背光的透过率只有10%，这是LCD的一个缺点。<br><br> 以上是一个像素中的一个RGB分量的产生过程。接下来看看如何整合这个基本单元，组成一个LCD屏幕。<br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img title="点击图片可在新窗口打开" src="http://192.168.1.11/uchome/attachment/200907/6/15_1246843714QFML.jpg" alt="" width="562" height="506" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">图3. LCD平面图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br> 这个图比上面多出来的是2种长条和一种MOS晶体管。这3个东西的作用是在一定的时序下给各显示电极充电。横向的长条和LCD驱动芯片的Gate Driver连接的，用于打开各行的MOSFET。纵向的长条和LCD驱动芯片的Source Driver连接，代表RGB数据。整个过程大致是这样的：首先第一行的Gate线产生一个充电脉冲，使第一行的MOS管导通，同时Source线那边经 过数模转换后的RGB电压也已经就绪，于是通过MOS管对显示电极充电，每个pixel clock充电一个像素，即3根Source线完成充电。对于320x480的屏，一共有480根Gate线，320x3=960根Source线，则经 过320个pclk后，第一行充电完成，显示出相应的画面。然后，第二行的Gate线产生一个充电脉冲，一次类推，直到最后一行，又从第一行开 始.....<br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img title="点击图片可在新窗口打开" src="http://192.168.1.11/uchome/attachment/200907/6/15_12468437146oZ1.jpg" alt="" width="600" height="471" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">图4. LCD基本结构</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img title="点击图片可在新窗口打开" src="http://192.168.1.11/uchome/attachment/200907/6/15_12468437148ZcT.jpg" alt="" width="524" height="568" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><br> 图4. LCD传输分解</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img title="点击图片可在新窗口打开" src="http://192.168.1.11/uchome/attachment/200907/6/15_1246843713vjgl.jpg" alt="" width="600" height="442" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">图5. LCD基本单元图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img title="点击图片可在新窗口打开" src="http://192.168.1.11/uchome/attachment/200907/6/15_124684371468K6.jpg" alt="" width="600" height="539" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">图6. LCD阵列图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img title="点击图片可在新窗口打开" src="http://192.168.1.11/uchome/attachment/200907/6/15_1246843714yP7k.jpg" alt="" width="600" height="563" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">图7. LCD信号图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><img title="点击图片可在新窗口打开" src="http://192.168.1.11/uchome/attachment/200907/6/15_1246843714nO6Z.jpg" alt="" width="600" height="346" style="border:none;"></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br></span></p> 
+   <p align="center" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">图8. LCD整体框图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag"><br><br> LCD点屏步骤：<br> 1.参考LCD datasheet修改fb_videomode结构体的参数。<br> 2.配置GPIO，点亮LCD背光。<br> 3.参考LCD datasheet看这个LCD是否需要spi总线发送命令进行初始化，一般厂商给datasheet时也会给一份初始化代码，不过有些参数是错误的，需 要调整，发送不正确的命令会导致LCD白屏。<br> 4.用示波器测试从LCD控制器出来的Hsync, Vsync, DE, PCLK是否正确，用万用表测量Vio, Vci是否正常。<br> 5.有的LCD Driver需要LCD控制器发出一个CS片选使能信号。<br> 6.用万用表测量LCD的栅压是否正常，一般为9.2V。<br> 7.如果上述步骤后还出不来，再检查LCD初始化命令是否正确，spi时序是否符合。<br><br> 图像异常处理：<br> 1.驱动问题<br> 上下抖动，左右没对齐：调整left/right/upper/lower margin值<br> 2.LCD初始化命令问题<br> 有纹波：调整VDD/AVDD/VGL/VGH电压<br> 色彩失真：看LCD的RGB模式设置和LCD控制器出来的RGB模式是否一致<br><br> 本次点屏过程：<br> 0. 非常感谢张同学和梁同学在本次点屏中所作的关键性工作。<br> 1. 在mx51_kernel的mxcfb_epson_vga.c的fb_videomode结构体中修改了时序参数，上电，LCD无任何反应<br> 2. 张同学在mx51_3stack_gpio.c中通过配置GPIO NANDF_CS6 打开了LCD背光灯，LCD产生白屏闪动现象，并在mxcfb_epson_vga.c的lcd_init()中加入了ilitek提供的初始化命令。<br> 3. 梁同学在mx51_3stack_gpio.c中通过配置MX51_PIN_DI1_D1_CS ，使其一直拉低，提供了LCD Driver芯片的片选使能，并测量出upper margin和lower margin时序有偏移，经过调整此2值，消除了IPU error。<br> 4. 去掉3条冗余的LCD初始化命令，LCD点亮。<br> 5. 对于本次调屏，以上步骤都是必要的，也是充分的<br><br> kernel&nbsp;<a style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><span style="text-decoration:underline;"><strong>文件</strong></span></a>修改：<br> 1.driver/video/mxc/mxcfb_epson_vga.c<br> (1).static struct fb_videomode video_modes[] 改为：</span></p> 
+   <div class="blockcode" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"> 
+    <div> 
+     <ol>
+      <li style="list-style:decimal;">static struct fb_videomode video_modes[] = {</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; {</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; /* 320x480 @ 60 Hz */</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; "Elite-HVGA", 60, 320, 480, 86566, 20, 40, 5, 1, 10, 2,</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; FB_SYNC_CLK_LAT_FALL,</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; FB_VMODE_NONINTERLACED,</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; 0,},</li> 
+      <li style="list-style:decimal;">};</li> 
+     </ol>
+    </div> 复制代码
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag">(2).static void lcd_init(void)改为：</span></p> 
+   <div class="blockcode" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"> 
+    <div> 
+     <ol>
+      <li style="list-style:decimal;">static void lcd_init(void)</li> 
+      <li style="list-style:decimal;">{</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; u16 i;</li> 
+      <li style="list-style:decimal;">const u16 cmd[] = {</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0x11,</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xD0, param(0x07), param(0x41), param(0x0F),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xD1, param(0x00), param(0x3E), param(0x1F),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xD2, param(0x01), param(0x10),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xC0, param(0x00), param(0x3B), param(0x00), param(0x02),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; param(0x11),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xC5, param(0x02),</li> 
+      <li style="list-style:decimal;">//&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xC6, param(0x1B),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xC6, param(0x02),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xC8, param(0x66), param(0x66), param(0x66), param(0x66),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; param(0x0E), param(0x1E), param(0x66), param(0x66),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; param(0x77), param(0x66), param(0x0F), param(0x0F),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0x36, param(0x0A),&nbsp; &nbsp; // set_address_mode, RGB order</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0x3A, param(0x66),&nbsp; &nbsp; &nbsp; &nbsp; // 0x60: RGB=666; 0x50: RGB=565; 0x10: RGB=111</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0xB4, param(0x11),</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0x29,</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;0x2C</li> 
+      <li style="list-style:decimal;">};</li> 
+      <li style="list-style:decimal;"> </li>
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; if (lcd_spi) {</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; spi_write(lcd_spi, (const u8 *)cmd, ARRAY_SIZE(cmd));</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; } else {</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; for (i = 0; i &lt; sizeof(cmd) / 2; i++)</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; {</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; ipu_disp_direct_write(DIRECT_ASYNC1, cmd[i], 0);</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; msleep(1);</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; ipu_uninit_channel(DIRECT_ASYNC1);</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; }</li> 
+      <li style="list-style:decimal;">}</li> 
+     </ol>
+    </div> 复制代码
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag">2.arch/arm/mach-mx51/mx51_3stack.c</span></p> 
+   <div class="blockcode" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"> 
+    <div> 
+     <ol>
+      <li style="list-style:decimal;">static struct mxc_lcd_platform_data lcd_data = {</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; .core_reg = "VIOHI",</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; .io_reg = "SW4",</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; .reset = lcd_reset,</li> 
+      <li style="list-style:decimal;">};</li> 
+     </ol>
+    </div> 复制代码
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag">改 为</span></p> 
+   <div class="blockcode" style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"> 
+    <div> 
+     <ol>
+      <li style="list-style:decimal;">static struct mxc_lcd_platform_data lcd_data = {</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; .core_reg = "VSD",</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; .io_reg = "SW4",</li> 
+      <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; .reset = lcd_reset,</li> 
+      <li style="list-style:decimal;">};</li> 
+     </ol>
+    </div> 复制代码
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span class="t_tag">3.arch/arm/mach-mx51/mx51_3stack_gpio.c<br> void gpio_lcd_active(void)修改为：</span></p> 
+   <div> 
+    <ol style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <li style="list-style:decimal;">void gpio_lcd_active(void)</li> 
+     <li style="list-style:decimal;">{</li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; mxc_request_iomux(MX51_PIN_NANDF_CS6, IOMUX_CONFIG_ALT3);</li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; mxc_set_gpio_direction(MX51_PIN_NANDF_CS6, 0);</li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; mxc_set_gpio_dataout(MX51_PIN_NANDF_CS6, 1);</li> 
+     <li style="list-style:decimal;"> </li>
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; mxc_request_iomux(MX51_PIN_DI1_D1_CS, IOMUX_CONFIG_ALT4);</li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; mxc_set_gpio_direction(MX51_PIN_DI1_D1_CS, 0);</li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; mxc_set_gpio_dataout(MX51_PIN_DI1_D1_CS, 0);</li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp;</li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; mxc_request_iomux(MX51_PIN_DI_GP2, IOMUX_CONFIG_ALT0);</li> 
+     <li style="list-style:decimal;">&nbsp; &nbsp; &nbsp; &nbsp; mxc_request_iomux(MX51_PIN_DI_GP3, IOMUX_CONFIG_ALT0);</li> 
+     <li style="list-style:decimal;">}</li> 
+    </ol>
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+     <br>
+    </div> 
+    <div> 
+     <div>
+      <font color="#666666"><span style="font-size:14px;"><br></span></font>
+     </div> 
+     <div> 
+      <font color="#666666"><span style="font-size:14px;">本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/5681891.html</span></font>
+      <span style="font-size:14px;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">，如需转载请自行联系原作者</span> 
+     </div> 
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

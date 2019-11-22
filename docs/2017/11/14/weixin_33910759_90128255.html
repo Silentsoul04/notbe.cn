@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux堆内存管理深入分析 (上半部)【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/alisecurity/p/5486458.html    0&nbsp;前言    近年来，漏洞挖掘越来越火，各种漏洞挖掘、利用的分析文章层出不穷。从大方向来看，主要有基于栈溢出的漏洞利用和基于堆溢出的漏洞利用两种。国内关于栈溢出的资...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/14/weixin_33910759_90128255.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux堆内存管理深入分析 (上半部)【转】</h1>
+    <p class="post-meta">Nov 14, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">转自：<a href="http://www.cnblogs.com/alisecurity/p/5486458.html" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">http://www.cnblogs.com/alisecurity/p/5486458.html</a></p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">0&nbsp;前言</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">近年来，漏洞挖掘越来越火，各种漏洞挖掘、利用的分析文章层出不穷。从大方向来看，主要有基于栈溢出的漏洞利用和基于堆溢出的漏洞利用两种。国内关于栈溢出的资料相对较多，这里就不累述了，但是关于堆溢出的漏洞利用资料就很少了。鄙人以为主要是堆溢出漏洞的门槛较高，需要先吃透相应操作系统的堆内存管理机制，而这部分内容一直是一个难点。因此本系列文章主要从Linux系统堆内存管理机制出发，逐步介绍诸如基本堆溢出漏洞、基于unlink的堆溢出漏洞利用、double free、use-after-free等等常见的堆溢出漏洞利用技术。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">前段时间偶然学习了这篇文章：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="https://sploitfun.wordpress.com/2015/02/10/understanding-glibc-malloc/comment-page-1/" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">https://sploitfun.wordpress.com/2015/02/10/understanding-glibc-malloc/comment-page-1/</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">该文是我近段时间以来读到的最好文章之一，文章浅显易懂，条例清晰，作为初学者的我从中学到了很多linux堆内存管理相关的知识。但是估计由于篇幅的限制，该文对很多难点一带而过，造成部分知识点理解上的困难。因此我决定以该文为蓝本，结合其他参考资料和自己的理解，写一篇足够详细、完整的linux堆管理介绍文章，希冀能够给其他初学者献上微末之力。所以就内容来源而言，本文主要由两部分组成：一部分是翻译的上面提及的文章；另一部分是笔者结合其他参考资料和自己的理解添加的补充说明。鉴于笔者知识能力上的不足，如有问题欢迎各位大牛斧正！</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">同样的，鉴于篇幅过长，我将文章分成了上下两部分，上部分主要介绍堆内存管理中的一些基本概念以及相互关系，同时也着重介绍了堆中chunk分配和释放策略中使用到的隐式链表技术。后半部分主要介绍glibc malloc为了提高堆内存分配和释放的效率，引入的显示链表技术，即binlist的概念和核心原理。其中使用到的源码在：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="https://github.com/sploitfun/lsploits/tree/master/glibc" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">https://github.com/sploitfun/lsploits/tree/master/glibc</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">1&nbsp;堆内存管理简介</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>&nbsp;</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">当前针对各大平台主要有如下几种堆内存管理机制：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">dlmalloc – General purpose allocator</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><span style="color:rgb(255,0,0);"><strong>ptmalloc2 – glibc</strong></span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">jemalloc – FreeBSD and Firefox</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">tcmalloc – Google</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">libumem – Solaris</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">本文主要学习介绍在linux glibc使用的ptmalloc2实现原理。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">本来linux默认的是dlmalloc，但是由于其不支持多线程堆管理，所以后来被支持多线程的prmalloc2代替了。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">当然在linux平台*malloc本质上都是通过系统调用brk或者mmap实现的。关于这部分内容，<span style="color:rgb(255,0,0);"><strong>一定要学习下面</strong>这篇文章：</span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><a href="https://sploitfun.wordpress.com/2015/02/11/syscalls-used-by-malloc/" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">https://sploitfun.wordpress.com/2015/02/11/syscalls-used-by-malloc/</a></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">鉴于篇幅，本文就不加以详细说明了，只是为了方便后面对堆内存管理的理解，截取其中函数调用关系图：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图1-1&nbsp;函数调用关系图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">系统内存分布图：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图1-2系统内存分布图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">2&nbsp;实验演示</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">试想有如下代码：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,128,0);font-family:'Courier New';line-height:1.5;">/*<span style="line-height:1.5;"> Per thread arena example. <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> #include &lt;stdio.h&gt;<span style="line-height:1.5;"> #include &lt;stdlib.h&gt;<span style="line-height:1.5;"> #include &lt;pthread.h&gt;<span style="line-height:1.5;"> #include &lt;unistd.h&gt;<span style="line-height:1.5;"> #include &lt;sys/types.h&gt; <span style="color:rgb(0,0,255);line-height:1.5;">void* threadFunc(<span style="line-height:1.5;">void*<span style="color:rgb(0,0,0);line-height:1.5;"> arg) { printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">Before malloc in thread 1\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">); getchar(); <span style="color:rgb(0,0,255);line-height:1.5;">char* addr = (<span style="line-height:1.5;">char*) malloc(<span style="color:rgb(128,0,128);line-height:1.5;">1000<span style="color:rgb(0,0,0);line-height:1.5;">); printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">After malloc and before free in thread 1\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">); getchar(); free(addr); printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">After free in thread 1\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">); getchar(); } <span style="color:rgb(0,0,255);line-height:1.5;">int<span style="color:rgb(0,0,0);line-height:1.5;"> main() { pthread_t t1; <span style="color:rgb(0,0,255);line-height:1.5;">void*<span style="color:rgb(0,0,0);line-height:1.5;"> s; <span style="color:rgb(0,0,255);line-height:1.5;">int<span style="color:rgb(0,0,0);line-height:1.5;"> ret; <span style="color:rgb(0,0,255);line-height:1.5;">char*<span style="color:rgb(0,0,0);line-height:1.5;"> addr; printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">Welcome to per thread arena example::%d\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">,getpid()); printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">Before malloc in main thread\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">); getchar(); addr = (<span style="color:rgb(0,0,255);line-height:1.5;">char*) malloc(<span style="color:rgb(128,0,128);line-height:1.5;">1000<span style="color:rgb(0,0,0);line-height:1.5;">); printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">After malloc and before free in main thread\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">); getchar(); free(addr); printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">After free in main thread\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">); getchar(); ret = pthread_create(&amp;<span style="line-height:1.5;">t1, NULL, threadFunc, NULL); <span style="color:rgb(0,0,255);line-height:1.5;">if<span style="color:rgb(0,0,0);line-height:1.5;">(ret) { printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">Thread creation error\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">); <span style="color:rgb(0,0,255);line-height:1.5;">return -<span style="color:rgb(128,0,128);line-height:1.5;">1<span style="color:rgb(0,0,0);line-height:1.5;">; } ret = pthread_join(t1, &amp;<span style="line-height:1.5;">s); <span style="color:rgb(0,0,255);line-height:1.5;">if<span style="color:rgb(0,0,0);line-height:1.5;">(ret) { printf(<span style="color:rgb(128,0,0);line-height:1.5;">"<span style="line-height:1.5;">Thread join error\n<span style="line-height:1.5;">"<span style="color:rgb(0,0,0);line-height:1.5;">); <span style="color:rgb(0,0,255);line-height:1.5;">return -<span style="color:rgb(128,0,128);line-height:1.5;">1<span style="color:rgb(0,0,0);line-height:1.5;">; } <span style="color:rgb(0,0,255);line-height:1.5;">return <span style="color:rgb(128,0,128);line-height:1.5;">0<span style="color:rgb(0,0,0);line-height:1.5;">; }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">下面我们依次分析其各个阶段的堆内存分布状况。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>1.&nbsp;</strong><strong>Before malloc in main thread</strong>&nbsp;<strong>:</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在程序调用malloc之前程序进程中是没有heap segment的，并且在创建在创建线程前，也是没有线程堆栈的。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>2.&nbsp;</strong><strong>After malloc&nbsp;in main thread</strong>&nbsp;<strong>:</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在主线程中调用malloc之后，就会发现系统给程序分配了堆栈，且这个堆栈刚好在数据段之上</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">这就说明它是通过brk系统调用实现的。并且，还可以看出虽然我们只申请了1000字节的数据，但是系统却分配了132KB大小的堆，这是为什么呢？原来这132KB的堆空间叫做arena，此时因为是主线程分配的，所以叫做main arena(每个arena中含有多个chunk，这些chunk以链表的形式加以组织)。由于132KB比1000字节大很多，所以主线程后续再声请堆空间的话，就会先从这132KB的剩余部分中申请，直到用完或不够用的时候，再通过增加program break location的方式来增加main arena的大小。同理，当main arena中有过多空闲内存的时候，也会通过减小program break location的方式来缩小main arena的大小。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>3.&nbsp;</strong><strong>After free in main thread</strong>&nbsp;<strong>:</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在主线程调用free之后：从内存布局可以看出程序的堆空间并没有被释放掉，原来调用free函数释放已经分配了的空间并非直接“返还”给系统，而是由glibc&nbsp;的malloc库函数加以管理。它会将释放的chunk添加到main arenas的bin(这是一种用于存储同类型free chunk的双链表数据结构，后问会加以详细介绍)中。在这里，记录空闲空间的freelist数据结构称之为bins。之后当用户再次调用malloc申请堆空间的时候，glibc malloc会先尝试从bins中找到一个满足要求的chunk，如果没有才会向操作系统申请新的堆空间。如下图所示：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>4.&nbsp;</strong><strong>Before malloc in thread1</strong>&nbsp;<strong>:</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在thread1调用malloc之前：从输出结果可以看出thread1中并没有heap segment，但是此时thread1自己的栈空间已经分配完毕了：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>5.&nbsp;</strong><strong>After malloc in thread1</strong>&nbsp;<strong>:</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在thread1调用malloc之后：从输出结果可以看出thread1的heap segment已经分配完毕了，同时从这个区域的起始地址可以看出，它并不是通过brk分配的，而是通过mmap分配，因为它的区域为b7500000-b7600000共1MB，并不是同程序的data segment相邻。同时，我们还能看出在这1MB中，根据内存属性分为了2部分：0xb7500000-0xb7520000共132KB大小的空间是可读可写属性；后面的是不可读写属性。原来，这里只有可读写的132KB空间才是thread1的堆空间，即thread1 arena。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">6.&nbsp;在thread1调用free之后：同main thread。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">3 Arena介绍</h2> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"> <strong>3.1 Arena</strong><strong>数量限制</strong> </h3> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在第2章中我们提到main thread和thread1有自己独立的arena，那么是不是无论有多少个线程，每个线程都有自己独立的arena呢？答案是否定的。事实上，arena的个数是跟系统中处理器核心个数相关的，如下表所示：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>For <span style="color:rgb(128,0,128);font-family:'Courier New';line-height:1.5;">32<span style="color:rgb(0,0,0);line-height:1.5;"> bit systems: Number of arena = <span style="color:rgb(128,0,128);line-height:1.5;">2 * number of cores + <span style="line-height:1.5;">1<span style="color:rgb(0,0,0);line-height:1.5;">. For <span style="color:rgb(128,0,128);line-height:1.5;">64<span style="color:rgb(0,0,0);line-height:1.5;"> bit systems: Number of arena = <span style="color:rgb(128,0,128);line-height:1.5;">8 * number of cores + <span style="line-height:1.5;">1.</span></span></span></span></span></span></span></span></span></pre>
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong style="font-size:1.17em;line-height:1.5;">3.2&nbsp;</strong><strong style="font-size:1.17em;line-height:1.5;">多</strong><strong style="font-size:1.17em;line-height:1.5;">Arena</strong><strong style="font-size:1.17em;line-height:1.5;">的管理</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">假设有如下情境：一台只含有一个处理器核心的PC机安装有32位操作系统，其上运行了一个多线程应用程序，共含有4个线程——主线程和三个用户线程。显然线程个数大于系统能维护的最大arena个数（2*核心数&nbsp;+ 1= 3），那么此时glibc malloc就需要确保这4个线程能够正确地共享这3个arena，那么它是如何实现的呢？</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">当主线程首次调用malloc的时候，glibc malloc会直接为它分配一个main arena，而不需要任何附加条件。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">当用户线程1和用户线程2首次调用malloc的时候，glibc malloc会分别为每个用户线程创建一个新的thread arena。此时，各个线程与arena是一一对应的。但是，当用户线程3调用malloc的时候，就出现问题了。因为此时glibc malloc能维护的arena个数已经达到上限，无法再为线程3分配新的arena了，那么就需要重复使用已经分配好的3个arena中的一个(main arena, arena 1或者arena 2)。那么该选择哪个arena进行重复利用呢？</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">1)首先，glibc malloc循环遍历所有可用的arenas，在遍历的过程中，它会尝试lock该arena。如果成功lock(该arena当前对应的线程并未使用堆内存则表示可lock)，比如将main arena成功lock住，那么就将main arena返回给用户，即表示该arena被线程3共享使用。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">2)而如果没能找到可用的arena，那么就将线程3的malloc操作阻塞，直到有可用的arena为止。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">3)现在，如果线程3再次调用malloc的话，glibc malloc就会先尝试使用最近访问的arena(此时为main arena)。如果此时main arena可用的话，就直接使用，否则就将线程3阻塞，直到main arena再次可用为止。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">这样线程3与主线程就共享main arena了。至于其他更复杂的情况，以此类推。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">4&nbsp;堆管理介绍</h2> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"> <strong>4.1&nbsp;</strong><strong>整体介绍</strong> </h3> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在glibc malloc中针对堆管理，主要涉及到以下3种数据结构：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">1. heap_info:&nbsp;即Heap Header，因为一个<strong>thread arena</strong><strong>（注意：不包含</strong><strong>main thread</strong><strong>）</strong>可以包含多个heaps，所以为了便于管理，就给每个heap分配一个heap header。那么在什么情况下一个thread arena会包含多个heaps呢?在当前heap不够用的时候，malloc会通过系统调用mmap申请新的堆空间，新的堆空间会被添加到当前thread arena中，便于管理。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>typedef <span style="color:rgb(0,0,255);font-family:'Courier New';line-height:1.5;">struct<span style="color:rgb(0,0,0);line-height:1.5;"> _heap_info { mstate ar_ptr; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Arena for this heap. <span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">struct _heap_info *prev; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Previous heap. <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> size_t size; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Current size in bytes. <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> size_t mprotect_size; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Size in bytes that has been mprotected PROT_READ|PROT_WRITE. <span style="line-height:1.5;">*/ <span style="line-height:1.5;">/*<span style="line-height:1.5;"> Make sure the following data is properly aligned, particularly that sizeof (heap_info) + 2 * SIZE_SZ is a multiple of MALLOC_ALIGNMENT. <span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">char pad[-<span style="color:rgb(128,0,128);line-height:1.5;">6 * SIZE_SZ &amp;<span style="color:rgb(0,0,0);line-height:1.5;"> MALLOC_ALIGN_MASK]; } heap_info;</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">2. malloc_state:&nbsp;即Arena Header，每个thread只含有一个Arena Header。Arena Header包含bins的信息、top chunk以及最后一个remainder chunk等(这些概念会在后文详细介绍):</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-family:'Courier New';line-height:1.5;">struct<span style="color:rgb(0,0,0);line-height:1.5;"> malloc_state { <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Serialize access. <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> mutex_t mutex; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Flags (formerly in max_fast). <span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">int<span style="color:rgb(0,0,0);line-height:1.5;"> flags; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Fastbins <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> mfastbinptr fastbinsY[NFASTBINS]; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Base of the topmost chunk -- not otherwise kept in a bin <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> mchunkptr top; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> The remainder from the most recent split of a small request <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> mchunkptr last_remainder; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Normal bins packed as described above <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> mchunkptr bins[NBINS * <span style="color:rgb(128,0,128);line-height:1.5;">2 - <span style="line-height:1.5;">2<span style="color:rgb(0,0,0);line-height:1.5;">]; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Bitmap of bins <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> unsigned <span style="color:rgb(0,0,255);line-height:1.5;">int<span style="color:rgb(0,0,0);line-height:1.5;"> binmap[BINMAPSIZE]; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Linked list <span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">struct malloc_state *<span style="color:rgb(0,0,0);line-height:1.5;">next; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Linked list for free arenas. <span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">struct malloc_state *<span style="color:rgb(0,0,0);line-height:1.5;">next_free; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Memory allocated from the system in this arena. <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> INTERNAL_SIZE_T system_mem; INTERNAL_SIZE_T max_system_mem; };</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">3. malloc_chunk:&nbsp;即Chunk Header，一个heap被分为多个chunk，至于每个chunk的大小，这是根据用户的请求决定的，也就是说用户调用malloc(size)传递的size参数“就是”chunk的大小(这里给“就是”加上引号，说明这种表示并不准确，但是为了方便理解就暂时这么描述了，详细说明见后文)。每个chunk都由一个结构体malloc_chunk表示：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-family:'Courier New';line-height:1.5;">struct<span style="color:rgb(0,0,0);line-height:1.5;"> malloc_chunk { <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> #define INTERNAL_SIZE_T size_t <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> INTERNAL_SIZE_T prev_size; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Size of previous chunk (if free). <span style="line-height:1.5;">*/<span style="color:rgb(0,0,0);line-height:1.5;"> INTERNAL_SIZE_T size; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Size in bytes, including overhead. <span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">struct malloc_chunk* fd; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> double links -- used only if free. 这两个指针只在free chunk中存在<span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">struct malloc_chunk*<span style="color:rgb(0,0,0);line-height:1.5;"> bk; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> Only used for large blocks: pointer to next larger size. <span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">struct malloc_chunk* fd_nextsize; <span style="color:rgb(0,128,0);line-height:1.5;">/*<span style="line-height:1.5;"> double links -- used only if free. <span style="line-height:1.5;">*/ <span style="color:rgb(0,0,255);line-height:1.5;">struct malloc_chunk*<span style="color:rgb(0,0,0);line-height:1.5;"> bk_nextsize; };</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;"><img src="https://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">可能有很多读者会疑惑：该结构体里面并没有一个类似于data的字段来表示用户申请到的堆内存空间啊？且该结构体明确含有2个size_t类型的成员，4个指针，这不就意味着malloc_chunk的大小是固定的了么？那它又如何能够根据用户的请求分配不同大小的内存呢？要想回答清楚这个问题，需要我们完全理解整个glibc malloc的堆内存管理机制，同时，本文的主要目的之一就是希冀解释清楚这个概念，鉴于这部分内容较多，我将在后文的第5章加以详细介绍。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><em>NOTE:</em></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><em>1.</em><em>&nbsp;</em><em>Main thread</em><em>不含有多个</em><em>heaps</em><em>所以也就不含有</em><em>heap_info</em><em>结构体。当需要更多堆空间的时候，就通过扩展</em><em>sbrk</em><em>的</em><em>heap segment</em><em>来获取更多的空间，直到它碰到内存</em><em>mapping</em><em>区域为止。</em></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><em>2.</em><em>&nbsp;</em><em>不同于</em><em>thread arena</em><em>，</em><em>main arena</em><em>的</em><em>arena header</em><em>并不是</em><em>sbrk heap segment</em><em>的一部分，而是一个全局变量！因此它属于</em><em>libc.so</em><em>的</em><em>data segment</em><em>。</em></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><em>&nbsp;</em></p> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"> <strong>4.2 heap segment</strong><strong>与</strong><strong>arena</strong><strong>关系</strong> </h3> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">首先，通过内存分布图理清malloc_state与heap_info之间的组织关系。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">下图是只有一个heap segment的main arena和thread arena的内存分布图：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图4-1&nbsp;只含一个heap segment的main arena与thread arena图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">下图是一个thread arena中含有多个heap segments的情况：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图4-2&nbsp;一个thread arena含有多个heap segments的内存分布图</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">从上图可以看出，thread arena只含有一个malloc_state(即arena header)，却有两个heap_info(即heap header)。由于两个heap segments是通过mmap分配的内存，两者在内存布局上并不相邻而是分属于不同的内存区间，所以为了便于管理，libc malloc将第二个heap_info结构体的prev成员指向了第一个heap_info结构体的起始位置（即ar_ptr成员），而第一个heap_info结构体的ar_ptr成员指向了malloc_state，这样就构成了一个单链表，方便后续管理。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">5&nbsp;对chunk的理解</h2> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">在glibc malloc中将整个堆内存空间分成了连续的、大小不一的chunk，即对于堆内存管理而言chunk就是最小操作单位。Chunk总共分为4类：1)allocated chunk; 2)free chunk; 3)top chunk; 4)Last remainder chunk。从本质上来说，所有类型的chunk都是内存中一块连续的区域，只是通过该区域中<strong>特定位置的某些标识符</strong>加以区分。为了简便，我们先将这4类chunk简化为2类：allocated chunk以及free chunk，前者表示已经分配给用户使用的chunk，后者表示未使用的chunk。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">众所周知，无论是何种堆内存管理器，其完成的核心目的都是能够高效地分配和回收内存块(chunk)。因此，它需要设计好相关算法以及相应的数据结构，而数据结构往往是根据算法的需要加以改变的。既然是算法，那么算法肯定有一个优化改进的过程，所以本文将根据堆内存管理器的演变历程，逐步介绍在glibc malloc中chunk这种数据结构是如何设计出来的，以及这样设计的优缺点。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">PS:鉴于时间和精力有限，后文介绍的演变历程并没有加以严格考证，笔者只是按照一些参考书籍、自己的理解以及便于文章内容安排做出的“善意的捏造”，如有错误，欢迎大家斧正！</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"> <strong>5.1&nbsp;</strong><strong>隐式链表技术</strong> </h3> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">前文说过，任何堆内存管理器都是以chunk为单位进行堆内存管理的，而这就需要一些数据结构来标志各个块的边界，以及区分已分配块和空闲块。大多数堆内存管理器都将这些边界信息作为chunk的一部分嵌入到chunk内部，典型的设计如下所示：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-1&nbsp;简单的allocated chunk格式</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-2&nbsp;简单的free chunk格式</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">堆内存中要求每个chunk的大小必须为8的整数倍，因此chunk size的后3位是无效的，为了充分利用内存，堆管理器将这3个比特位用作chunk的标志位，典型的就是将第0比特位用于标记该chunk是否已经被分配。这样的设计很巧妙，因为我们只要获取了一个指向chunk size的指针，就能知道该chunk的大小，即确定了此chunk的边界，且利用chunk size的第0比特位还能知道该chunk是否已经分配，这样就成功地将各个chunk区分开来。注意在allocated chunk中padding部分主要是用于地址对齐的(也可用于对付外部碎片)，即让整个chunk的大小为8的整数倍。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">通过上面的设计，我们就能将整个堆内存组织成一个连续的已分配或未分配chunk序列:</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-3&nbsp;简单的chunk序列</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">上面的这种结构就叫做隐式链表。该链表隐式地由每个chunk的size字段链接起来，在进行分配操作的时候，堆内存管理器可以通过遍历整个堆内存的chunk，分析每个chunk的size字段，进而找到合适的chunk。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">细心的读者可能发现：这种隐式链表效率其实是相当低的，特别是在内存回收方面，它难以进行相邻多个free chunk的合并操作。我们知道，如果只对free chunk进行分割，而不进行合并的话，就会产生大量小的、无法继续使用的内部碎片，直至整个内存消耗殆尽。因此堆内存管理器设计了带边界标记的chunk合并技术。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>1&nbsp;</strong><strong>带边界标记的合并技术</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">试想如下场景：假设我们要释放的chunk为P，它紧邻的前一个chunk为FD，紧邻的后一个chunk为BK，且BK与FD都为free chunk。将P于BK合并在一起是很容易的，因为可以通过P的size字段轻松定位到BK的开始位置，进而获取BK的size等等，但是将P于FD合并却很难，我们必须从头遍历整个堆，找到FD，然后加以合并，这就意味着每次进行chunk释放操作消耗的时间与堆的大小成线性关系。为了解决这个问题，Knuth提出了一种聪明而通用的技术——边界标记。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">Knuth在每个chunk的最后添加了一个脚部(Footer)，它就是该chunk&nbsp;头部(header)的一个副本，我们称之为边界标记：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-4&nbsp;改进版的chunk格式之Knuth边界标记</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">显然每个chunk的脚部都在其相邻的下一个chunk的头部的前4个字节处。通过这个脚部，堆内存管理器就可以很容易地得到前一个chunk的起始位置和分配状态，进而加以合并了。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">但是，边界标记同时带来了一个问题：它要求每个块都包含一个头部和脚部，如果应用程序频繁地进行小内存的申请和释放操作的话(比如1，2个字节)，就会造成很大的性能损耗。同时，考虑到只有在对free chunk进行合并的时候才需要脚部，也就是说对于allocated chunk而言它并不需要脚部，因此我们可以对这个脚部加以优化——将前一个chunk的已分配/空闲标记位存储在当前chunk的size字段的第1，或2比特位上，这样如果我们通过当前chunk的size字段知道了前一个chunk为free chunk，那么就可得出结论：当前chunk地址之前的4个字节为前一个free chunk的脚部，我们可以通过该脚部获取前一个chunk的起始位置；如果当前chunk的size字段的标记位表明前一个chunk是allocated chunk的话，那么就可得出另一个结论：前一个chunk没有脚部，即当前chunk地址之前的4个字节为前一个allocated chunk的payload或padding的最后部分。新的chunk格式图如下：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-5&nbsp;改进版的Knuth边界标记allocated chunk格式</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-6&nbsp;改进版的Knuth边界标记free chunk格式</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>2&nbsp;</strong><strong>再进化</strong><strong>——</strong><strong>支持多线程</strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">随着技术的发展，特别是堆内存管理器添加对多线程的支持，前述的chunk格式已经难以满足需求，比如，我们需要标志位来标记当前chunk是否属于非主线程即thread arena，以及该chunk由mmap得来还是通过brk实现等等。但此时chunk size只剩下一个比特位未使用了，怎么办呢？这需要对chunk格式进行大手术！</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">首先思考：是否有必要同时保存当前chunk和<strong>前一个</strong><strong>chunk</strong>的已分配/空闲标记位？答案是否定的，因为我们只需要保存前一个chunk的分配标志位就可以了，至于<strong>当前</strong><strong>chunk</strong>的分配标志位，可以通过查询<strong>下一个</strong><strong>chunk</strong>的size字段得到。那么size字段中剩下的两个比特位就可以用于满足多线程的标志需求了：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-7&nbsp;多线程版本Knuth边界标记allocated chunk格式</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-8&nbsp;多线程版本Knuth边界标记free chunk格式</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">这里的P,M,N的含义如下：</p> 
+   <table border="1" style="border-collapse:collapse;border-spacing:0px;border:1px solid #C0C0C0;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">
+    <tbody>
+     <tr>
+      <td valign="top" style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>PREV_INUSE(P):&nbsp;表示前一个chunk是否为allocated。</p> <p>IS_MMAPPED(M)：表示当前chunk是否是通过mmap系统调用产生的。</p> <p>NON_MAIN_ARENA(N)：表示当前chunk是否是thread arena。</p> </td>
+     </tr>
+    </tbody>
+   </table>
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">再进一步，发现没必要保存chunk size的副本，也就是说Footer的作用并不大，但是如果前一个chunk是free的话，在合并的时候我们又需要知道前一个chunk的大小，怎么办呢？将Footer从尾部移到首部，同时其不再保存当前chunk的size，而是前一个free chunk的size不就行了。同样的，为了提高内存利用率，如果前一个chunk是allocated chunk的话，这个Footer就作为allocated chunk的payload或padding的一部分，结构图如下：</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-9&nbsp;当前glibc malloc allocated chunk格式</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;text-align:center;">图5-10&nbsp;当前glibc malloc free chunk格式</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">至此，glibc malloc堆内存管理器中使用的隐式链表技术就介绍完毕了。现在我们再回过头去看malloc_chunk结构体就很好理解了：该结构体通过每个chunk的prev_size和size构成了隐式链表，而后续的fd, bk等指针并不是作用于隐式链表的，而是用于后文会介绍的用于加快内存分配和释放效率的显示链表bin(还记得bin么？用于记录同一类型free chunk的链表)，并且这些指针跟prev_size一样只在free chunk中存在。关于显示链表bin的原理比较复杂，让我们带着疑惑，暂时略过这部分信息，等介绍完所有chunk之后再加以详细介绍。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"><strong>5.2 Top Chunk</strong></h3> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">当一个chunk处于一个arena的最顶部(即最高内存地址处)的时候，就称之为top chunk。该chunk并<strong>不属于任何</strong><strong>bin</strong>，而是在系统当前的所有free chunk(无论那种bin)都无法满足用户请求的内存大小的时候，将此chunk当做一个应急消防员，分配给用户使用。如果top chunk的大小比用户请求的大小要大的话，就将该top chunk分作两部分：1）用户请求的chunk；2）剩余的部分成为新的top chunk。否则，就需要扩展heap或分配新的heap了——在main arena中通过sbrk扩展heap，而在thread arena中通过mmap分配新的heap。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <h3 style="font-size:16px;line-height:1.5;color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';"><strong>5.3 Last Remainder Chunk</strong></h3> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">要想理解此chunk就必须先理解glibc malloc中的bin机制。如果你已经看了第二部分文章，那么下面的原理就很好理解了，否则建议你先阅读第二部分文章。对于Last remainder chunk，我们主要有两个问题：1)它是怎么产生的；2)它的作用是什么？</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">先回答第一个问题。还记得第二部分文章中对small bin的malloc机制的介绍么？当用户请求的是一个small chunk，且该请求无法被small bin、unsorted bin满足的时候，就通过binmaps遍历bin查找最合适的chunk，如果该chunk有剩余部分的话，就将该剩余部分变成一个新的chunk加入到unsorted bin中，另外，<span style="color:rgb(255,0,0);"><strong>再将该新的</strong><strong>chunk</strong><strong>变成新的</strong><strong>last remainder chunk</strong>。</span></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">然后回答第二个问题。此类型的chunk用于提高连续malloc(small chunk)的效率，主要是提高内存分配的局部性。那么具体是怎么提高局部性的呢？举例说明。当用户请求一个small chunk，且该请求无法被small bin满足，那么就转而交由unsorted bin处理。同时，假设当前unsorted bin中只有一个chunk的话——就是last remainder chunk，那么就将该chunk分成两部分：前者分配给用户，剩下的部分放到unsorted bin中，并成为新的last remainder chunk。这样就保证了连续malloc(small chunk)中，各个small chunk在内存分布中是相邻的，即提高了内存分配的局部性。</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong>作者：走位@阿里聚安全，更多技术文章，请点击<span style="color:rgb(255,0,0);"><span style="color:rgb(255,0,0);font-weight:inherit;line-height:inherit;"><a href="https://jaq.alibaba.com/community/index" rel="nofollow" style="color:rgb(51,51,51);font-weight:inherit;line-height:inherit;">阿里聚安全博客</a></span></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+   <p><font color="#ff0000"><span style="font-size:14px;"><b><br></b></span></font></p> 
+   <p><span><font color="#ff0000"><b><span style="font-size:14px;"></span></b></font></span></p> 
+   <p><font color="#ff0000"><span style="font-size:14px;"><b>本文转自张昺华-sky博客园博客，原文链接：http://www.cnblogs.com/sky-heaven/p/6844775.html</b></span></font><b style="font-size:14px;color:rgb(255,0,0);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';">，如需转载请自行联系原作者</b></p> 
+   <p style="color:rgb(102,102,102);font-family:'Microsoft YaHei', Arial, Helvetica, sans-serif, '宋体';font-size:14px;"><strong><span style="color:rgb(255,0,0);"><br></span></strong></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

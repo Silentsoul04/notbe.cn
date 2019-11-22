@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>pgpool-II3.1 的begin transaction 和 自动追加 BEGIN/COMMIT问题 « NotBeCN</title>
+  <meta name="description" content="                 pgpool-II3.1 里面，有一些比较奇怪的做法，至少目前在我看来，是画蛇添足。                      如果你没有声明 begin transaction 和 end/commit/rollback 。           当你执行一个SQL文的时候，如果...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/31/weixin_33972649_90127011.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">pgpool-II3.1 的begin transaction 和 自动追加 BEGIN/COMMIT问题</h1>
+    <p class="post-meta">Oct 31, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div>
+    pgpool-II3.1 里面，有一些比较奇怪的做法，至少目前在我看来，是画蛇添足。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    如果你没有声明 begin transaction 和 end/commit/rollback 。
+   </div> 
+   <div>
+    当你执行一个SQL文的时候，如果事前没有 begin transaction 之类的，
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    它会在你所执行的单一的 update/insert/delete SQL 执行前，后，分别追加 BEGIN 和COMMIT。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    虽然我认为这个追加是没有必要的，只要交给后台数据库就好了，但是还是先来探讨一下其实现机理。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    具体是如何实现的呢。看代码：
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    复制代码
+   </div> 
+   <div>
+    start_internal_transaction　函数
+   </div> 
+   <div>
+    /*&nbsp;
+   </div> 
+   <div>
+    * Start an internal transaction if necessary. &nbsp;
+   </div> 
+   <div>
+    */&nbsp;
+   </div> 
+   <div>
+    POOL_STATUS start_internal_transaction(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend, Node *node)
+   </div> 
+   <div>
+    {&nbsp;
+   </div> 
+   <div>
+    &nbsp; int i;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp; /* If we are not in a transaction block,&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;* start a new transaction
+   </div> 
+   <div>
+    &nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp; if (is_internal_transaction_needed(node)){
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp;for (i=0;i&lt;NUM_BACKENDS;i++){
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (VALID_BACKEND(i) &amp;&amp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; !INTERNAL_TRANSACTION_STARTED(backend, i) &amp;&amp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;TSTATE(backend, i) == 'I' &nbsp; )
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; {
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; per_node_statement_log(backend, i, "BEGIN");
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (do_command(frontend, CONNECTION(backend, i), "BEGIN",&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;MAJOR(backend),
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;MASTER_CONNECTION(backend)-&gt;pid,
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;MASTER_CONNECTION(backend)-&gt;key, 0) != POOL_CONTINUE)
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return POOL_END; &nbsp;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; /* Mark that we started new transaction */ &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; INTERNAL_TRANSACTION_STARTED(backend, i) = true; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; pool_unset_writing_transaction(); &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;} &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; } &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;} &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;return POOL_CONTINUE; &nbsp;&nbsp;
+   </div> 
+   <div>
+    }&nbsp;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    end_internal_transaction 函数&nbsp;
+   </div> 
+   <div>
+    /*&nbsp;
+   </div> 
+   <div>
+    * End internal transaction. &nbsp;
+   </div> 
+   <div>
+    */&nbsp;
+   </div> 
+   <div>
+    POOL_STATUS end_internal_transaction(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend)&nbsp;
+   </div> 
+   <div>
+    { &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;…… &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;/* We need to commit from secondary to master. */ &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;for (i=0;i&lt;NUM_BACKENDS;i++){ &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp;if (VALID_BACKEND(i) &amp;&amp; !IS_MASTER_NODE_ID(i) &amp;&amp; &nbsp; &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; TSTATE(backend, i) != 'I' &amp;&amp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; INTERNAL_TRANSACTION_STARTED(backend, i)) &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp;{ &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;……&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;per_node_statement_log(backend, i, "COMMIT");
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;/* COMMIT success? */ &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;if (do_command(frontend, CONNECTION(backend, i), "COMMIT",&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;MAJOR(backend), &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;MASTER_CONNECTION(backend)-&gt;pid,MASTER_CONNECTION(backend)-&gt;key, 1) &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; != POOL_CONTINUE)
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;{ &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; INTERNAL_TRANSACTION_STARTED(backend, i) = false; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; POOL_SETMASK(&amp;oldmask); &nbsp; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; return POOL_END; &nbsp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;} &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;INTERNAL_TRANSACTION_STARTED(backend, i) = false; &nbsp; &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; } &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;} &nbsp;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;/* Commit on master */ &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;if (TSTATE(backend, MASTER_NODE_ID) != 'I' &amp;&amp; &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;INTERNAL_TRANSACTION_STARTED(backend, MASTER_NODE_ID)) &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp;{ &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; …… &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; per_node_statement_log(backend, MASTER_NODE_ID, "COMMIT"); &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; if (do_command(frontend, MASTER(backend), "COMMIT", MAJOR(backend),
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;MASTER_CONNECTION(backend)-&gt;pid,MASTER_CONNECTION(backend)-&gt;key, 1) !=&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;POOL_CONTINUE) &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; { &nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;INTERNAL_TRANSACTION_STARTED(backend, MASTER_NODE_ID) = false;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;POOL_SETMASK(&amp;oldmask); &nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;return POOL_END;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; }
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; INTERNAL_TRANSACTION_STARTED(backend, MASTER_NODE_ID) = false;&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; }
+   </div> 
+   <div>
+    &nbsp; &nbsp; POOL_SETMASK(&amp;oldmask);&nbsp;
+   </div> 
+   <div>
+    &nbsp; &nbsp; return POOL_CONTINUE; &nbsp;&nbsp;
+   </div> 
+   <div>
+    } &nbsp;
+   </div> 
+   <div>
+    复制代码
+   </div> 
+   <div>
+    其中所使用的 is_internal_transaction_needed 函数，其篇幅比较长，代码省略。
+   </div> 
+   <div>
+    其主要做法，就是把 delete/insert/update 之类的关键字放到一个list中，然后用二分法查找。
+   </div> 
+   <div>
+    如果命中，就认为 internal_transaction_needded。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    从更高的层次看，有如下的调用关系：
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    pool_process_query &nbsp;→　 ProcessFrontEndResponse &nbsp;和 ProcessBackendResponse
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    ProcessFrontEndResponse →　
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; SimpleQuery　→　start_internal_transaction 　→　is_internal_transaction_needed
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    ProcessBackendResponse　→　
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; ReadyForQuery　→end_internal_transaction
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    需要注意，在 start_internal_transaction 中追加 BEGIN需要以下几个条件：
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp;i) &nbsp;Interal transaction 被认定是必须的&nbsp;
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    　　 ii) INTERNAL_TRANSACTION_STARTED 标志位被置位
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp;iii) 各DB节点的TSTATE 状态是初始状态 I
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    而在 end_internal_transaction 中追加 COMMIT需要以下几个条件：
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    &nbsp;　 &nbsp; i) Interal transaction 被认定是必须的
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp;ii) INTERNAl_TRANSACTION_STARTED标志位被置位
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    &nbsp; &nbsp; &nbsp; &nbsp;iii) 各DB节点的TSTATE 状态时初始状态 I
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    普通的单一SQL文执行的时候，上述的条件均可得到满足。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    但是，像begein transaction 这样的语句，一旦执行，会改变DB节点的 TSTATE状态为 T。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    这样,即使后面再有 单一SQL文被执行，也没有可能满足上面的条件了。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    直到遇到了 begin-transaction--commit/rollback &nbsp;的 commit/rollback ,　TSTATE状态恢复为I 。
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    换句话说，其实pgpool-II中，根本就没有对 begin transaction 语句的识别部分的代码！诡异！
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    本文转自健哥的数据花园博客园博客，原文链接：http://www.cnblogs.com/gaojian/archive/2012/08/29/2661439.html，如需转载请自行联系原作者
+    <br>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

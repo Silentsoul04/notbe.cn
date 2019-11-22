@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>记5.28大促压测的性能优化—线程池相关问题 « NotBeCN</title>
+  <meta name="description" content="             目录：    1.环境介绍    2.症状    3.诊断    4.结论    5.解决    6.对比java实现    废话就不多说了，本文分享下博主在5.28大促压测期间解决的一个性能问题，觉得这个还是比较有意思的，值得总结拿出来分享下。    博主所服务的部门是作为公共业务平台...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/08/1557728875043.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">记5.28大促压测的性能优化—线程池相关问题</h1>
+    <p class="post-meta">Nov 8, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:3px;">目录：</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:3px;">1.环境介绍</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:3px;">2.症状</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:3px;">3.诊断</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:3px;">4.结论</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:3px;">5.解决</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:3px;">6.对比java实现</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">废话就不多说了，本文分享下博主在5.28大促压测期间解决的一个性能问题，觉得这个还是比较有意思的，值得总结拿出来分享下。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">博主所服务的部门是作为公共业务平台，公共业务平台支持上层所有业务系统（2C、UGC、直播等）。平台中核心之一的就是订单域相关服务，下单服务、查单服务、支付回调服务，当然结算页暂时还是我们负责，结算页负责承上启下进行下单、结算、跳支付中心。每次业务方进行大促期间平台都要进行一次常规压测，做到心里有底。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">在压测的上半场，陆续的解决一些不是太奇怪的问题，定位到问题时间都在计划内。下单服务、查单服务、结算页都顺利压测通过。但是到了支付回调服务压测的时候，有个奇怪的问题出现了。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">1.环境介绍</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们每年基本两次大促，5.28、双12。两次大促期间相隔时间也就只有半年左右，所以每次大促压测都会心里有点低，基本就是摸底检查下。因为之前的压测性能在这半年期间一般不会出现太大的性能问题。这前提是因为我们每次发布重大的项目的时候都会进行性能压测，所以压测慢慢变得常规化、自动化，遗漏的性能问题应该不会太多。性能指标其实在平时就关注了，而不是大促才来临时抱佛脚，那样其实为时已晚，只能拆东墙补西墙。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">应用服务器配置，物理机、32core 、168g、千兆网卡、压测网络带宽千兆、IIS 7.5、.NET 4.0，这台压测服务器还是很强的。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们本地会用JMeter进行问题排查。由于这篇文章不是讲怎么做性能压测的，所以其他跟本篇文章关系的不大的情况就不介绍了。包括压测网络隔离、压测机器的配置和节点数等。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们的要求，顶层服务在200并发下，平均响应时间不能超过50毫秒，TPS要到3000左右。一级服务，也就是最底层服务的要求更高，商品系统、促销系统、卡券系统平均响应时间基本保持在20毫秒以内才能接受。因为一级服务的响应速度直接决定了上层服务的响应速度，这里还要去掉一些其他的调用开销。&nbsp;</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">2.症状</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这个性能问题的症状还是比较奇怪的，情况是这样的：200并发、2000loop，40w的调用量。一开始前几秒速度是比较快的，基本上TPS到了2500左右。服务器的CPU也到了60左右，还是比较正常的，但是几秒过后处理速度陡降，TPS慢慢在往下掉。从服务器的监控中发现，服务器的CPU是0%消耗。这很吓人，怎么突然不处理了。TPS掉到100多了，显然会一直掉下去。等了大概不到4分钟，一下子CPU又上来了。TPS可以到2000左右。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们仔细分析查看，首先JMeter的吞吐量的问题，吞吐量是按照你的请求平均响应时间计算的，所以这里看起来TPS是慢慢在减慢其实已经基本停止了。如果你的平均响应时间为20毫秒，那么在单位时间内你的吞吐量是基本可以计算出来的。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">症状主要就是这样的，我们接下来对它进行诊断。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">3.诊断</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">开始通过走查代码，看能不能发现点什么。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这是支付回调服务，代码的前后没有太多的业务处理，鉴权检查、订单支付状态修改、触发支付完成事件、调用配送、周边业务通知（这里有一部分需要兼容老代码、老接口）。我们首先主要是查看对外依赖的部分，发现有redis读写的代码，就将redis的部分代码注释掉在进行压测试试看。结果一下子就正常了，这就比较奇怪了，redis是我们其他压测服务共用的，之前压测怎么没有问题。没管那么多了，可能是代码的执行序列不同，在并发领域里面，这也说得通。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们再通过打印redis执行的时间，看处理需要多久。结果显示，处理速度不均匀，前面的很快，后面的时间都在5-6秒，虽然不均匀但是很有规律。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">所以我们都认为是redis的相关问题，就开始一头扎进去检查redis的问题了。开始对redis进行检查，首先是开启Wireshark TCP连接监控，检查链路、redis服务器的Slowlog查看处理时间。redis客户端库的源代码查看（redis客户端排除原生的StackExhange.Redis的有两层封装，一共三层），重点关注有锁的地方和thread wait的地方。同时排查网络问题，再进行压测的时候ping redis服务器看是否有延迟。（此时是晚上21点左右，这个时候的大脑情况大家都懂的。）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">就是这样地毯式的搜查，以为是肯定能定位到问题。但是我们却忽视了代码的层次结构，一下子专到了太细节的地方，忽视了整体的架构（指开发架构，因为代码不是我们写的，对代码周边情况不是太了解）。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">先看redis服务器的建立情况，tcp抓包查看，连接建立正常，没有丢包，速度也很快。redis的处理速度也没问题，slowlog查看基本get key也就1毫秒不到。（这里需要注意，redis的处理时间还包括队列里等待的时间。slowlog只能看到redis处理的时间，看不到blocking的时间，这里面还包括redis的command在客户端队列的时间。）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">所以打印出来的redis处理时间很慢，不纯粹是redis服务器的处理时间，中间有几个环节需要排查的。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">经过一番折腾，排查，问题没定位到，已是深夜，精力严重不足了，也要到地铁最后一班车发车时间了，再不走赶不上了，下班回家，上到最后一班地铁没耽误三分钟~~。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">重整思路，第二天继续排查。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们定位到redis客户端的连接是可以先预热的，在global application_begin启动的时候先预热好，然后性能一下子也正常了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">范围进一步缩小，问题出在连接上，这里我们又反思了（一夜觉睡过了，脑子清醒了），那为什么我们之前的压测没出现过这个问题。对技术狂热爱好的我们，哪能善罢甘休。此时问题算是解决了，但是背后所涉及到的相关线索穿不起来，总是不太舒服。（中场休息片刻，已是第二天的下午快傍晚了~~。）技术人员要有这种征服欲，必须搞清楚。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们开始还原现场，然后开始出大招，开始dump进程文件，分不同的时间段，抓取了几份dump文件down到本地进行分析。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">首先查看了线程情况，!runaway，发现大多数线程执行时间都有点长。接着切换到某个线程中~xxs，查看线程调用堆栈。发现在等一把monitor锁。同时切换到其他几个线程中查看下是不是都在等待这把锁。结果确实都在等这把锁。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">结论，发现一半的线程都在等待moniter监视器锁，随着时间增加，是不是都在等待这把锁。这比较奇怪。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这把锁是redis库的第三层封装的时候用来lock获取redis connectioin时候用的。我们直接注释掉这把锁，继续压测继续dump，然后又发现一把monitor，这把锁是StackExchange.Redis中的，代码一时半会无法消化，只查了主体代码和周边代码情况，没有时间查看全局情况。（因为时间紧迫）。暂且完全信任第三方库，然后查看redis connection string 的各个参数，是不是可以调整超时时间、连接池大小等。但是还是未能解决。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">回过头继续查看dump，查看了下CLR连接池，！ThreadPool，一下子看到问题了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s4.51cto.com/wyfs02/M01/97/D5/wKiom1kzvKmy22N2AAAtGZ8GXL0000.png-wh_500x0-wm_3-wmp_4-s_2074399665.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s4.51cto.com/wyfs02/M01/97/D5/wKiom1kzvKmy22N2AAAtGZ8GXL0000.png-wh_500x0-wm_3-wmp_4-s_2074399665.png" title="1.png" alt="wKiom1kzvKmy22N2AAAtGZ8GXL0000.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">继续查看其他几个dump文件，Idle都是0，也就是说CLR线程池没有线程来处理请求了，至少CLR线程池的创建速率和并发速率不匹配了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">CLR线程池的创建速率一般是1秒2个线程，线程池的创建速率是否存在滑动时间不太清楚。线程池的大小可以通过 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\Config\machine.config 配置来设置，默认是自动配置的。最小的线程数一般是当前机器的CPU 核数。当然你也可以通过ThreadPool相关方法来设置，ThreadPool.SetMaxThreads(), ThreadPool.SetMinThreads()。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">然后我们继续排查代码，发现代码中有用Action的委托的地方，而这个Action是处理异步代码的，上面说的redis的读写都在这个Action里面的。一下我们明白了，所有的线索都连起来了。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">4.结论</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">.NET CLR线程池是共享线程池，也就是说ASP.NET、委托、Task背后都是一个线程池在处理。线程池分为两种，Request线程池、IOCP线程池（完成端口线程池）。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们现在理下线索：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">1.从最开始的JMeter压测吞吐量慢慢变低是个假象，而此时处理已经全面停止，服务器的CPU处理为0%。肉眼看起来变慢是因为请求延迟时间增加了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">2.redis的TCP链路没问题，Wireshark查看没有任何异常、Slowlog没有问题、redis的key comnand慢是因为blocking住了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">3.其他服务压测之所有没问题是因为我们是同步调用redis，当首次TCP连接建立之后速度会上来。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">4.Action看起来速度是上去了，但是所有的Action都是CLR线程池中的线程，看起来快是因为还没有到CLR线程池的瓶颈。</p> 
+   <div style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"> 
+    <div class="syntaxhighlighter c#" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+     <table border="0" style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;">
+      <tbody style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+       <tr style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+        <td class="gutter" style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(175,175,175);"> 
+         <div class="line number1 index0 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          1
+         </div> 
+         <div class="line number2 index1 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          2
+         </div> 
+         <div class="line number3 index2 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          3
+         </div> 
+         <div class="line number4 index3 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          4
+         </div> 
+         <div class="line number5 index4 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          5
+         </div> 
+         <div class="line number6 index5 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          6
+         </div> 
+         <div class="line number7 index6 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          7
+         </div> </td> 
+        <td class="code" style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+         <div style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+          <div class="line number1 index0 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">Action&nbsp;asyncAction&nbsp;=&nbsp;()&nbsp;=&gt;&nbsp;&nbsp;&nbsp;</code>
+          </div> 
+          <div class="line number2 index1 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number3 index2 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//读写redis&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number4 index3 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//发送邮件&nbsp;</code> 
+          </div> 
+          <div class="line number5 index4 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//...</code> 
+          </div> 
+          <div class="line number6 index5 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">};</code> 
+          </div> 
+          <div class="line number7 index6 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">asyncAction();</code>
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">5.JMeter压测的时候没有延迟，在压测的时候程序没有预热，导致所有的东西需要初始化，IIS、.NET等。这些都会让第一次看起来很快，然后慢慢下降的错觉。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">总结：首次建立TCP连接是需要时间的，此时并发过大，所有的线程在wait，wait之后CPU会将这些线程交换出去，此时是明显的所线程上下文切换过程，是一部分开销。当CLR线程池的线程全部耗光吞吐量开始陡降。每次调用其实是开启力了两个线程，一个处理请求的Request，还有一个是Action委托线程。当你以为线程还够的时候，其实线程池已经满了。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">5.解决</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">针对这个问题我们进行了队列化处理。相当于在CLR线程池基础上抽象一个工作队列出来，然后队列的消费线程控制在一定数量之内，初始化的时候默认一个线程，会提供接口创建顶多6个线程。这样当队列的处理速度跟不上的时候可以调用。大致代码如下（已进行适当的修改，非源码模样，仅供参考）：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">Service 部分：</p> 
+   <div style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"> 
+    <div class="syntaxhighlighter c#" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+     <table border="0" style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;">
+      <tbody style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+       <tr style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+        <td class="gutter" style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(175,175,175);"> 
+         <div class="line number1 index0 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          1
+         </div> 
+         <div class="line number2 index1 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          2
+         </div> 
+         <div class="line number3 index2 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          3
+         </div> 
+         <div class="line number4 index3 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          4
+         </div> 
+         <div class="line number5 index4 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          5
+         </div> 
+         <div class="line number6 index5 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          6
+         </div> 
+         <div class="line number7 index6 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          7
+         </div> 
+         <div class="line number8 index7 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          8
+         </div> 
+         <div class="line number9 index8 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          9
+         </div> 
+         <div class="line number10 index9 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          10
+         </div> 
+         <div class="line number11 index10 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          11
+         </div> 
+         <div class="line number12 index11 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          12
+         </div> 
+         <div class="line number13 index12 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          13
+         </div> 
+         <div class="line number14 index13 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          14
+         </div> 
+         <div class="line number15 index14 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          15
+         </div> 
+         <div class="line number16 index15 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          16
+         </div> 
+         <div class="line number17 index16 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          17
+         </div> 
+         <div class="line number18 index17 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          18
+         </div> 
+         <div class="line number19 index18 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          19
+         </div> 
+         <div class="line number20 index19 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          20
+         </div> 
+         <div class="line number21 index20 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          21
+         </div> 
+         <div class="line number22 index21 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          22
+         </div> 
+         <div class="line number23 index22 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          23
+         </div> 
+         <div class="line number24 index23 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          24
+         </div> 
+         <div class="line number25 index24 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          25
+         </div> 
+         <div class="line number26 index25 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          26
+         </div> 
+         <div class="line number27 index26 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          27
+         </div> 
+         <div class="line number28 index27 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          28
+         </div> 
+         <div class="line number29 index28 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          29
+         </div> 
+         <div class="line number30 index29 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          30
+         </div> 
+         <div class="line number31 index30 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          31
+         </div> 
+         <div class="line number32 index31 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          32
+         </div> 
+         <div class="line number33 index32 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          33
+         </div> 
+         <div class="line number34 index33 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          34
+         </div> 
+         <div class="line number35 index34 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          35
+         </div> 
+         <div class="line number36 index35 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          36
+         </div> 
+         <div class="line number37 index36 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          37
+         </div> 
+         <div class="line number38 index37 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          38
+         </div> 
+         <div class="line number39 index38 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          39
+         </div> 
+         <div class="line number40 index39 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          40
+         </div> 
+         <div class="line number41 index40 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          41
+         </div> 
+         <div class="line number42 index41 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          42
+         </div> </td> 
+        <td class="code" style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+         <div style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+          <div class="line number1 index0 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">private</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">static</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">readonly</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">ConcurrentQueue&lt;NoticeParamEntity&gt;&nbsp;AsyncNotifyPayQueue&nbsp;=&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">new</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">ConcurrentQueue&lt;NoticeParamEntity&gt;();&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number2 index1 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">private</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">static</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">int</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">_workThread;</code> 
+          </div> 
+          <div class="line number3 index2 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">static</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">ChangeOrderService()&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number4 index3 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number5 index4 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">StartWorkThread();&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number6 index5 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}</code> 
+          </div> 
+          <div class="line number7 index6 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">public</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">static</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">int</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">GetPayNoticQueueCount()&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number8 index7 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number9 index8 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">return</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">AsyncNotifyPayQueue.Count;&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number10 index9 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}</code> 
+          </div> 
+          <div class="line number11 index10 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">public</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">static</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">int</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">StartWorkThread()&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number12 index11 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number13 index12 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">if</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">(_workThread&nbsp;&gt;&nbsp;5)&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">return</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">_workThread;</code> 
+          </div> 
+          <div class="line number14 index13 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">ThreadPool.QueueUserWorkItem(WaitCallbackImpl);&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number15 index14 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">_workThread&nbsp;+=&nbsp;1;</code> 
+          </div> 
+          <div class="line number16 index15 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">return</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">_workThread;;&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number17 index16 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}</code> 
+          </div> 
+          <div class="line number18 index17 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">public</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">static</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">void</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">WaitCallbackImpl(</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">object</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">state)&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number19 index18 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number20 index19 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">while</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">(</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">true</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">)&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number21 index20 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number22 index21 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">try</code>&nbsp;&nbsp;&nbsp;&nbsp;
+          </div> 
+          <div class="line number23 index22 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number24 index23 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">PayNoticeParamEntity&nbsp;payParam;&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number25 index24 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">AsyncNotifyPayQueue.TryDequeue(</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">out</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">payParam);</code> 
+          </div> 
+          <div class="line number26 index25 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">if</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">(payParam&nbsp;==&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">null</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">)&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number27 index26 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number28 index27 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">Thread.Sleep(5000);&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number29 index28 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">continue</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">;&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number30 index29 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}</code> 
+          </div> 
+          <div class="line number31 index30 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//获取订单详情</code> 
+          </div> 
+          <div class="line number32 index31 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//结转分摊&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number33 index32 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//发短信&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number34 index33 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//发送消息&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number35 index34 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//配送&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number36 index35 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number37 index36 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">catch</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">(Exception&nbsp;exception)&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number38 index37 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number39 index38 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# comments" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(0,130,0);">//log&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number40 index39 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number41 index40 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number42 index41 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">原来调用的地方直接改成入队列：</p> 
+   <div style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"> 
+    <div class="syntaxhighlighter c#" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+     <table border="0" style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;">
+      <tbody style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+       <tr style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+        <td class="gutter" style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(175,175,175);"> 
+         <div class="line number1 index0 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          1
+         </div> 
+         <div class="line number2 index1 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          2
+         </div> 
+         <div class="line number3 index2 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          3
+         </div> 
+         <div class="line number4 index3 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          4
+         </div> </td> 
+        <td class="code" style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+         <div style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+          <div class="line number1 index0 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">private</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">void</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">AsyncNotifyPayCompleted(NoticeParamEntity&nbsp;payNoticeParam)&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number2 index1 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number3 index2 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">AsyncNotifyPayQueue.Enqueue(payNoticeParam);&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number4 index3 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">Controller 代码：</p> 
+   <div style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"> 
+    <div class="syntaxhighlighter c#" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+     <table border="0" style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;">
+      <tbody style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+       <tr style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">
+        <td class="gutter" style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:rgb(175,175,175);"> 
+         <div class="line number1 index0 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          1
+         </div> 
+         <div class="line number2 index1 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          2
+         </div> 
+         <div class="line number3 index2 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          3
+         </div> 
+         <div class="line number4 index3 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          4
+         </div> 
+         <div class="line number5 index4 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          5
+         </div> 
+         <div class="line number6 index5 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          6
+         </div> 
+         <div class="line number7 index6 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          7
+         </div> 
+         <div class="line number8 index7 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          8
+         </div> 
+         <div class="line number9 index8 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          9
+         </div> 
+         <div class="line number10 index9 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          10
+         </div> 
+         <div class="line number11 index10 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          11
+         </div> 
+         <div class="line number12 index11 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          12
+         </div> 
+         <div class="line number13 index12 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          13
+         </div> 
+         <div class="line number14 index13 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          14
+         </div> 
+         <div class="line number15 index14 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          15
+         </div> 
+         <div class="line number16 index15 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          16
+         </div> 
+         <div class="line number17 index16 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          17
+         </div> 
+         <div class="line number18 index17 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          18
+         </div> 
+         <div class="line number19 index18 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          19
+         </div> 
+         <div class="line number20 index19 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          20
+         </div> 
+         <div class="line number21 index20 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          21
+         </div> 
+         <div class="line number22 index21 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          22
+         </div> 
+         <div class="line number23 index22 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          23
+         </div> 
+         <div class="line number24 index23 alt1" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          24
+         </div> 
+         <div class="line number25 index24 alt2" style="font-size:1em;background-image:none;border-width:0px 3px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.1em;text-align:right;vertical-align:baseline;">
+          25
+         </div> </td> 
+        <td class="code" style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+         <div style="font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+          <div class="line number1 index0 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">public</code>&nbsp;
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">class</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">WorkQueueController&nbsp;:&nbsp;ApiController&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number2 index1 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number3 index2 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">[Route(</code>
+           <code class="c# string" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#0000FF;">"worker/server_work_queue"</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">)]&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number4 index3 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">[HttpGet]&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number5 index4 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">public</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">HttpResponseMessage&nbsp;GetServerWorkQueue()&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number6 index5 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number7 index6 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">var</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">payNoticCount&nbsp;=&nbsp;ChangeOrderService.GetPayNoticQueueCount();</code> 
+          </div> 
+          <div class="line number8 index7 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">var</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">result&nbsp;=&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">new</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">HttpResponseMessage()&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number9 index8 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number10 index9 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">Content&nbsp;=&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">new</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">StringContent(payNoticCount.ToString(),&nbsp;Encoding.UTF8,&nbsp;</code>
+           <code class="c# string" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#0000FF;">"application/json"</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">)&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number11 index10 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">};</code> 
+          </div> 
+          <div class="line number12 index11 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">return</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">result;&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number13 index12 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}</code> 
+          </div> 
+          <div class="line number14 index13 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">[Route(</code>
+           <code class="c# string" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#0000FF;">"worker/start-work-thread"</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">)]&nbsp;</code> 
+          </div> 
+          <div class="line number15 index14 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">[HttpGet]&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number16 index15 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">public</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">HttpResponseMessage&nbsp;StartWorkThread()&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number17 index16 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number18 index17 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">var</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">count&nbsp;=&nbsp;ChangeOrderService.StartWorkThread();</code> 
+          </div> 
+          <div class="line number19 index18 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">var</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">result&nbsp;=&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">new</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">HttpResponseMessage()&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number20 index19 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">{&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number21 index20 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">Content&nbsp;=&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">new</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">StringContent(count.ToString(),&nbsp;Encoding.UTF8,&nbsp;</code>
+           <code class="c# string" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#0000FF;">"application/json"</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">)&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number22 index21 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">};</code> 
+          </div> 
+          <div class="line number23 index22 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# keyword" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;font-weight:bold;color:rgb(0,102,153);">return</code>&nbsp;
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">result;&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number24 index23 alt1" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+          </div> 
+          <div class="line number25 index24 alt2" style="font-size:1em;background-image:none;border:0px;line-height:1.1em;vertical-align:baseline;"> 
+           <code class="c# spaces" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+           <code class="c# plain" style="font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:1em;background:none;border:0px;line-height:1.1em;vertical-align:baseline;color:#000000;">}</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">上述代码是未经过抽象封装的，仅供参考。思路是不变的，将线程利用率最大化，延迟任务无需占用过多线程，将CPU密集型和IO密集型分开。让速度不匹配的动作分开。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">优化后的TPS可以到7000，比原来快近三倍。</p> 
+   <h1 style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">6.对比JAVA实现</h1> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这个问题其实如果在JAVA里也许不太容易出现，JAVA的线程池功能是比较强大的，并发库比较丰富。在JAVA里两行代码就可以搞定了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">ExecutorService fiexdExecutorService = Executors.newFixedThreadPool(Thread_count);</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">直接构造一个指定数量的线程池，当然我们也可以设置线程池的队列类型、大小、包括队列满了之后、线程池满了之后的拒绝策略。这些用起来还是比较方便的。</p> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div> 
+    <div>
+     &nbsp;本文转自 王清培 51CTO博客，原文链接：http://blog.51cto.com/wangqingpei557/1932068，如需转载请自行联系原作者
+    </div> 
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

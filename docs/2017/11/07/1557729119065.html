@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>性能压测诡异的Requests/second 响应刺尖问题 « NotBeCN</title>
+  <meta name="description" content="             最近一段时间都在忙着转java项目最后的冲刺，前期的coding翻代码、debug、fixbug都逐渐收尾，进入上线前的性能压测。    虽然不是大促前的性能压测要求，但是为了安全起见，需要摸个底心里有个数。    毕竟这次转java的服务都是集团核心公共服务(主要是订单域服务)。（等我...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/07/1557729119065.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">性能压测诡异的Requests/second 响应刺尖问题</h1>
+    <p class="post-meta">Nov 7, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">最近一段时间都在忙着转java项目最后的冲刺，前期的coding翻代码、debug、fixbug都逐渐收尾，进入上线前的性能压测。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">虽然不是大促前的性能压测要求，但是为了安全起见，需要摸个底心里有个数。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">毕竟这次转java的服务都是集团核心公共服务(主要是订单域服务)。（等我们顺利上线了，我再来好好总结下其中的坎坷和壮举。）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">废话不多说了，直接进入主题。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">由于这次压测主要重点是关注正向的两个核心订单服务，下单服务、查单服务。查单服务初步压测下来问题不大，主要是db的索引和cache的问题。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">下单服务有两个核心接口，预订单查询、创建订单。预订单查询主要是订单的前置状态的结算页汇总计算（不仅是结算页），不落具体订单，如，各种促销、卡券码、虚拟币的规则计算等等。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">创建订单逻辑稍微复杂点，对周边的系统及中间件依赖也比较多，所以需要重点关注，至少心中要有数，哪怕下游的哪个服务的性能有问题，在下次大促的时候可以优化掉。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">（并不是说所有性能问题都需要及时优化，只要保证能撑得起业务量的一定范围就好，因为性能优化无止境，需要把握好节奏。）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">提交横向压测前我们需要自己先过一遍，这样才能加快压测的效率，由于时间比较紧再加上客观的环境问题，我将服务中几个没有压测环境的依赖去掉。（有关压测的一些实践我将在下篇文章好好总结下，这里就不展开了。）压测了几轮（时间差不多30分钟左右。），消除了一些环境、代码、依赖的障碍，提交横向走压测流程，接着就去忙其他的事情了。（诡异的问题比较多~_~，mybatis pagehelperplugin好像也有点并发问题，还没定位到，不知道是用的不对还是什么情况，继续排查，有结论了我在总结分享下。）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:24px;"><strong style="font-size:16px;">1.压测报告：</strong></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s3.51cto.com/wyfs02/M00/07/41/wKiom1nGBYqxf0onAABLiZL8Rk0019.png-wh_500x0-wm_3-wmp_4-s_3807757160.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s3.51cto.com/wyfs02/M00/07/41/wKiom1nGBYqxf0onAABLiZL8Rk0019.png-wh_500x0-wm_3-wmp_4-s_3807757160.png" title="7.png" width="600" height="167" alt="wKiom1nGBYqxf0onAABLiZL8Rk0019.png-wh_50" style="border:none;width:600px;"></a></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s5.51cto.com/wyfs02/M01/07/41/wKiom1nGBbTACJLMAAAkBZP4sl4049.png-wh_500x0-wm_3-wmp_4-s_3594953437.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s5.51cto.com/wyfs02/M01/07/41/wKiom1nGBbTACJLMAAAkBZP4sl4049.png-wh_500x0-wm_3-wmp_4-s_3594953437.png" title="8.png" width="600" height="147" alt="wKiom1nGBbTACJLMAAAkBZP4sl4049.png-wh_50" style="border:none;width:600px;"></a></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s2.51cto.com/wyfs02/M01/A5/F2/wKioL1nGBY6Qa1BTAACka5EGMTg939.png-wh_500x0-wm_3-wmp_4-s_772354956.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s2.51cto.com/wyfs02/M01/A5/F2/wKioL1nGBY6Qa1BTAACka5EGMTg939.png-wh_500x0-wm_3-wmp_4-s_772354956.png" title="1.png" width="600" height="213" alt="wKioL1nGBY6Qa1BTAACka5EGMTg939.png-wh_50" style="border:none;width:600px;"></a></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">并发用户数没变化，平均响应时间没变化，但是request/second奇怪了。我相信大多数开发的直觉就是fullgc了，我也一样。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">立马去看下服务器的GC监控，同时看下程序的GCer配置是CMS。（CMS主要解决低延迟问题《深入理解JAVA虚拟机》）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:24px;"><strong style="font-size:16px;">2.查看服务器监控情况：</strong></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">JAVA GC：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s1.51cto.com/wyfs02/M01/07/41/wKiom1nGBm6xQF9fAABiGLijIrA612.png-wh_500x0-wm_3-wmp_4-s_3258299218.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s1.51cto.com/wyfs02/M01/07/41/wKiom1nGBm6xQF9fAABiGLijIrA612.png-wh_500x0-wm_3-wmp_4-s_3258299218.png" title="2.png" width="600" height="229" alt="wKiom1nGBm6xQF9fAABiGLijIrA612.png-wh_50" style="border:none;width:600px;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">没发现fullgc，再看下几个其他的系统资源是否有异样。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">cpu:</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s3.51cto.com/wyfs02/M00/A5/F2/wKioL1nGBlay8f6TAABwHl5uCIk628.png-wh_500x0-wm_3-wmp_4-s_1113185177.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s3.51cto.com/wyfs02/M00/A5/F2/wKioL1nGBlay8f6TAABwHl5uCIk628.png-wh_500x0-wm_3-wmp_4-s_1113185177.png" title="3.png" width="600" height="209" alt="wKioL1nGBlay8f6TAABwHl5uCIk628.png-wh_50" style="border:none;width:600px;"></a></span></strong><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">刺尖的几个点CPU idle 基本都是100%，us也是0%，非常奇怪。再看下其他的资源。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">network：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s3.51cto.com/wyfs02/M02/A5/F2/wKioL1nGBnuSW7FnAACPoZmc30c073.png-wh_500x0-wm_3-wmp_4-s_1788452109.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s3.51cto.com/wyfs02/M02/A5/F2/wKioL1nGBnuSW7FnAACPoZmc30c073.png-wh_500x0-wm_3-wmp_4-s_1788452109.png" title="4.png" width="600" height="206" alt="wKioL1nGBnuSW7FnAACPoZmc30c073.png-wh_50" style="border:none;width:600px;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">也是比较奇怪的，receive到是挺正常的，send基本为0了，感觉像是某个调用或者发送停止了，能接受请求，但是对下游的调用貌似停止了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">memory：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s3.51cto.com/wyfs02/M00/07/41/wKiom1nGBs-j49jEAABkxiizo14320.png-wh_500x0-wm_3-wmp_4-s_1674569294.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s3.51cto.com/wyfs02/M00/07/41/wKiom1nGBs-j49jEAABkxiizo14320.png-wh_500x0-wm_3-wmp_4-s_1674569294.png" title="5.png" alt="wKiom1nGBs-j49jEAABkxiizo14320.png-wh_50" style="border:none;"></a></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">内存咋一看好像有点问题，但是了解linux 内存计算方式和使用原理都知道这其实问题不大。(下篇文章中会具体讲解关于压测的时候各个指标如何查看和计算，在压测时候重点关注top中的swap区。)</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我程序里面基本上没有用到什么大量的磁盘操作，基本上就一个日志输出，别的没有了。（linux cache区不管是读还是写都会被cache住，会在cache里维护一个逻辑地址空间。我将在下篇文章中演示出来，每当我删除磁盘的日志文件，cache区都会瞬间释放。<a title="https://www.ibm.com/developerworks/cn/linux/l-cache/index.html" href="https://www.ibm.com/developerworks/cn/linux/l-cache/index.html" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);">https://www.ibm.com/developerworks/cn/linux/l-cache/index.html</a>）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">重点是关注下JAVAGC 容量：（java程序的内存分配由“内存分配器+GC完成”《java性能优化权威指南》）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s5.51cto.com/wyfs02/M00/07/41/wKiom1nGBuihksuDAACqgRZt7SM116.png-wh_500x0-wm_3-wmp_4-s_2519541051.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s5.51cto.com/wyfs02/M00/07/41/wKiom1nGBuihksuDAACqgRZt7SM116.png-wh_500x0-wm_3-wmp_4-s_2519541051.png" title="6.png" alt="wKiom1nGBuihksuDAACqgRZt7SM116.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">这是压测的下单服务机器资源情况。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:24px;"><strong style="font-size:16px;">3.查看DB情况：</strong></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s4.51cto.com/wyfs02/M02/A5/F2/wKioL1nGBsagkGaLAACPAkylBeY214.png-wh_500x0-wm_3-wmp_4-s_1694521729.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s4.51cto.com/wyfs02/M02/A5/F2/wKioL1nGBsagkGaLAACPAkylBeY214.png-wh_500x0-wm_3-wmp_4-s_1694521729.png" title="9.png" alt="wKioL1nGBsagkGaLAACPAkylBeY214.png-wh_50" style="border:none;"></a></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s5.51cto.com/wyfs02/M01/07/41/wKiom1nGBxTx216UAAB0BlJb0V8273.png-wh_500x0-wm_3-wmp_4-s_2962241853.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s5.51cto.com/wyfs02/M01/07/41/wKiom1nGBxTx216UAAB0BlJb0V8273.png-wh_500x0-wm_3-wmp_4-s_2962241853.png" title="10.png" alt="wKiom1nGBxTx216UAAB0BlJb0V8273.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s1.51cto.com/wyfs02/M01/A5/F2/wKioL1nGBtuBQBCXAABim1H_CJ8043.png-wh_500x0-wm_3-wmp_4-s_412689850.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s1.51cto.com/wyfs02/M01/A5/F2/wKioL1nGBtuBQBCXAABim1H_CJ8043.png-wh_500x0-wm_3-wmp_4-s_412689850.png" title="11.png" alt="wKioL1nGBtuBQBCXAABim1H_CJ8043.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s5.51cto.com/wyfs02/M00/A5/F2/wKioL1nGBtuTl8wVAACNWw05-7g240.png-wh_500x0-wm_3-wmp_4-s_1774855280.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s5.51cto.com/wyfs02/M00/A5/F2/wKioL1nGBtuTl8wVAACNWw05-7g240.png-wh_500x0-wm_3-wmp_4-s_1774855280.png" title="12.png" alt="wKioL1nGBtuTl8wVAACNWw05-7g240.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">看了下DB情况，也没啥异样，都是在相同的时间点，一下子负载没有了，时间都能对上。网络、磁盘、CPU都没有活动。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:24px;"><strong style="font-size:16px;">4.分析</strong></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">上面图中有一幅图有点问题，不知道大家看出来了没有。就是我下单服务的应用服务器的网络流量有问题，receive、send对不上。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s1.51cto.com/wyfs02/M00/A5/F2/wKioL1nGBxmTRYsjAACPoZmc30c674.png-wh_500x0-wm_3-wmp_4-s_3599997851.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s1.51cto.com/wyfs02/M00/A5/F2/wKioL1nGBxmTRYsjAACPoZmc30c674.png-wh_500x0-wm_3-wmp_4-s_3599997851.png" title="4.png" alt="wKioL1nGBxmTRYsjAACPoZmc30c674.png-wh_50" style="border:none;"></a></span></strong><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们分析下，receive、send不配对意味着什么，我们有200并发，延迟1秒启动，基本上跑上个十几分钟，你能大概想象出200并发的请求空间路线图么。其实它会呈现出每秒钟都有请求进来，这是压力机的请求，每秒也会有请求出去，去访问它所依赖的服务或者中间件。如果，我们设想从压力机为开始点，把请求和响应想象成一个圆，那在圆的任何一个角度上都有请求和响应。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我们注意看下，DB的网络流量图，它就是比较正常的，没有请求没有发送。而应用服务器有点说不通，只有进来的没有出去的，这段时间内到底在干嘛，而且分布很平均。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:24px;"><strong style="font-size:16px;">5.排查</strong></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">其实这个时候有一个结论，就是服务器其实没有瓶颈，不管是应用服务器还是DB、cache。那问题应该是在程序方面。（性能分析由上至下、由下至上集合分析《java性能优化权威指南》）。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">开始尝试排查依赖服务，下单服务主要依赖商品、促销。cache不是问题，因为本地有一级缓存，而且缓存的过期时间对不上，压测环境的redis和MySQL在一台机器上。所以DB没有问题，基本上redis应该也没啥问题。（这台机器很强悍）还有部分的依赖业务方的接口我已经注释掉了，不会有依赖。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">开始怀疑商品、促销，但是我之前分别对这两个服务进行过压测，这两个服务基本上都是命中cache，QPS基本上接近18000。现在也只好对这两个服务再进行一轮详细的压测。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">结果很遗憾，没啥线索，性能很好。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">开始排查线程池问题，是否有block线程，通过jstack 打印出线程，基本上都是XNIO的condition wait，也没有啥不正常。因为下单服务的其他接口都挺正常的，线程池问题应该不大。下单成功之后有意个hold的场景，就是hold虚拟币、卡券码等等之类的逻辑，这里面使用了fiexd线程池（5个，设置了饱和策略及日志输出。），问题也不大。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">开始排查日志，restful-slow.log，jdbc-slow.log、错误日志等等，一顿cat… grep…wc –l，啥也没有异常。(shit开始冒汗了。。。)</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">只能上大招了，开始尝试注代码，然后压测，逐个尝试，先注释DB、然后线程池hold逻辑、然后发送消息。(无赖之举。。。)</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:24px;"><strong style="font-size:16px;">6.浮出水面</strong></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">等我尝试注释掉发送消息的逻辑时候发现问题不出现了，有希望了。开始进去看代码，没啥逻辑，走的是spring 的RabbitTemplate.convertAndSend 方法。（这是个同步方法，没有任何声明说他是async的。）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">/**发送消息*/ &nbsp; &nbsp;<br> template.convertAndSend(messageConfig.getExchangeName(), routingKey, message, amqpMessage -&gt; {</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">翻了下资料，没啥特殊的使用要求。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">顺便看了下配置文件，发送消息走的是qa环境，这个我知道，因为当时压测环境的rabbitmq一时还没好，而且我们走的是先定义再使用queue的流程，所以如果要用我需要先上去配置好才能使用。当时图省事就先用了，自己压测下来也没啥问题，毕竟MQ的设计吞吐量都很高的，TPS足够我们用的，再加上我之前也压过qa的MQ没啥问题。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">（资源没隔离是因为一些客观原因，有时候压测环境是临时搭建的。用到qa环境的中间件还有codis，但是codis基本是二级缓存，所以问题不大，先过。(回头没辙再来找它。)</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">搞来了qa环境的rabbitmq服务器账号，同时打开rabbtimq管理界面中的dashboard。开始重点关注这台服务器。(top命名打开，P\M看下rabbitmq各项指标。)</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s3.51cto.com/wyfs02/M01/07/41/wKiom1nGB3Pjk_9TAAA7as9u7tw960.png-wh_500x0-wm_3-wmp_4-s_1780163619.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s3.51cto.com/wyfs02/M01/07/41/wKiom1nGB3Pjk_9TAAA7as9u7tw960.png-wh_500x0-wm_3-wmp_4-s_1780163619.png" title="13.png" alt="wKiom1nGB3Pjk_9TAAA7as9u7tw960.png-wh_50" style="border:none;"></a></span></strong><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span>问题一如既往的出现了（我已经能接受了~_~，它要是不出现我才想死尼，已经来回折腾很久了。）很好，rabbtimq dashboard也出现刺尖了。</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><strong><span style="font-size:4px;"><a href="https://s1.51cto.com/wyfs02/M00/A5/F2/wKioL1nGB2GTAmAuAABPPXl-Og4807.png-wh_500x0-wm_3-wmp_4-s_2614483933.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);font-size:16px;"><img src="https://s1.51cto.com/wyfs02/M00/A5/F2/wKioL1nGB2GTAmAuAABPPXl-Og4807.png-wh_500x0-wm_3-wmp_4-s_2614483933.png" title="14.png" alt="wKioL1nGB2GTAmAuAABPPXl-Og4807.png-wh_50" style="border:none;"></a></span></strong></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span>现在基本上是rabbtimq服务器的性能问题了，可能你会觉得问题找到了。但是我还是无解，为什么出现这个问题，为什么时间这么规律，肯定有蹊跷，继续排查，到底是rabbtimq服务器的CPU问题还是disk问题，还是network问题。这次重点看下top。</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s5.51cto.com/wyfs02/M00/07/41/wKiom1nGB8DxOV3FAABT5rV38vg934.png-wh_500x0-wm_3-wmp_4-s_679021239.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s5.51cto.com/wyfs02/M00/07/41/wKiom1nGB8DxOV3FAABT5rV38vg934.png-wh_500x0-wm_3-wmp_4-s_679021239.png" title="15.png" alt="wKiom1nGB8DxOV3FAABT5rV38vg934.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s5.51cto.com/wyfs02/M02/A5/F2/wKioL1nGB4jQXAPWAABI6n5Yzc8762.png-wh_500x0-wm_3-wmp_4-s_2155571118.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s5.51cto.com/wyfs02/M02/A5/F2/wKioL1nGB4jQXAPWAABI6n5Yzc8762.png-wh_500x0-wm_3-wmp_4-s_2155571118.png" title="16.png" alt="wKioL1nGB4jQXAPWAABI6n5Yzc8762.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s5.51cto.com/wyfs02/M01/07/41/wKiom1nGB8HhdJscAAA3HYWYFPs919.png-wh_500x0-wm_3-wmp_4-s_2467264627.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s5.51cto.com/wyfs02/M01/07/41/wKiom1nGB8HhdJscAAA3HYWYFPs919.png-wh_500x0-wm_3-wmp_4-s_2467264627.png" title="17.png" alt="wKiom1nGB8HhdJscAAA3HYWYFPs919.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s4.51cto.com/wyfs02/M00/A5/F2/wKioL1nGB4jDqOsVAABYnDBIhxM201.png-wh_500x0-wm_3-wmp_4-s_3682144246.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s4.51cto.com/wyfs02/M00/A5/F2/wKioL1nGB4jDqOsVAABYnDBIhxM201.png-wh_500x0-wm_3-wmp_4-s_3682144246.png" title="18.png" alt="wKioL1nGB4jDqOsVAABYnDBIhxM201.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">同样问题的出现CPU不正常，而且wait 率比较高。是不是可以这样推理，wait率高了，导致大量线程（子进程）挂起，所以看起来CPU利用率占的就高，也说的通。（先这么假设，来验证它就知道了）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">有一点我可以肯定，根据rabbtimq推送消息原理，一个消息必须发送给所有监听的queue，这些queue必须落盘才算这次publish成功，才会返回。(可以参考《Rabbitmq in Action》)</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-family:arial, helvetica, sans-serif;">这一点可以通过rabbtimq queue的dashboard 中的publish in 和 publish out才查看，publish out 是publish in * queue的数量。</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">也就是说发送消息不是发送给exchange就结束了，我们配置的是topic模式，这个消息类型后面有4个queue，同时这几个queue都有消费者在获取消费消息。但是由于获取消息的方式是pull模式，也不会存在多大的并发获取消息的情况。而且这些queue里面的消息都非常多，当我不压的时候CPU也不高，pull消息的开销对服务器来说network多点，CPU不会太多。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">上图中的cpu wait率有点不正常是因为exchange同步写4个queue且落盘，所以有这个问题。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">基于这个推理，我考虑用一个空exchange来接受消息，根据原理指导，exchange收到消息之后如果发现没有任何queue可以投递就直接丢弃了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">压测下来一切正常，没有出现刺尖情况（真爽~_~），cpuwait 正常0。基本上定位到问题了。是因为rabbtimq本身的负载不够了，性能跟不上所以导致这个问题，这也算加深了rabbtimq的部分原理。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">在基于这个推理，我用了一个不持久化的queue来接受消息，也就是说这个消息是不会持久化的，cpuwait应该是0。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">压测下来一切正常，cpuwait为0（心情无比的顺畅）。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">提交横向第二轮压测。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:24px;"><strong style="font-size:16px;">7.打脸</strong></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">等我在开会的时候，压测兄弟找我，哥哥那个问题又出现了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s3.51cto.com/wyfs02/M02/07/41/wKiom1nGB-Dg4TogAACIxmkv0XA888.png-wh_500x0-wm_3-wmp_4-s_3090777382.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s3.51cto.com/wyfs02/M02/07/41/wKiom1nGB-Dg4TogAACIxmkv0XA888.png-wh_500x0-wm_3-wmp_4-s_3090777382.png" title="19.png" alt="wKiom1nGB-Dg4TogAACIxmkv0XA888.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">（我一时蒙蔽，我擦什么情况。）调整了下，仔细看了下那个刺尖的出现的时间比以前长了。原来大概十五分钟，现在要半小时。由于qa环境机器没有安装压测监控工具，不知道那段时间里发生了什么。（压测执行时间1小时）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">我之前都是30分钟，我尝试用空exchange压了一小时（已是周五晚24:00点左右，洗澡睡觉，明早上看结果)。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">早上起来看没出现那个问题。为什么我用不持久的queue还有问题，而且这个queue是没有任何consumer的，这已经涉及到rabbtimq的底层原理了。rabbtimq用的是erlang语言写的，看源码一时半会估计路都找不到。还是想其他办法。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">又尝试用持久化queue来压测一把，看下到时候啥情况，仔细盯着rabbtimq dashboard，果然又出现了。（计算机问题永远不存在巧合，不确定。）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span><a href="https://s1.51cto.com/wyfs02/M02/07/41/wKiom1nGB_PxQ031AAB7LYk_JkU911.png-wh_500x0-wm_3-wmp_4-s_742278233.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s1.51cto.com/wyfs02/M02/07/41/wKiom1nGB_PxQ031AAB7LYk_JkU911.png-wh_500x0-wm_3-wmp_4-s_742278233.png" title="20.png" alt="wKiom1nGB_PxQ031AAB7LYk_JkU911.png-wh_50" style="border:none;"></a></span><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s1.51cto.com/wyfs02/M00/A5/F2/wKioL1nGB9WS6BbnAABTqNCJDdE550.png-wh_500x0-wm_3-wmp_4-s_312935778.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s1.51cto.com/wyfs02/M00/A5/F2/wKioL1nGB9WS6BbnAABTqNCJDdE550.png-wh_500x0-wm_3-wmp_4-s_312935778.png" title="21.png" alt="wKioL1nGB9WS6BbnAABTqNCJDdE550.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><a href="https://s1.51cto.com/wyfs02/M00/07/41/wKiom1nGCA6g7KBdAAB3DlqOXXw401.png-wh_500x0-wm_3-wmp_4-s_1503962432.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s1.51cto.com/wyfs02/M00/07/41/wKiom1nGCA6g7KBdAAB3DlqOXXw401.png-wh_500x0-wm_3-wmp_4-s_1503962432.png" title="23.png" alt="wKiom1nGCA6g7KBdAAB3DlqOXXw401.png-wh_50" style="border:none;"></a><a href="https://s1.51cto.com/wyfs02/M02/A5/F2/wKioL1nGB9XgII2JAACCGijBsbE199.png-wh_500x0-wm_3-wmp_4-s_3916246933.png" rel="nofollow" style="text-decoration:none;color:rgb(66,133,244);"><img src="https://s1.51cto.com/wyfs02/M02/A5/F2/wKioL1nGB9XgII2JAACCGijBsbE199.png-wh_500x0-wm_3-wmp_4-s_3916246933.png" title="22.png" alt="wKioL1nGB9XgII2JAACCGijBsbE199.png-wh_50" style="border:none;"></a></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">注意看下图中的In memory，shit原来落盘了，哪怕你设置不持久化为了内存利用率，它会将消息落盘，注意看Persistent没有任何消息。消息总量1.1G，内存中只有119MB。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">为什么会有那么大的disk write。由于大量的磁盘写入，导致publish消息的时候block了。具体为什么会这样就要去研究rabbtimq源码了。这些在rabbtimq的配置中应该有策略的，由于不是太熟悉rabbtimq，所以这里就只好先告一段落了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><span style="font-size:24px;"><strong style="font-size:16px;">8.总结</strong></span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">能隔离环境的尽量隔离，排查环境问题最头疼，但是有时候又无法避免。（下篇压测文章分享下，环境问题的排查方式和工具）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);">遇到问题一定要搞清楚根源，就算找不到根源也知道把它限定在某个范围内，比如限制到DB、操作系统等等</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+   <p><font color="#333333">&nbsp;本文转自 王清培 51CTO博客，原文链接：http://blog.51cto.com/wangqingpei557/1967984</font><span style="color:rgb(51,51,51);font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <div>
+    <br>
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;font-size:16px;color:rgb(51,51,51);"><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

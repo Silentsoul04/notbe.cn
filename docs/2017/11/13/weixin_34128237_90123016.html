@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>探索 OpenStack 之（7）：Neutron 深入探索之 Open vSwitch (OVS) + GRE 之 Neutron节点篇 « NotBeCN</title>
+  <meta name="description" content="             0. 测试环境    硬件环境：还是使用四节点OpenStack部署环境，参见&nbsp;http://www.cnblogs.com/sammyliu/p/4190843.html    OpenStack配置：        tenant：三个tenant：demo，tenant-o...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/13/weixin_34128237_90123016.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">探索 OpenStack 之（7）：Neutron 深入探索之 Open vSwitch (OVS) + GRE 之 Neutron节点篇</h1>
+    <p class="post-meta">Nov 13, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">0. 测试环境</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">硬件环境：还是使用四节点OpenStack部署环境，参见&nbsp;<a href="http://www.cnblogs.com/sammyliu/p/4190843.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.cnblogs.com/sammyliu/p/4190843.html</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">OpenStack配置：</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">tenant：三个tenant：demo，tenant-one，tenant-two</li> 
+    <li style="list-style-type:disc;">network：三个tenanet公用public network，每个tenant拥有自己的subnet，都有一个router连接自己的subnet到public net</li> 
+    <li style="list-style-type:disc;">虚机：三个虚机，tenant-one一个，tenant-two两个，都在compute node上</li> 
+   </ul>
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">1. Neutron节点上的网络组件</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">使用&nbsp;<a href="http://www.cnblogs.com/sammyliu/p/4201143.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.cnblogs.com/sammyliu/p/4201143.html&nbsp;</a>中相同的方法，画出Neutron节点上网络组件图：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/060937417811724.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">可见：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; (1). 关于Neutron上的三种Agent的作用：</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">Neutron-OVS-Agent：从OVS-Plugin上接收tunnel和tunnel flow的配置，驱动OVS来建立GRE Tunnel</li> 
+    <li style="list-style-type:disc;">Neutron-DHCP-Agent：为每一个配置了DHCP的网络/子网配置dnsmasq，也负责把Mac地址/IP地址 信息写入dnsmasq dhcp lease 文件</li> 
+    <li style="list-style-type:disc;">Neturon-L3-Agent：设置iptables/routing/NAT表</li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）. Neutorn节点上同样有OVS Tunnel bridge br-tun和OVS Integration bridge br-int，多了br-ex来提供外部网络连接，br-ex和物理网卡eth0绑定。这里出现的一个问题是eth0的IP无法ping通，OVS提供的解决方法如下。究其原因，一块物理以太网卡如果作为 OpenvSwitch bridge 的一部分，则它不能拥有 IP 地址，如果有，也会完全不起作用。如果发生了上述情况，可以将 IP 地址绑定至某 OpenvSwitch “internal” 设备来恢复网络访问功能。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>ifconfig eth0 <span style="color:rgb(128,0,128);line-height:1.5;">0.0</span>.<span style="color:rgb(128,0,128);line-height:1.5;">0.0</span><span style="line-height:1.5;"> 
+ifconfig br</span>-ex <span style="color:rgb(128,0,128);line-height:1.5;">192.168</span>.<span style="color:rgb(128,0,128);line-height:1.5;">1.19</span></pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（3）. Neutron使用Linux network namespace来实现tenant之间的网络隔离。本例中有三个network namespace，每个network namspace包括router，dhcp，interface，routing tables，iptable rules等。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@network:/home/<span style="line-height:1.5;">s1# ip netns
+qdhcp</span>-d24963da-<span style="color:rgb(128,0,128);line-height:1.5;">5221</span>-481e-adf5-<span style="line-height:1.5;">fe033d6e0b4e
+qrouter</span>-e506f8fe-<span style="color:rgb(128,0,128);line-height:1.5;">3260</span>-<span style="color:rgb(128,0,128);line-height:1.5;">4880</span>-bd06-<span style="line-height:1.5;">32246225aeae
+qdhcp</span>-d04a0a06-<span style="color:rgb(128,0,128);line-height:1.5;">7206</span>-4d05-<span style="color:rgb(128,0,128);line-height:1.5;">9432</span>-<span style="line-height:1.5;">3443843bc199
+qrouter</span>-33e2b1bf-04cb-<span style="color:rgb(128,0,128);line-height:1.5;">4811</span>-9c58-<span style="line-height:1.5;">7e03856022c1
+qrouter</span>-9ba04071-f32b-435e-8f44-<span style="line-height:1.5;">e32936568102
+qdhcp</span>-0a4cd030-d951-401a-<span style="color:rgb(128,0,128);line-height:1.5;">8202</span>-937b788bea43</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">（4）. Neutron 为每一个 network 分配一个本地的 VLAN ID，每个 network 分配一个 network namespace，该DHCP 通过一个 tap 连接在 br-int 上，该 tap 的 tag 为该 local VLAN ID</span><span style="line-height:1.5;">。</span><span style="line-height:1.5;">H1/H2/H3端口上分布有不同的VLAN ID。</span>&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>#在存在多个 network 的情况下，br-<span style="color:rgb(0,0,255);line-height:1.5;">int</span> 上DHCP <span style="color:rgb(0,0,255);line-height:1.5;">namespace</span><span style="line-height:1.5;"> 端口的 tag 情况
+       Port </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap0f45d165-9f</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+            tag: </span><span style="color:rgb(128,0,128);line-height:1.5;">5</span><span style="line-height:1.5;">
+            Interface </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap0f45d165-9f</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+                type: </span><span style="color:rgb(0,0,255);line-height:1.5;">internal</span><span style="line-height:1.5;">
+        Port </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap89874f55-97</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+            tag: </span><span style="color:rgb(128,0,128);line-height:1.5;">4</span><span style="line-height:1.5;">
+            Interface </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap89874f55-97</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+                type: </span><span style="color:rgb(0,0,255);line-height:1.5;">internal</span><span style="line-height:1.5;">
+        Port </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap5522533d-fe</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+            tag: </span><span style="color:rgb(128,0,128);line-height:1.5;">3</span><span style="line-height:1.5;">
+            Interface </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap5522533d-fe</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+                type: </span><span style="color:rgb(0,0,255);line-height:1.5;">internal</span><span style="line-height:1.5;">   
+        Port </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap56c9730c-9c</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+            tag: </span><span style="color:rgb(128,0,128);line-height:1.5;">4095</span><span style="line-height:1.5;">
+            Interface </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap56c9730c-9c</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+                type: </span><span style="color:rgb(0,0,255);line-height:1.5;">internal</span><span style="line-height:1.5;">                            
+        Port </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap1fd04a93-09</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+            tag: </span><span style="color:rgb(128,0,128);line-height:1.5;">4095</span><span style="line-height:1.5;">
+            Interface </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap1fd04a93-09</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+                type: </span><span style="color:rgb(0,0,255);line-height:1.5;">internal</span><span style="line-height:1.5;">
+        Port </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap777c1047-ed</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+            tag: </span><span style="color:rgb(128,0,128);line-height:1.5;">2</span><span style="line-height:1.5;">
+            Interface </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap777c1047-ed</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+                type: </span><span style="color:rgb(0,0,255);line-height:1.5;">internal</span><span style="line-height:1.5;">  
+        Port </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap3fca96e0-c6</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+            tag: </span><span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">
+            Interface </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">tap3fca96e0-c6</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+                type: </span><span style="color:rgb(0,0,255);line-height:1.5;">internal</span>  </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    （5）. 不知道为什么br-ex和br-int之间还需要有直接的path。网上看到一些说法，似乎不是所有的环境都需要使用这条路径，比如当前的环境，往外走的traffic都会经过router到br-ex，应该不会直接到从br-int到br-ex。也许是某些配置中需要用到。解释之一是eth0是虚机网络的物理网卡，这么说的话它就是必须要有的。
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    &nbsp; (6). Neutron-OVS-Agent会从Neutron db的表
+    <span style="line-height:1.5;">ml2_gre_endpoints中</span>读取GRE端口的信息。如果其中出现错误的IP地址，Neutron上会出现错误的GRE Tunnel。解决方法是先删除数据库中的错误记录，在重启
+    <span style="line-height:1.5;">neutron-plugin-openvswitch-agent service.</span> 
+   </div> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    &nbsp;
+   </div> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.1 br-tun OpenFlow rules</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">插播Mac地址的基础知识：</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">MAC地址是以太网二层使用的一个48bit（6字节十六进制数）的地址，用来标识设备位置。MAC地址分成两部分，前24位是组织唯一标识符（OUI, Organizationally unique identifier），后24位由厂商自行分配。48bit的MAC地址一般用6字节的十六进制来表示，如XX-XX-XX-XX-XX-XX。</li> 
+    <li style="list-style-type:disc;">广播地址：FF：FF：FF：FF：FF：FF</li> 
+    <li style="list-style-type:disc;">组播地址：MAC组播地址的特征是头8位的最低位是1。例如<span style="line-height:1.5;color:rgb(255,0,0);">01</span>：80：C2：00：00：00是一个组播地址，表示802.1d网桥多播组。网桥就是使用这个地址，相互之间交换配置信息，运行分布式生成树算法，消除网络拓扑结构中的环路。</li> 
+    <li style="list-style-type:disc;">单播地址：单播地址的特征是头8位的最低位为0。每个网卡出厂时被分配唯一一个单播地址，头24位是设备制造厂商的编号，由IEEE(电气与电子工程师协会)分配，后24位是设备厂商为网卡制定的唯一编号。例如8C-70-5A-29-3A-48&nbsp;是单播地址的例子 （8C = 1000110<span style="line-height:1.5;color:rgb(255,0,0);">0</span>）。</li> 
+   </ul>
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <p style="line-height:1.5;">root@network:/home/s1# ovs-ofctl dump-flows br-tun</p> 
+     <p style="line-height:1.5;">NXST_FLOW reply (xid=0x4):</p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=33.236s, table=0, n_packets=0, n_bytes=0, idle_age=33, priority=1,in_port=1 actions=resubmit(,2)&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;">//从H1进来的traffic，到table 2</span></p> 
+     <pre><em>cookie=0x0, duration=32.131s, table=0, n_packets=0, n_bytes=0, idle_age=32, priority=1,in_port=2 actions=resubmit(,3) <span style="color:rgb(0,128,0);line-height:1.5;">//从GRE端口进来的traffic，到table 3</span></em></pre> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=33.178s, table=0, n_packets=6, n_bytes=480, idle_age=24, priority=0 actions=drop</p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=33.121s, table=2, n_packets=0, n_bytes=0, idle_age=33, priority=0,dl_dst=00:00:00:00:00:00/01:00:00:00:00:00 actions=resubmit(,20)&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;">//目的地址为单播地址，到table 20</span></p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=33.066s, table=2, n_packets=0, n_bytes=0, idle_age=33, priority=0,dl_dst=01:00:00:00:00:00/01:00:00:00:00:00 actions=resubmit(,22)&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;">//目的地址为组播（包括广播）地址，到table 22</span></p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=30.614s, table=3, n_packets=0, n_bytes=0, idle_age=30, priority=1,tun_id=0x1 actions=mod_vlan_vid:1,resubmit(,10)&nbsp;<span style="color:rgb(0,128,0);line-height:1.5;">//Tunnel 1的traffic，修改VLAN ID 为 1， 再到 table 10</span></p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=29.291s, table=3, n_packets=0, n_bytes=0, idle_age=29, priority=1,tun_id=0x2 actions=mod_vlan_vid:3,resubmit(,10)&nbsp;<span style="color:rgb(0,128,0);line-height:1.5;">//Tunnel 2的traffic，修改VLAN ID 为 2， 再到 table 10</span></p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=30.241s, table=3, n_packets=0, n_bytes=0, idle_age=30, priority=1,tun_id=0x3 actions=mod_vlan_vid:2,resubmit(,10)&nbsp;<span style="color:rgb(0,128,0);line-height:1.5;">//Tunnel 3的traffic，修改VLAN ID 为 3， 再到 table 10</span></p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=33.001s, table=3, n_packets=0, n_bytes=0, idle_age=33, priority=0 actions=drop</p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=32.932s, table=4, n_packets=0, n_bytes=0, idle_age=32, priority=0 actions=drop</p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=32.874s, table=10, n_packets=0, n_bytes=0, idle_age=32, priority=1 actions=learn(table=20,hard_timeout=300,priority=1,NXM_OF_VLAN_TCI[0..11],NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],load:0-&gt;NXM_OF_VLAN_TCI[],load:NXM_NX_TUN_ID[]-&gt;NXM_NX_TUN_ID[],output:NXM_OF_IN_PORT[]),output:1&nbsp;<span style="color:rgb(0,128,0);line-height:1.5;">//学习一条新的规则添加到table 20，发到端口1，进入br-int</span></p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=32.815s, table=20, n_packets=0, n_bytes=0, idle_age=32, priority=0 actions=resubmit(,22)&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;">//到table 22</span></p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=29.35s, table=22, n_packets=0, n_bytes=0, idle_age=29, dl_vlan=3 actions=strip_vlan,set_tunnel:0x2,output:2</p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=30.293s, table=22, n_packets=0, n_bytes=0, idle_age=30, dl_vlan=2 actions=strip_vlan,set_tunnel:0x3,output:2</p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=30.682s, table=22, n_packets=0, n_bytes=0, idle_age=30, dl_vlan=1 actions=strip_vlan,set_tunnel:0x1,output:2&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;">//以上三条rule，根据目的VLAN ID，修改Tunnel ID，并去掉VLAN ID，发到GRE端口，经过GRE Tunnel到compute node</span></p> 
+     <p style="line-height:1.5;">&nbsp;cookie=0x0, duration=32.752s, table=22, n_packets=0, n_bytes=0, idle_age=32, priority=0 actions=drop</p> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <p style="line-height:1.5;">总之，br-tun会：</p> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">把从GRE端口来的traffic设置相应的VLAN ID，发到br-int</li> 
+     <li style="list-style-type:disc;">把从br-int/patch-int来的traffic，去掉VLAN ID，设置相应的Trunne ID，经过GRE端口H1 发到Compute节点<span style="line-height:1.5;">&nbsp;</span> </li> 
+    </ul>
+   </div> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2. Router Server</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.1 以tenant-one (有一个虚机)的router为例，先看看它的interface （略去lo）</h3> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <pre>root@network:/home/s1# ip netns exec qrouter-33e2b1bf-04cb-<span style="color:rgb(128,0,128);line-height:1.5;">4811</span>-9c58-<span style="line-height:1.5;">7e03856022c1 ip addr
+</span><span style="color:rgb(128,0,128);line-height:1.5;">22</span>: qr-d3d3e235-d4: &lt;BROADCAST,UP,LOWER_UP&gt; mtu <span style="color:rgb(128,0,128);line-height:1.5;">1500</span> qdisc noqueue state UNKNOWN group <span style="line-height:1.5;">default</span><span style="line-height:1.5;">
+    link</span>/ether fa:<span style="color:rgb(128,0,128);line-height:1.5;">16</span>:3e:b3:<span style="color:rgb(128,0,128);line-height:1.5;">06</span><span style="line-height:1.5;">:e8 brd ff:ff:ff:ff:ff:ff
+    inet </span><span style="color:rgb(128,0,128);line-height:1.5;">10.0</span>.<span style="color:rgb(128,0,128);line-height:1.5;">11.1</span>/<span style="color:rgb(128,0,128);line-height:1.5;">24</span> brd <span style="color:rgb(128,0,128);line-height:1.5;">10.0</span>.<span style="color:rgb(128,0,128);line-height:1.5;">11.255</span> scope <span style="line-height:1.5;">global</span> qr-d3d3e235-<span style="line-height:1.5;">d4
+       valid_lft forever preferred_lft forever
+    inet6 fe80::f816:3eff:feb3:6e8</span>/<span style="color:rgb(128,0,128);line-height:1.5;">64</span><span style="line-height:1.5;"> scope link
+       valid_lft forever preferred_lft forever
+</span><span style="color:rgb(128,0,128);line-height:1.5;">26</span>: qg-6c06581b-bd: &lt;BROADCAST,UP,LOWER_UP&gt; mtu <span style="color:rgb(128,0,128);line-height:1.5;">1500</span> qdisc noqueue state UNKNOWN group <span style="line-height:1.5;">default</span><span style="line-height:1.5;">
+    link</span>/ether fa:<span style="color:rgb(128,0,128);line-height:1.5;">16</span>:3e:0b:ac:<span style="color:rgb(128,0,128);line-height:1.5;">82</span><span style="line-height:1.5;"> brd ff:ff:ff:ff:ff:ff
+    inet </span><span style="color:rgb(128,0,128);line-height:1.5;">192.168</span>.<span style="color:rgb(128,0,128);line-height:1.5;">1.114</span>/<span style="color:rgb(128,0,128);line-height:1.5;">24</span> brd <span style="color:rgb(128,0,128);line-height:1.5;">192.168</span>.<span style="color:rgb(128,0,128);line-height:1.5;">1.255</span> scope <span style="line-height:1.5;">global</span> qg-6c06581b-<span style="line-height:1.5;">bd
+       valid_lft forever preferred_lft forever
+    inet </span><span style="color:rgb(128,0,128);line-height:1.5;">192.168</span>.<span style="color:rgb(128,0,128);line-height:1.5;">1.115</span>/<span style="color:rgb(128,0,128);line-height:1.5;">32</span> brd <span style="color:rgb(128,0,128);line-height:1.5;">192.168</span>.<span style="color:rgb(128,0,128);line-height:1.5;">1.115</span> scope <span style="line-height:1.5;">global</span> qg-6c06581b-<span style="line-height:1.5;">bd
+       valid_lft forever preferred_lft forever
+    inet6 fe80::f816:3eff:fe0b:ac82</span>/<span style="color:rgb(128,0,128);line-height:1.5;">64</span><span style="line-height:1.5;"> scope link
+       valid_lft forever preferred_lft forever</span></pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <pre>可见：</pre> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">qg-6c06581b-bd 连接 br-ex</li> 
+     <li style="list-style-type:disc;"><span style="line-height:1.5;">qr-d3d3e235-d4连接br-int</span></li> 
+    </ul>
+    <p style="line-height:1.5;"><span style="line-height:1.5;">再看看它的route规则：</span></p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <p style="line-height:1.5;">root@network:/home/s1# ip netns exec qrouter-33e2b1bf-04cb-4811-9c58-7e03856022c1 route -n</p> 
+     <p style="line-height:1.5;">Kernel IP routing table</p> 
+     <p style="line-height:1.5;">Destination &nbsp; &nbsp; Gateway &nbsp; &nbsp; &nbsp; &nbsp; Genmask &nbsp; &nbsp; &nbsp; &nbsp; Flags Metric Ref&nbsp; &nbsp; Use Iface</p> 
+     <p style="line-height:1.5;">0.0.0.0 &nbsp; &nbsp; &nbsp; &nbsp; 192.168.1.1 &nbsp; &nbsp; 0.0.0.0 &nbsp; &nbsp; &nbsp; &nbsp; UG&nbsp; &nbsp; 0&nbsp; &nbsp; &nbsp; 0&nbsp; &nbsp; &nbsp; &nbsp; 0 qg-6c06581b-bd&nbsp;</p> 
+     <pre><span style="color:rgb(255,0,0);line-height:1.5;">//默认路由，所有目的地址不在本网络中的traffic都要通过 qg-d3657c7f-28 interface 发到外网网关192.168.1.1 </span></pre> 
+     <p style="line-height:1.5;">10.0.11.0 &nbsp; &nbsp; &nbsp; 0.0.0.0 &nbsp; &nbsp; &nbsp; &nbsp; 255.255.255.0 &nbsp; U &nbsp; &nbsp; 0&nbsp; &nbsp; &nbsp; 0&nbsp; &nbsp; &nbsp; &nbsp; 0 qr-d3d3e235-d4&nbsp;</p> 
+     <pre><span style="color:rgb(255,0,0);line-height:1.5;">//目的为本子网内的traffic 经过 <span style="line-height:1.5;">qr-d3d3e235-d4 发到子网网关 10.0.11.1</span></span></pre> 
+     <p style="line-height:1.5;">192.168.1.0 &nbsp; &nbsp; 0.0.0.0 &nbsp; &nbsp; &nbsp; &nbsp; 255.255.255.0 &nbsp; U &nbsp; &nbsp; 0&nbsp; &nbsp; &nbsp; 0&nbsp; &nbsp; &nbsp; &nbsp; 0 qg-6c06581b-bd</p> 
+     <pre><span style="color:rgb(255,0,0);line-height:1.5;">//目的为 192.168.1.0/24 的traffic通过 <span style="line-height:1.5;">qg-6c06581b-bd 发到网关192.168.1.100</span></span></pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.2 Neutorn Floating IP 实现原理</h3> 
+    <p style="line-height:1.5;">Router namespace中的 netfilter NAT 表负责 Neutron Floating IP 的实现。下面是tenant-two （有两个虚机）的router的NAT表：</p> 
+    <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);color:rgb(0,0,0);font-family:'Courier New';font-size:12px;"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+     <div>
+      root@network:/home/s1# ip netns exec qrouter-e506f8fe-3260-4880-bd06-32246225aeae&nbsp; iptables -t nat -S
+      <br> -P PREROUTING ACCEPT
+      <br> -P INPUT ACCEPT
+      <br> -P OUTPUT ACCEPT
+      <br> -P POSTROUTING ACCEPT
+      <br> -N neutron-l3-agent-OUTPUT
+      <br> -N neutron-l3-agent-POSTROUTING
+      <br> -N neutron-l3-agent-PREROUTING
+      <br> -N neutron-l3-agent-float-snat
+      <br> -N neutron-l3-agent-snat
+      <br> -N neutron-postrouting-bottom
+      <br> -A PREROUTING -j neutron-l3-agent-PREROUTING
+      <br> -A OUTPUT -j neutron-l3-agent-OUTPUT
+      <br> -A POSTROUTING -j neutron-l3-agent-POSTROUTING
+      <br> -A POSTROUTING -j neutron-postrouting-bottom
+      <br>
+      <span style="color:rgb(255,0,0);line-height:1.5;">-A neutron-l3-agent-OUTPUT -d 192.168.1.118/32 -j DNAT --to-destination 10.0.22.200</span>
+      <br>
+      <span style="color:rgb(255,0,0);line-height:1.5;">-A neutron-l3-agent-OUTPUT -d 192.168.1.117/32 -j DNAT --to-destination 10.0.22.202</span>
+      <br> -A neutron-l3-agent-POSTROUTING ! -i qg-cba7b139-04 ! -o qg-cba7b139-04 -m conntrack ! --ctstate DNAT -j ACCEPT
+      <br> -A neutron-l3-agent-PREROUTING -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 9697
+      <br>
+      <span style="color:rgb(255,0,0);line-height:1.5;">-A neutron-l3-agent-PREROUTING -d 192.168.1.118/32 -j DNAT --to-destination 10.0.22.200</span>
+      <br>
+      <span style="color:rgb(255,0,0);line-height:1.5;">-A neutron-l3-agent-PREROUTING -d 192.168.1.117/32 -j DNAT --to-destination 10.0.22.202</span>
+      <br>
+      <span style="color:rgb(255,0,0);line-height:1.5;">-A neutron-l3-agent-float-snat -s 10.0.22.200/32 -j SNAT --to-source 192.168.1.118</span>
+      <br>
+      <span style="color:rgb(255,0,0);line-height:1.5;">-A neutron-l3-agent-float-snat -s 10.0.22.202/32 -j SNAT --to-source 192.168.1.117</span>
+      <br> -A neutron-l3-agent-snat -j neutron-l3-agent-float-snat
+      <br> -A neutron-l3-agent-snat -s 10.0.22.0/24 -j SNAT --to-source 192.168.1.116
+      <br> -A neutron-postrouting-bottom -j neutron-l3-agent-snat
+     </div> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+     </div> 
+    </div> 
+    <ul style="list-style:none;font-size:12px;">
+     <li style="list-style-type:disc;">SNAT （源地址转换） 负责把从虚机来的traffic的 IP源地址 即fixed ip 10.0.22.200/202 转化为 floating ip 192.168.1.118/117，然后该traffic被路由到 br-ex 再到外网</li> 
+     <li style="list-style-type:disc;">DNAT （目的地址转换）负责把从外网来的traffic的 IP目的地址 即floating ip 192.168.1.118/117 转化为虚机所使用的 fixed ip 10.0.22.200/202，然后该traffic被路由到br-int 再到虚机</li> 
+    </ul>
+   </div> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">&nbsp;3. DHCP Server</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">每一个有DHCP的网络都在Neutron节点上有一个DHCP服务，每个DHCP Server都是一个运行在一个network namespace中的dnsmasq进程。&nbsp;dnsmasq是一个用在Linux上的轻型DNS和DHCP服务，具体见&nbsp;<a href="http://www.thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">http://www.thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html</a>.</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.1 每个DHCP在neutron host上都有一个process，其ID是qdhcp-&lt;net id&gt;:</h3> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <p style="line-height:1.5;">nobody&nbsp; &nbsp; 2049 &nbsp; &nbsp; 1&nbsp; 0 06:43 ?&nbsp; &nbsp; &nbsp; &nbsp; 00:00:00&nbsp;<span class="s1" style="line-height:1.5;font-size:12px;"><strong>dns</strong>masq --no-hosts --no-resolv --strict-order --bind-interfaces&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;">--interface=tap15865c29-9b</span>&nbsp;--except-interface=lo --pid-file=/var/lib/neutron/dhcp/d24963da-5221-481e-adf5-fe033d6e0b4e/pid --dhcp-hostsfile=/var/lib/neutron/dhcp/d24963da-5221-481e-adf5-fe033d6e0b4e/host --addn-hosts=/var/lib/neutron/dhcp/d24963da-5221-481e-adf5-fe033d6e0b4e/addn_hosts --dhcp-optsfile=/var/lib/neutron/dhcp/d24963da-5221-481e-adf5-fe033d6e0b4e/opts --leasefile-ro --dhcp-range=set:tag0,10.0.22.0,static,86400s --dhcp-lease-max=256 --conf-file= --domain=openstacklocal</span></p> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;font-size:1.17em;">说明：</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;font-size:1.17em;">1. &nbsp;</span>--interface=tap15865c29-9b： 该process绑定/监听一个TAP设备，即上图中的 H3</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">2. &nbsp;--dhcp-hostsfile=/var/lib/neutron/dhcp/d24963da-5221-481e-adf5-fe033d6e0b4e/host：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">root@network:/home/s1# cat /var/lib/neutron/dhcp/d24963da-5221-481e-adf5-fe033d6e0b4e/host</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">fa:16:3e:4d:6b:44,host-10-0-22-201.openstacklocal,10.0.22.201&nbsp;<span style="line-height:1.5;color:rgb(255,0,0);">//本子网DHCP Server自己（M3）的Mac地址以及IP</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">fa:16:3e:79:07:5e,host-10-0-22-1.openstacklocal,10.0.22.1&nbsp;<span style="line-height:1.5;color:rgb(255,0,0);">//本子网Router Server （ N3） 的Mac地址，名字和 IP</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">fa:16:3e:bf:69:36,host-10-0-22-200.openstacklocal,10.0.22.200&nbsp;<span style="line-height:1.5;color:rgb(255,0,0);">//本子网虚机1的Mac地址，虚机的主机名字，虚机的fixed IP</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">fa:16:3e:19:65:62,host-10-0-22-202.openstacklocal,10.0.22.202&nbsp;<span style="line-height:1.5;color:rgb(255,0,0);">//本子网虚机2的Mac地址，虚机的主机名字，虚机的fixed IP</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">fa:16:3e:88:99:c1,host-10-0-0-116.openstacklocal,10.0.0.116&nbsp;<span style="line-height:1.5;color:rgb(255,0,0);">//子网1的DHCP Server （H1）的Mac地址，以及IP地址。那么这里为什么没H2的相应信息？</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;font-size:1.17em;">在虚机的创建过程中，Neutron会把这些信息（应该是从neutron db中拿到一个可用的IP地址）写到该文件中，这样，当虚机使用Mac地址向DHCP Server查询IP地址的时候，dnsmasq会读取该文件把IP地址返回给它。</span></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;"><span style="line-height:1.5;font-size:1.17em;">3.2 DHCP的interface （省去lo）</span></h3> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <p style="line-height:1.5;">root@network:/home/s1# ip netns exec qdhcp-0a4cd030-d951-401a-8202-937b788bea43 ip addr</p> 
+    <p style="line-height:1.5;"><strong><span style="line-height:1.5;font-size:12px;">18: tap6356d532-32: &lt;BROADCAST,UP,LOWER_UP&gt; mtu 1500 qdisc noqueue state UNKNOWN group default&nbsp;</span></strong></p> 
+    <p style="line-height:1.5;">&nbsp; &nbsp; link/ether&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;font-size:12px;">fa:16:3e:88:99:c1</span>&nbsp;brd ff:ff:ff:ff:ff:ff</p> 
+    <p style="line-height:1.5;">&nbsp; &nbsp; inet&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;font-size:12px;">10.0.0.116/24</span>&nbsp;brd 10.0.0.255 scope global tap6356d532-32</p> 
+    <p style="line-height:1.5;">&nbsp;&nbsp; &nbsp; &nbsp; valid_lft forever preferred_lft forever</p> 
+    <p style="line-height:1.5;">&nbsp; &nbsp; inet6 fe80::f816:3eff:fe88:99c1/64 scope link&nbsp;</p> 
+    <p style="line-height:1.5;">&nbsp;&nbsp; &nbsp; &nbsp; valid_lft forever preferred_lft forever</p> 
+    <p style="line-height:1.5;">&nbsp;</p> 
+    <p style="line-height:1.5;"><strong>root@network:/home/s1# ip netns exec qdhcp-d04a0a06-7206-4d05-9432-3443843bc199 ip addr</strong></p> 
+    <p style="line-height:1.5;"><span style="line-height:1.5;font-size:12px;">17: tap8dfd0bd8-45: &lt;BROADCAST,UP,LOWER_UP&gt; mtu 1500 qdisc noqueue state UNKNOWN group default&nbsp;</span></p> 
+    <p style="line-height:1.5;">&nbsp; &nbsp; link/ether&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;font-size:12px;">fa:16:3e:82:fd:26</span>&nbsp;brd ff:ff:ff:ff:ff:ff</p> 
+    <p style="line-height:1.5;">&nbsp; &nbsp; inet&nbsp;<span style="color:rgb(255,0,0);line-height:1.5;font-size:12px;">10.0.11.101/24</span>&nbsp;brd 10.0.11.255 scope global tap8dfd0bd8-45</p> 
+    <p style="line-height:1.5;">&nbsp;&nbsp; &nbsp; &nbsp; valid_lft forever preferred_lft forever</p> 
+    <p style="line-height:1.5;">&nbsp; &nbsp; inet6 fe80::f816:3eff:fe82:fd26/64 scope link&nbsp;</p> 
+    <p style="line-height:1.5;">&nbsp;&nbsp; &nbsp; &nbsp; valid_lft forever preferred_lft forever</p> 
+    <pre><br><strong>root@network:/home/s1# ip netns exec qdhcp-d24963da-<span style="color:rgb(128,0,128);line-height:1.5;">5221</span>-481e-adf5-<span style="line-height:1.5;">fe033d6e0b4e ip addr </span></strong><span style="color:rgb(128,0,128);line-height:1.5;">19</span>: tap15865c29-9b: &lt;BROADCAST,UP,LOWER_UP&gt; mtu <span style="color:rgb(128,0,128);line-height:1.5;">1500</span> qdisc noqueue state UNKNOWN group <span style="line-height:1.5;">default</span><span style="line-height:1.5;">
+    link</span>/ether <span style="color:rgb(255,0,0);line-height:1.5;">fa:16:3e:4d:6b:44</span><span style="line-height:1.5;"> brd ff:ff:ff:ff:ff:ff
+    inet </span><span style="color:rgb(255,0,0);line-height:1.5;">10.0.22.201/24</span> brd <span style="color:rgb(128,0,128);line-height:1.5;">10.0</span>.<span style="color:rgb(128,0,128);line-height:1.5;">22.255</span> scope <span style="line-height:1.5;">global</span> tap15865c29-<span style="line-height:1.5;">9b
+       valid_lft forever preferred_lft forever
+    inet6 fe80::f816:3eff:fe4d:6b44</span>/<span style="color:rgb(128,0,128);line-height:1.5;">64</span><span style="line-height:1.5;"> scope link
+       valid_lft forever preferred_lft forever</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">DHCP使用fix ip range的第一个可用IP地址做为其IP地址。它的interface的MAC地址&nbsp;fa:16:3e:4d:6b:44 会出现在br-tun的rules里面。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.3 虚机向DHCP Server申请/查询Fixed IP</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">具体步骤在下一篇博文中详细描述。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="line-height:1.5;"><font color="#4b4b4b"><span style="font-size:15px;">&nbsp; &nbsp;本文转自SammyLiu博客园博客，原文链接：http://www.cnblogs.com/sammyliu/p/4201721.html</span></font><span style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <div>
+    <br>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

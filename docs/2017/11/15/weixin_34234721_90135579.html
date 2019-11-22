@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>SEAndroid安全机制中的进程安全上下文关联分析 « NotBeCN</title>
+  <meta name="description" content="             &nbsp; &nbsp; &nbsp; &nbsp;前面一篇文章分析了文件安全上下文关联过程。可是在SEAndroid中，除了要给文件关联安全上下文外，还须要给进程关联安全上下文。由于仅仅有当进程和文件都关联安全上下文之后，SEAndroid安全策略才干发挥作用。也就是说，当一个进程试...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_34234721_90135579.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">SEAndroid安全机制中的进程安全上下文关联分析</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;前面一篇文章分析了文件安全上下文关联过程。可是在SEAndroid中，除了要给文件关联安全上下文外，还须要给进程关联安全上下文。由于仅仅有当进程和文件都关联安全上下文之后，SEAndroid安全策略才干发挥作用。也就是说，当一个进程试图訪问一个文件时。SEAndroid会将进程和文件的安全上下文提取出来。依据安全策略规则。决定是否同意訪问。本文就具体分析SEAndroid的进程安全上下文的关联过程。</p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(204,0,0);">老罗的新浪微博：<a href="http://weibo.com/shengyangluo" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">http://weibo.com/shengyangluo</a>。欢迎关注！</span><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 在传统的Linux系统中。每个应用程序都相应有一个可运行文件。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">在这样的情况下，我们就能够在安全策略中设定一个规则：当一个可运行文件载入到一个进程中运行时，该进程的安全上下文就设置为指定的值。也就是说。我们能够在安全策略中静态地为进程设置安全上下文。然而。这样的进程安全上下文设置方式不适合于Android系统中的应用程序进程。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">从前面<a href="http://blog.csdn.net/luoshengyang/article/details/6768304" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">Android系统进程Zygote启动过程的源码分析</a>和<a href="http://blog.csdn.net/luoshengyang/article/details/6747696" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">Android应用程序进程启动过程的源码分析</a>这两篇文章能够知道，Android系统中的应用程序进程都是由Zygote进程fork出来。这些应用程序进程被Zygote进程fork出来之后。不像传统Linux的应用程序进程一样，会通过exec系统调用将相应的可运行文件载入起来运行。这样就会使得Zygote进程及其创建的全部应用程序进程相应的可运行文件均为/system/bin/app_process。由于我们却须要给不同的应用程序设置不同的安全上下文，以便给它们赋予不同的安全权限，因此我们须要在应用程序进程创建出来之后动态地设置它的安全上下文。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 依据上面的描写叙述，我们就总结出。在SEAndroid安全机制中。进程的安全上下文设置分为静态和动态两种方式，如图1所看到的：</p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140723013307393?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvTHVvc2hlbmd5YW5n/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">图1 SEAndroid安全机制中的进程安全上下文关联方式</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 接下来。我们就分别描写叙述这两种进程安全上下文设置方式。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1. 为独立进程静态地设置安全上下文</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Android系统的第一个进程是init，其他全部的进程都是由init进程直接或者间接fork出来的。我们在前面<a href="http://blog.csdn.net/luoshengyang/article/details/37749383" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">SEAndroid安全机制中的文件安全上下文关联分析</a>一篇文章提到。一个新创建的文件的安全上下文在默认情况下来自于其父文件夹。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">与此相似。一个新创建的进程的安全上下文在默认情况下来自于其父进程。因此，我们就先看看系统中的第一个进程init的安全上下文是怎样设置的。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 查看init进程的启动脚本system/core/rootdir/init.rc，能够看到下面的内容：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">on early-init
+    ......
+
+    # Set the security context for the init process.
+    # This should occur before anything else (e.g. ueventd) is started.
+    setcon u:r:init:s0
+
+    ......</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这段脚本的意思是init进程启动之后就立即调用函数setcon将自己的安全上下文设置为“u:r:init:s0”，即将init进程的domain指定为init。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 接下来我们再看看init这个domain的定义，在external/sepolicy/init.te文件里：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain"># init switches to init domain (via init.rc).
+type init, domain;
+permissive init;
+# init is unconfined.
+unconfined_domain(init)
+tmpfs_domain(init)
+# add a rule to handle unlabelled mounts
+allow init unlabeled:filesystem mount;</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第一个type语句将domain设置为init的属性。这意味着init是用来描写叙述进程的安全上下文的。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第二个permissive语句指定当domain为init的进程违反SEAndroid安全策略訪问资源时，仅仅进行日志输出，而不是拒绝运行。由于这里列出来的内容是来自Android 4.3的，而Android 4.3开启的是Permissive的SEAndroid模式，因此这里会看到这样的一个permissive语句。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第三个unconfined_domain语句是一个宏，定义在external/sepolicy/te_macros文件里，用来指定init是一个不受限制的domain。即它能够訪问系统中的大部分资源。它的定义例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">#####################################
+# unconfined_domain(domain)
+# Allow the specified domain to do anything.
+#
+define(`unconfined_domain', `
+typeattribute $1 mlstrustedsubject;
+typeattribute $1 unconfineddomain;
+')</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第四个tmpfs_domain语句也是定义在external/sepolicy/te_macros文件里的一个宏，用来指定当domain为init的进程在type为tmpfs的文件夹中创建文件时。将新创建的文件的type设置为init_tmpfs，而且同意domain为init的进程对它们进行读和运行。它的定义例如以下所看到的：</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">#####################################
+# tmpfs_domain(domain)
+# Define and allow access to a unique type for
+# this domain when creating tmpfs / shmem / ashmem files.
+define(`tmpfs_domain', `
+type $1_tmpfs, file_type;
+type_transition $1 tmpfs:file $1_tmpfs;
+# Map with PROT_EXEC.
+allow $1 $1_tmpfs:file { read execute execmod };
+')</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第5个allow语句同意domain为init的进程mount未指定安全上下文的文件系统时，将其安全上下文设置为unlabeled。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 上面列出的脚本就指明了init进程的安全上下文。以及它所具有的SEAndroid权限。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">接下来我们就再来看看负责创建应用程序进程的Zygote进程的安全上下文的设置过程。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Zygote进程是由init进程创建的。它的启动命令定义在文件system/core/rootdir/init.rc中，例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
+    class main
+    socket zygote stream 660 root system
+    onrestart write /sys/android_power/request_state wake
+    onrestart write /sys/power/state on
+    onrestart restart media
+    onrestart restart netd</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这意味着Zygote进程相应的可运行文件为/system/bin/app_process。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 通过检查external/sepolicy/file_contexts，我们能够发现文件/system/bin/app_process的安全上下文为“u:object_r:zygote_exec:s0”。例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">/system/bin/app_process u:object_r:zygote_exec:s0</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 也就是说。文件/system/bin/app_process的type为zygote_exec。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 在external/sepolicy/zygote.te文件里。定义了一个名称为zygote的domain，以及名称为zygote_exec的type。例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain"># zygote
+type zygote, domain;
+type zygote_exec, exec_type, file_type;
+
+permissive zygote;
+init_daemon_domain(zygote)
+unconfined_domain(zygote)</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第一个type语句将domain设置为zygote的属性，表明zygote是用来描写叙述进程的安全上下文的。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第二个type语句将exec_type和file_type设置为zygote_exec的属性。表明zygote_exec是用来描写叙述可运行文件的安全上下文的。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第三个permissive语句相同是表明当domain为zygote的进程违反SEAndroid安全策略訪问资源时，仅仅进行日志输出。而不是拒绝运行。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第四个init_daemon_domain语句是一个宏，定义在文件external/sepolicy/te_macros中。用来设置zygote这个domain的权限。它的定义例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">#####################################
+# init_daemon_domain(domain)
+# Set up a transition from init to the daemon domain
+# upon executing its binary.
+define(`init_daemon_domain', `
+domain_auto_trans(init, $1_exec, $1)
+tmpfs_domain($1)
+')</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 宏init_daemon_domain由另外两个宏tmpfs_domain和domain_auto_trans组成。宏tmpfs_domain的作用在前面已经分析过了，接下来我们重点关注宏domain_auto_trans的定义。也是在文件external/sepolicy/te_macros中。例如以下所看到的：</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">#####################################
+# domain_auto_trans(olddomain, type, newdomain)
+# Automatically transition from olddomain to newdomain
+# upon executing a file labeled with type.
+#
+define(`domain_auto_trans', `
+# Allow the necessary permissions.
+domain_trans($1,$2,$3)
+# Make the transition occur by default.
+type_transition $1 $2:process $3;
+')</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第二个type_transition语句指定当一个domain为init的进程创建一个子进程运行一个type为zygote_exec的文件时，将该子进程的domain设置为zygote。而不是继承父进程的domain。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第一个domain_trans语句是一个宏，也是定义在external/sepolicy/te_macros中，用来同意进程的domain从init改动为zygote。它的定义例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">#####################################
+# domain_trans(olddomain, type, newdomain)
+# Allow a transition from olddomain to newdomain
+# upon executing a file labeled with type.
+# This only allows the transition; it does not
+# cause it to occur automatically - use domain_auto_trans
+# if that is what you want.
+#
+define(`domain_trans', `
+# Old domain may exec the file and transition to the new domain.
+allow $1 $2:file { getattr open read execute };
+allow $1 $3:process transition;
+# New domain is entered by executing the file.
+allow $3 $2:file { entrypoint read execute };
+# New domain can send SIGCHLD to its caller.
+allow $3 $1:process sigchld;
+# Enable AT_SECURE, i.e. libc secure mode.
+dontaudit $1 $3:process noatsecure;
+# XXX dontaudit candidate but requires further study.
+allow $1 $3:process { siginh rlimitinh };
+')</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 当中，最重要的是下面两个allow语句：</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">allow $1 $3:process transition;
+allow $3 $2:file { entrypoint read execute };
+</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第一个allow语句同意domain为init的进程将domain改动为zygote。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 第二个allow语句同意type为zygote_exec的可运行文件作为进入zygote这个domain的入口点。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 概括来说，在external/sepolicy/zygote.te文件里，通过init_daemon_domain指明了Zygote进程的domain为zygote。我们能够从Zygote进程的创建过程来理解这些安全策略。首先， Zygote进程是由init进程fork出来的。在fork出来的时候。Zygote进程的domain来自于父进程init的domain，即此时Zygote进程的domain为init。接下来。刚刚fork出来的Zygote进程会通过系统接口exec将文件/system/bin/app_process载入进来运行。由于上面提到的allow和type_transition规则的存在，使得文件/system/bin/app_process被exec到刚刚fork出来的Zygote进程的时候。它的domain自己主动地从init转换为zygote。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">这样我们就能够给init进程和Zygote进程设置不同的domain，以便能够给它们赋予不同的SEAndroid安全权限。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 回到external/sepolicy/zygote.te文件里。最后一个unconfined_domain语句相同是将zygote这个domain设置为一个不受限的domain。以便它能够訪问系统中的大部分资源。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp;&nbsp;&nbsp; 这样。我们就以init和Zygote进程的安全上下文设置过程为例。说明了那些相应有不同可运行文件的进程的安全上下文的关联过程了。这些进程的安全上下文的设置方式与传统的Linux系统的应用程序进程的设置方式是一致的。接下来我们就再来分析Android系统的应用程序进程的安全上下文的关联过程。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp;&nbsp;&nbsp; 2. 为应用程序进程设置安全上下文</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp;&nbsp;&nbsp; 从前面<a href="http://blog.csdn.net/luoshengyang/article/details/6747696" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">Android应用程序进程启动过程的源码分析</a>一篇文章能够知道。应用程序进程是由ActivityManagerService请求Zygote进程创建的。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">ActivityManagerService在请求Zygote进程创建应用程序进程的时候，会传递非常多參数，比如应用程序在安装时分配到的uid和gid。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">添加了SEAndroid安全机制之后。ActivityManagerService传递给Zygote进程的參数包括了一个seinfo。这个seinfo与我们在前面<a href="http://blog.csdn.net/luoshengyang/article/details/37749383" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">SEAndroid安全机制中的文件安全上下文关联分析</a>一文中介绍的seinfo是一样的。只是它的作用是用来设置应用程序进程的安全上下文。而不是设置应用程序数据文件的安全上下文。接下来我们就分析应用程序进程的安全上下文设置过程。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 从前面<a href="http://blog.csdn.net/luoshengyang/article/details/6747696" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">Android应用程序进程启动过程的源码分析</a>一文的Step 1能够知道，当ActivityMangerService须要创建应用程序进程的时候，就会调用ActivityMangerService类的成员函数startProcessLocked，它的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java">public final class ActivityManagerService  extends ActivityManagerNative
+        implements Watchdog.Monitor, BatteryStatsImpl.BatteryCallback {
+    ......
+
+    private final void startProcessLocked(ProcessRecord app,
+            String hostingType, String hostingNameStr) {
+        ......
+
+        try {
+            ......
+
+            // Start the process.  It will either succeed and return a result containing
+            // the PID of the new process, or else throw a RuntimeException.
+            Process.ProcessStartResult startResult = Process.start("android.app.ActivityThread",
+                    app.processName, uid, uid, gids, debugFlags, mountExternal,
+                    app.info.targetSdkVersion, app.info.seinfo, null);
+
+            ......
+        } catch (RuntimeException e) {
+            ......
+        }
+    }
+
+    ......
+}</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个函数定义在文件frameworks/base/services/java/com/android/server/am/ActivityManagerService.java中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 參数app指向的是一个ProcessRecord对象，用来描写叙述正在创建的应用程序进程。当中。它的成员变量info指向的是一个ApplicationInfo对象。从前面<a href="http://blog.csdn.net/luoshengyang/article/details/37749383" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">SEAndroid安全机制中的文件安全上下文关联分析</a>一文能够知道。这个ApplicationInfo对象有一个类型为String的成员变量seinfo，是在应用程序安装的时候通过解析文件mac_permissions.xml获得的。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ActivityManagerService类的成员函数startProcessLocked通过调用Process类的静态成员函数start来创建应用程序进程，当中就包括了要创建的应用程序进程的各种參数。从前面<a href="http://blog.csdn.net/luoshengyang/article/details/6747696" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">Android应用程序进程启动过程的源码分析</a>一篇文章能够知道，这些參数会通过Socket IPC传递给Zygote进程。最后。Zygote进程会通过调用ZygoteConnection类的成员函数runOnce来运行创建应用程序进程的工作。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ZygoteConnection类的成员函数runOnce的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java">class ZygoteConnection {
+    ......
+
+    boolean runOnce() throws ZygoteInit.MethodAndArgsCaller {
+        ......
+
+        try {
+            args = readArgumentList();
+            ......
+        } catch (IOException ex) {
+            ......
+        }
+
+        ......
+
+        try {
+            parsedArgs = new Arguments(args);
+            ......
+
+            pid = Zygote.forkAndSpecialize(parsedArgs.uid, parsedArgs.gid, parsedArgs.gids,
+                    parsedArgs.debugFlags, rlimits, parsedArgs.mountExternal, parsedArgs.seInfo,
+                    parsedArgs.niceName);
+        } catch (IOException ex) {
+            ......
+        } catch (ErrnoException ex) {
+            ......
+        } catch (IllegalArgumentException ex) {
+            ......
+        } catch (ZygoteSecurityException ex) {
+            ......
+        }
+
+	......
+    }
+
+    ......
+}</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个函数定义在文件frameworks/base/core/java/com/android/internal/os/ZygoteConnection.java中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ZygoteConnection类的成员函数runOnce首先是通过调用另外一个成员函数readArgumentList读取ActivityManagerService发送过来的应用程序进程创建參数args。接着再创建一个Arguments对象来解析该參数。解析后得到的參数传递给Zygote类的静态成员函数forkAndSpecialize，以便后者能够运行创建应用程序进程的工作。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Zygote类的静态成员函数forkAndSpecialize的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java">public class Zygote {
+    ......
+
+    public static int forkAndSpecialize(int uid, int gid, int[] gids, int debugFlags,
+            int[][] rlimits, int mountExternal, String seInfo, String niceName) {
+        preFork();
+        int pid = nativeForkAndSpecialize(
+                uid, gid, gids, debugFlags, rlimits, mountExternal, seInfo, niceName);
+        postFork();
+        return pid;
+    }
+
+    native public static int nativeForkAndSpecialize(int uid, int gid, int[] gids, int debugFlags,
+            int[][] rlimits, int mountExternal, String seInfo, String niceName);
+
+    ......
+}</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个函数定义在文件libcore/dalvik/src/main/java/dalvik/system/Zygote.java中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Zygote类的静态成员函数forkAndSpecialize的实现非常easy，它通过调用另外一个JNI函数nativeForkAndSpecialize来运行创建应用程序进程的工作。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Zygote类的JNI函数nativeForkAndSpecialize的由C++层的函数Dalvik_dalvik_system_Zygote_forkAndSpecialize来实现，例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">static void Dalvik_dalvik_system_Zygote_forkAndSpecialize(const u4* args,
+    JValue* pResult)
+{
+    pid_t pid;
+
+    pid = forkAndSpecializeCommon(args, false);
+
+    RETURN_INT(pid);
+}</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个函数定义在文件dalvik/vm/native/dalvik_system_Zygote.cpp中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 注意，Zygote类的JNI函数nativeForkAndSpecialize在调用的过程中，传递进来的參数都被保存在函数Dalvik_dalvik_system_Zygote_forkAndSpecialize的參数args指向的一块内存中。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数Dalvik_dalvik_system_Zygote_forkAndSpecialize通过调用另外一个函数forkAndSpecializeCommon来运行创建应用程序进程的工作。它的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">static pid_t forkAndSpecializeCommon(const u4* args, bool isSystemServer)
+{
+    pid_t pid;
+
+    uid_t uid = (uid_t) args[0];
+    gid_t gid = (gid_t) args[1];
+    ......
+    char *seInfo = NULL;
+    char *niceName = NULL;
+
+    if (isSystemServer) {
+        ......
+    } else {
+        ......
+        StringObject* seInfoObj = (StringObject*)args[6];
+        if (seInfoObj) {
+            seInfo = dvmCreateCstrFromString(seInfoObj);
+            ......
+        }
+        StringObject* niceNameObj = (StringObject*)args[7];
+        if (niceNameObj) {
+            niceName = dvmCreateCstrFromString(niceNameObj);
+            ......
+        }
+
+        ......
+    }
+
+    ......
+
+    pid = fork();
+
+    if (pid == 0) {
+        ......
+
+       err = setSELinuxContext(uid, isSystemServer, seInfo, niceName);
+       ......
+    }
+
+    ...... 
+
+    return pid;
+}</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个函数定义在文件dalvik/vm/native/dalvik_system_Zygote.cpp中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 參数isSystemServer表示当前创建的是System Server进程还是应用程序进程。在我们这个场景中，它的值等于false，表示要创建的是应用程序进程。从參数args指向的内存能够获得各种各样的參数，比如uid、gid、seinfo和nice name等。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 获得了要创建的进程的各种參数之后。函数forkAndSpecializeCommon就通过系统调用fork创建出了一个子进程。注意，这时候函数forkAndSpecializeCommon是在Zygote进程中运行的。因此，这里创建出来的子进程的安全上下文继承于Zygote进程。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">从前面的分析能够知道，这个安全上下文为“u:r:zygote:s0”。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 假设这时候我们什么也不做的话。那么创建出来的应用程序进程的安全上下文就会一直被设置为“u:r:zygote:s0”。这样会使得应用程序具有Zygote进程一样的SEAndroid安全权限。这是不同意的。因此。接下来须要通过调用函数setSELinuxContext来改动刚刚创建出来的应用程序进程的安全上下文。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数setSELinuxContext的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">static int setSELinuxContext(uid_t uid, bool isSystemServer,
+                             const char *seInfo, const char *niceName)
+{
+#ifdef HAVE_ANDROID_OS
+    return selinux_android_setcontext(uid, isSystemServer, seInfo, niceName);
+#else
+    return 0;
+#endif
+}</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个函数定义在文件dalvik/vm/native/dalvik_system_Zygote.cpp中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数setSELinuxContext的实现非常easy，它通过调用libselinux提供的函数selinux_android_setcontext来设置刚刚创建出来的应用程序进程的安全上下文。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数selinux_android_setcontext的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">int selinux_android_setcontext(uid_t uid,
+                   int isSystemServer,
+                   const char *seinfo,
+                   const char *pkgname)
+{
+    char *orig_ctx_str = NULL, *ctx_str;
+    context_t ctx = NULL;
+    int rc;
+
+    if (is_selinux_enabled() &lt;= 0)
+        return 0;
+
+    __selinux_once(once, seapp_context_init);
+
+    rc = getcon(&amp;ctx_str);
+    ......
+
+    ctx = context_new(ctx_str);
+    orig_ctx_str = ctx_str;
+    ......
+
+    rc = seapp_context_lookup(SEAPP_DOMAIN, uid, isSystemServer, seinfo, pkgname, ctx);
+    ......
+
+    ctx_str = context_str(ctx);
+    ......
+
+    rc = security_check_context(ctx_str);
+    ......
+
+    if (strcmp(ctx_str, orig_ctx_str)) {
+        rc = setcon(ctx_str);
+        ......
+    }
+
+    rc = 0;
+out:
+    ......
+    return rc;
+
+    ......
+}</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp; 这个函数定义在文件external/libselinux/src/android.c中。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 參数isSystemServer表示当前创建的是System Server进程还是应用程序进程。在我们这个场景中，它的值等于false，表示要创建的是应用程序进程。从參数args指向的内存能够获得各种各样的參数，比如uid、gid、seinfo和nice name等。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 获得了要创建的进程的各种參数之后，函数forkAndSpecializeCommon就通过系统调用fork创建出了一个子进程。注意，这时候函数forkAndSpecializeCommon是在Zygote进程中运行的。因此。这里创建出来的子进程的安全上下文来继承于Zygote进程。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">从前面的分析能够知道，这个安全上下文为“u:r:zygote:s0”。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 假设这时候我们什么也不做的话，那么创建出来的应用程序进程的安全上下文就会一直被设置为“u:r:zygote:s0”，这样会使得应用程序具有Zygote进程一样的SEAndroid安全权限。这是不同意的，因此。接下来须要通过调用函数setSELinuxContext来改动刚刚创建出来的应用程序进程的安全上下文。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数setSELinuxContext的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">static int setSELinuxContext(uid_t uid, bool isSystemServer,
+                             const char *seInfo, const char *niceName)
+{
+#ifdef HAVE_ANDROID_OS
+    return selinux_android_setcontext(uid, isSystemServer, seInfo, niceName);
+#else
+    return 0;
+#endif
+}</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个函数定义在文件dalvik/vm/native/dalvik_system_Zygote.cpp中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数setSELinuxContext的实现非常easy。它通过调用libselinux提供的函数selinux_android_setcontext来设置刚刚创建出来的应用程序进程的安全上下文。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数selinux_android_setcontext的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">int selinux_android_setcontext(uid_t uid,
+                   int isSystemServer,
+                   const char *seinfo,
+                   const char *pkgname)
+{
+    char *orig_ctx_str = NULL, *ctx_str;
+    context_t ctx = NULL;
+    int rc;
+
+    if (is_selinux_enabled() &lt;= 0)
+        return 0;
+
+    __selinux_once(once, seapp_context_init);
+
+    rc = getcon(&amp;ctx_str);
+    ......
+
+    ctx = context_new(ctx_str);
+    orig_ctx_str = ctx_str;
+    ......
+
+    rc = seapp_context_lookup(SEAPP_DOMAIN, uid, isSystemServer, seinfo, pkgname, ctx);
+    ......
+
+    ctx_str = context_str(ctx);
+    ......
+
+    rc = security_check_context(ctx_str);
+    ......
+
+    if (strcmp(ctx_str, orig_ctx_str)) {
+        rc = setcon(ctx_str);
+        ......
+    }
+
+    rc = 0;
+out:
+    ......
+    return rc;
+
+    ......
+}</code></pre> 
+   <br style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数selinux_android_setcontext的运行步骤例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; A. 调用函数is_selinux_enabled检查系统是否启用了SELinux。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">假设没有启用的话，那就什么也不用做就返回。否则的话，就继续往下运行。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; B. 调用函数seapp_context_init读取和解析我们在前面<a href="http://blog.csdn.net/luoshengyang/article/details/37613135" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">SEAndroid安全机制框架分析</a>一文提到的seapp_contexts文件。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">注意，__selinux_once是一个宏，它实际上是利用了pthread库提供的函数pthread_once保证函数seapp_context_init在进程内有且仅有一次会被调用到，适合用来运行初始化工作。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; C. 调用函数getcon获得当前进程的安全上下文。保存在变量ctx_str。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; D. 调用函数context_new在原来的安全上下文的基础上创建一个新的安全上下文ctx，以便能够获得原来安全上下文的SELinux用户、角色和安全级别等信息。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; E. 调用函数seapp_context_lookup依据传进来的參数seinfo在seapp_contexts文件里找到相应的Domain。而且将其设置为新的安全上下文ctr的Domain。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; F. 调用函数context_str获得新创建的安全上下文的字符串描写叙述，以便能够调用函数security_check_context来验证新创建的安全上下文的正确性。假设不对的话。就出错返回。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">否则的话，继续往下运行。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; G. 比較原来的安全上下文和新创建的安全上下文。假设不一致的话。那么就调用函数setcon将当前进程的安全上下文设置为新创建的安全上下文。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 在上面的几个步骤中，最重要的就是B、E和G三步。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">当中，B和E这两步在前面<a href="http://blog.csdn.net/luoshengyang/article/details/37749383" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">SEAndroid安全机制中的文件安全上下文关联分析</a>一文中已经分析过了，因此接下来我们主要分析函数setcon的实现。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数setcon通过下面三个宏来定义，例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">#define setselfattr_def(fn, attr) \
+    int set##fn(const security_context_t c) \
+    { \
+        return setprocattrcon(c, 0, #attr); \
+    }
+
+#define all_selfattr_def(fn, attr) \
+    getselfattr_def(fn, attr)    \
+    setselfattr_def(fn, attr)
+
+all_selfattr_def(con, current)</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这三个宏定义在文件external/libselinux/src/procattr.c中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 从这三个宏的定义就能够看出。函数setcon终于通过调用另外一个函数setprocattrcon来设置当前进程的安全上下文，当中。第一个參数c描写叙述的是要设置的安全上下文，第三个參数的值等于"current"。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数setprocattrcon的实现例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">static int setprocattrcon(security_context_t context,
+              pid_t pid, const char *attr)
+{
+    char *path;
+    int fd, rc;
+    pid_t tid;
+    ssize_t ret;
+    int errno_hold;
+
+    if (pid &gt; 0)
+        rc = asprintf(&amp;path, "/proc/%d/attr/%s", pid, attr);
+    else {
+        tid = gettid();
+        rc = asprintf(&amp;path, "/proc/self/task/%d/attr/%s", tid, attr);
+    }
+    if (rc &lt; 0)
+        return -1;
+
+    fd = open(path, O_RDWR);
+    free(path);
+    if (fd &lt; 0)
+        return -1;
+    if (context)
+        do {
+            ret = write(fd, context, strlen(context) + 1);
+        } while (ret &lt; 0 &amp;&amp; errno == EINTR);
+    else
+        do {
+            ret = write(fd, NULL, 0);   /* clear */
+        } while (ret &lt; 0 &amp;&amp; errno == EINTR);
+    errno_hold = errno;
+    close(fd);
+    errno = errno_hold;
+    if (ret &lt; 0)
+        return -1;
+    else
+        return 0;
+}</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个函数定义在文件external/libselinux/src/procattr.c中。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 函数setcon实际上就是打开proc文件系统中的/proc/self/task/&lt;tid&gt;/attr/current文件，而且向其写入參数context所描写叙述的安全上下文。当中，&lt;tid&gt;描写叙述的是当前线程的id。向/proc/self/task/&lt;tid&gt;/attr/current文件写入安全上下文实际上就是将进程的安全上下文保存在内核中用来描写叙述进程的结构体task_struct中。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">这与文件的安全上下文是保存在文件扩展属性中是不一样的。<br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这样，新创建的应用程序进程的安全上下文就设置好了。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这个系列的文章学习到这里，我们就分析完毕进程和文件的安全上下文的设置过程了。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">回顾前面<a href="http://blog.csdn.net/luoshengyang/article/details/35392905" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">SEAndroid安全机制简要介绍和学习计划</a>一文，我们提出了一个问题，怎样将设备上的/system/bin/gpsd文件下载到PC上来。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 通过经常使用的adb pull命令是无法将开启了SEAndroid安全机制的设备上将/system/bin/gpsd文件读取下来的。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">这是由于adb pull命令是通过运行在设备上的adbd守护进程来读取/system/bin/gpsd文件。而且传回来给PC的，而守护进程adbd没有权限读取文件/system/bin/gpsd。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 我们通过ls -Z和ps -Z命令能够来观察/system/bin/gpsd文件和adbd守护进程的安全上下文：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">./adb shell ls -Z /system/bin/gpsd  
+-rwxr-xr-x root     shell             u:object_r:gpsd_exec:s0 gpsd  
+$ ./adb shell ps -Z | grep 'adbd'  
+u:r:adbd:s0                    shell     1978  1     /sbin/adbd </code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这意味着domain为adbd的进程无法读取type为gpsd_exec的文件。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 实际上我们是能够在PC上通过运行adb shell cat命令来读取设备上的/system/bin/gpsd文件的，例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">./adb shell cat /system/bin/gpsd &gt; ./gpsd</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 上面的命令实际上是通过shell启动cat程序，而且通过这个cat进程来读取文件/system/bin/gpsd的内容。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 从前面的分析能够知道。cat进程的安全上下文来自于其父进程shell。因此，我们通过在设备上运行ps -Z命令观察一下shell进程的安全上下文：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">$ ps -Z 
+u:r:shell:s0                   shell     23486 1978  /system/bin/sh</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这意味着domain为shell的进程能够读取type为gpsd_exec的文件。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 在SEAndroid中。shell和adbd这两个domain的差别是什么呢？我们能够通过一个称为apol的工具做一个简要分析。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 首先我们要从设备上读取一个sepolicy文件，例如以下所看到的：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-plain">./adb pull /sepolicy  ./sepolicy
+2372 KB/s (558936 bytes in 0.230s)</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 读取出来的sepolicy文件实际上描写叙述的就是设备使用的SEAndroid安全策略，我们能够通过apol工具对它进行分析。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 接着我们打开apol工具，而且从File菜单中点击Open项打开上述sepolicy文件。切换到Policy Components选项卡，在左则的Types列表中找到adbd项，双击查看它的属性，如图2所看到的：</p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140725012759907?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvTHVvc2hlbmd5YW5n/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">图2 adbd属性</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这意味着adbd这个domain具有两个属性domain和mlstrustedsubject。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 用相同的方法查看domain为shell的属性。如图3所看到的：</p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140725013051944?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvTHVvc2hlbmd5YW5n/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">图3 shell属性</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这意味着shell这个domain有三个属性appdomain、domain和mlstructedsubject。与adbd相比。shell多了一个appdomain属性。这又意味着具有appdomain属性的domain具有读取type为gpsd_exec的文件的权限。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 再用相同的方法查看type为gpsd_exec的属性。如图4所看到的：</p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140725013855841?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvTHVvc2hlbmd5YW5n/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">图4 gpsd_exec属性</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这意味着gpsd_exec这个type有两个属性exec_type和file_type。<br></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 我们将apol工具切换到Policy Rules选项卡，在Source type/attribute和Target type/attribute编辑框中分别填入“appdomain”和“gpsd_exec”。检查具有appdomain属性的进程能否够读取具有exec_file属性的文件的权限。点击右边的New Searchbutton。结果如图5所看到的：</p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140725014314921?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvTHVvc2hlbmd5YW5n/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p align="center" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">图5 具有属性appdomain的进程对具有属性exec_type的文件的SEAndroid安全权限</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这意味着具有属性appdomain的进程对具有属性exec_type的文件具有读取的权限。也就是说，设备上的shell进程能读取/system/bin/gpsd文件的内容，是由于它的domain具有appdomain属性。而设备上的adbd进程的domain是不具有这个属性的。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 通过回答前面<a href="http://blog.csdn.net/luoshengyang/article/details/35392905" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">SEAndroid安全机制简要介绍和学习计划</a>一文提出的问题。我们介绍了怎样通过apol工具来分析设备上的SEAndroid安全策略。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">这是一个非常实用的工具，希望大家能够掌握。在接下来的两篇文章中，我们就继续学习SEAndroid安全机制是怎样支持Android系统的属性訪问以及Binder IPC调用的，敬请关注！</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">很多其他信息能够关注老罗的新浪微博：<a href="http://weibo.com/shengyangluo" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">http://weibo.com/shengyangluo</a>。</p> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div> 
+    <div>
+     本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/5082374.html，如需转载请自行联系原作者
+    </div> 
+   </div> 
+   <div>
+    <br>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

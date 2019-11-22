@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>消息服务框架（MSF）应用实例之分布式事务三阶段提交协议的实现 « NotBeCN</title>
+  <meta name="description" content="             一，分布式事务简介    在当前互联网，大数据和人工智能的热潮中，传统企业也受到这一潮流的冲击，纷纷响应国家“互联网+”的战略号召，企业开始将越来越多的应用从公司内网迁移到云端和移动端，或者将之前孤立的IT系统联网整合，或者将原来厚重的企业应用拆分重组，独立成一个个轻量级的应用对外提供服...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/16/weixin_33904756_90119707.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">消息服务框架（MSF）应用实例之分布式事务三阶段提交协议的实现</h1>
+    <p class="post-meta">Nov 16, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">一，分布式事务简介</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在当前互联网，大数据和人工智能的热潮中，传统企业也受到这一潮流的冲击，纷纷响应国家“互联网+”的战略号召，企业开始将越来越多的应用从公司内网迁移到云端和移动端，或者将之前孤立的IT系统联网整合，或者将原来厚重的企业应用拆分重组，独立成一个个轻量级的应用对外提供服务，这对传统的业务处理的数据一致性，带来了严重的挑战，我们已经身处一个分布式的计算环境，分布式事务的需求越来越普遍。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">举一个例子，某行业电商网站经过几年的发展，业务数据累积越来越多，查询越来越慢。经过内部评审分析，认为系统的瓶颈就是数据库压力过大，如果要解决这问题，必须分表分库，比如将订单，商品，用户分布到不同的数据库去，但这样随之带来一个问题，原来处理业务的时候使用的是本地事务，分库后就需要使用分布式事务了。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">那么应该如何实现分布式事务呢？</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这里我们需要明确一点，并非数据库天然就是分布式的在执行操作的，事务都是在一个数据库实例上进行的，如果要执行一个分布式事务的操作，那么就需要协调多个分散的数据库上执行的事务操作。所以在分布式事务中，有2个概念：</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">l&nbsp; Distributed Transaction Resource Owner （简称DTR）：</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">n&nbsp; --<strong>分布式事务资源服务器</strong>，拥有事务资源的服务器，如绝大部分关系数据库，一些消息队列，或者一些能够执行类似事务操作的应用。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">l&nbsp; Distributed Transaction Coordinate Controller （简称DTC）：</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">n&nbsp; --<strong>分布式事务协调控制器</strong>，它协调控制分布式事务环境中的事务资源服务器，发送指令给它们并且处理事务资源服务器返回的结果。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">二，分布式事务的实现层面</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在分布式事务的具体实现层面，可以在数据库层直接实现，也可以在应用服务层面实现。如果是在应用服务层面实现，本质上它也可能是调用本地的数据库事务。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">下面是DTR与DTC的拓扑关系图：</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">基于关系数据库层面接口实现的分布式事务</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229225349085-832890410.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">基于数据库的分布式事务，一般在应用程序的数据层调用系统的分布式事务组件，应用程序执行本地事务的时候，先选举出一个分布式事务协调器，然后协调器来协调各个本地事务的执行。由于是在应用程序的数据层进行的调用，所以它对远程数据库的操作是在本地进程内的。如果你的应用部署在多台服务器上，那么在每一台操作数据库的应用服务器上都要安装运行分布式事务协调器服务。</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">基于应用服务层面实现的分布式事务</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229225423351-1514472994.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">基于应用服务层面的分布式事务，是在应用服务层面进行的事务控制，它同样会有分布式事务协调控制器，和事务资源服务器。与基于数据库层面的分布式事务不同，事务的类型支持更广泛，比如消息队列访问，文件写入或者具有补偿操作的业务应用程序，都可以成为事务资源，并且不要求这些事务资源本身支持分布式事务。举个例子，事务资源A是Windows上的SQLSERVER数据库，事务B是Linux上的MySQL数据库，这时候事务B就没法使用Windows上的事务协调控制器MSDTC了。而基于服务层面的分布式事务，可以解决这个问题。</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">三，分布式事务的2阶段提交协议（2PC）</h1> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">第一阶段（1PC）：提交投票阶段</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">协调器向事务资源服务器发出 CanCommit 的是否可以提交事务的询问指令，事务资源服务器收到此指令后，准备好要提交的事务资源，再向协调器回复 YES；如果没有准备好，比如执行事务中的操作出现了错误，应该回复 NO.如果某DTR无法回复，DTC也认为该DTR的结果是NO．</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229225447273-961295251.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">第一阶段，全部回复为YES，代表各个事务资源服务器均已经准备好了提交。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229225527726-284278746.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">第一阶段，事务资源服务器DTR-2回复为NO，如果DTC等待DTR-2超过设定时间都没有得到回复，或者DTR-2与DTC断开了连接，也认为DTR-2的结果是NO</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">第二阶段（2 PC）：提交或终止阶段</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">协调器统计所有事物资源服务器的回复数量，如果全部回复为YES，则向所有事物资源服务器发出Commit指令，否则，发出Abort指令。资源服务器收到指令后，执行相应的操作。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229225602929-998206664.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229225618742-2029747969.png" alt="" style="border:0px;"></p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">二阶段提交事务的数据不一致问题</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在第二阶段（2PC），如果DTR没有收到DTC的指令改怎么办呢？</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">如果等到超时都没有收到DTC的指令，DTR处于“可以提交”或者“不可以提交”的双重状态，也就是提交状态不可知。假设DTR1没有收到DTC的提交指令或者撤销指令，DTR1可以假设DTR2也不会收到指令，因为此时大概率是DTC宕机或者网络整体不良，那么DTR1最佳的做法是回滚事务。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">但是，如果仅仅是DTR1受网络影响没有收到提交指令，而DTR2收到了提交指令，那么DTR1回滚事务，DTR2提交了事务，整个分布式事务就是失败的，数据发生了不一致。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">因此，2阶段提交的分布式事务不是高可靠的分布式事务控制模型，需要在事务资源的提交环节做更多的验证，这便是3阶段提交的分布式事务。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">不过，对于大部分系统，2阶段提交的分布式事务已经能够满足应用了，因为通常情况下，都是基于数据库应用层实现的分布式事务，并且各个事务资源节点都在同一个局域网内，发生网络不稳定的概率非常小，并且现在不少数据库都会做高可靠性的数据库集群，发生宕机的可能性也非常小，最终出现数据不一致的概率也就非常小了。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">如果系统的应用环境不能满足上面说的任何一个条件，即分布式事务的控制不是在数据库应用层，子系统不在一个局域网，或者数据库没有做高可靠的集群，并且对于系统的事务一致性要求非常高，那么应该使用3阶段提交协议来实现分布式事务。</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">四，分布式事务的3阶段提交协议（3PC）</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">对2阶段提交协议的分析我们发现，2PC的事务提交阶段状态是不确定的，整个事务容易出现不一致的情况。所以，我们队2PC的提交阶段，进一步拆分成“预提交”阶段和提交阶段，增加事务提交状态的确认过程。</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">第一阶段（1PC）：提交投票阶段</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">协调器向事务资源服务器发出 CanCommit 的是否可以提交事务的询问指令，事务资源服务器收到此指令后，准备好要提交的事务资源，再向协调器回复 YES；如果没有准备好，比如执行事务中的操作出现了错误，应该回复 NO.如果某DTR无法回复，DTC也认为该DTR的结果是NO．</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">该阶段的处理过程跟2阶段提交协议的第一阶段是一样的，处理流程图参考前面，此略。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">第二阶段（2 PC）：预提交或终止阶段</h2> 
+   <h3 style="font-size:16px;border-bottom:1px solid rgb(170,170,170);line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">预提交事务</h3> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">协调器（DTC）统计所有事务资源服务器（DTR）的回复数量，如果全部回复为YES，则向所有事物资源服务器发出PreCommit指令，否则，发出Abort指令。资源服务器收到指令后，执行相应的操作。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229225659804-1668514275.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在第二阶段，如果DTR收到PreCommit指令，则向DTC回复ACK消息，表示收到了指令，准备提交，接着，进入第三阶段，等待最终的提交指令。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h3 style="font-size:16px;border-bottom:1px solid rgb(170,170,170);line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">终止事务</h3> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229230015898-710850973.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在第二阶段，如果在第一阶段有节点异常，DTC发出撤销指令，DTR收到了撤销指令，那么它执行回滚本地事务的操作。如果由于网络原因，某个DTR一直等到超时都没有收到PreCommit指令，那么它执行Abort撤销指令，回滚本地事务。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">第三阶段（3 PC）：提交或终止阶段</h2> 
+   <h3 style="font-size:16px;border-bottom:1px solid rgb(170,170,170);line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">提交分布式事务</h3> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">协调器（DTC）统计所有事务资源服务器（DTR）在第二阶段的回复数量，如果全部回复为ACK，则向所有DTR发出Commit指令。DTR收到指令后，执行事务提交操作，并返回Commit Done消息，DTC收到此消息，结束整个分布式事务过程。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;<img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229230147820-2074775999.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h3 style="font-size:16px;border-bottom:1px solid rgb(170,170,170);line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">回滚分布式事务</h3> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">协调器（DTC）统计所有事务资源服务器（DTR）在第二阶段的回复数量，如果未收到全部回复为ACK，则它认为有节点可能出现了网络故障，此节点没有收到PreCommit指令或者虽然收到了却没有回复ACK，测试DTC应该向所有DTR节点发出撤销指令。各DTR收到撤销指令后，回滚本地事务，然后回复消息，DTC完成本次事务过程。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;<img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229230231257-1165180646.png" alt="" style="border:0px;"></p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">三阶段提交事务也并不完美</h2> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">考察第3阶段的提交分布式事务的情况，DTR1收到了Commit指令，但是由于网络原因，DTR2没有收到此指令，那么DTR2是提交本地事务还是回滚本地事务？</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">站在DTR2的角度，它在本阶段可能收到Commit指令，也可能收到Abort指令，那么它既可以提交本地事务也可以回滚本地事务，两种操作是不确定的，所以，3阶段提交协议，仍然不是完美的，不能百分之百保证数据的最终一致性。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">既然3阶段提交协议仍然有不确定性，那么相比2阶段提交协议有什么意义呢？</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">仔细想下，DTR2已经进入第3阶段了，那么肯定其它DTR都进入了第3阶段，而进入第3阶段的前提是各DTR节点都收到过PreCommit指令，都是已经准备好提交只等最后的提交指令了，否则各节点在第二阶段应该收到撤销指令，不会再进入第三阶段。既然各DTR节点都进入了第三阶段，它们都准备好提交事务了，那么即使没有收到最终的Commit指令，DTC发出Commit指令也是大概率的。所以，从概率上讲，如果在第三阶段，DTR没有收到Abort撤销指令，也没收到Commit提交指令，那么它默认应该指向Commit指令，提交本地事务。相比第二阶段某DTR节点没有收到指令而认为应该收到PreCommit指令的概率，要大得多。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">关于第三阶段没有收到指令而应该大概率执行Commit指令的问题，理解起来可能有点困难，我给同事讲的时候大部分同事也难以理解，可能是我表述的问题，大家有更好的解释方式，欢迎交流，不胜感激！</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;">5，实现 3阶段提交的分布式事务</h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">本文将介绍一个基于服务层面而不是数据库层面的，3阶段提交的分布式事务中间件的设计开发过程。这个中间件必须解决下面几个问题：</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">l&nbsp; 通信组件—分布式事务控制器（DTC），分布式事务资源服务器（DTR）都是独立的服务，这些服务部署在不同的通信节点，它们之间需要进行可靠的网络通信，因此通信组件是基础；</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">l&nbsp; 数据访问组件—提供基础的数据读写操作，并且能够操作本地事务。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">l&nbsp; 服务组件—将DTC，DTR的功能代码编写为相应的SOA服务组件</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">l&nbsp; 关系数据库—具有事务功能的关系数据库，可以是嵌入式的本地数据库，比如SQLite,也可以是服务器客户机模式的网络数据库,比如SQLSERVER。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">各组件的关系图如下：</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="http://images2017.cnblogs.com/blog/114517/201712/114517-20171229230318351-1741662556.png" alt="" style="border:0px;"></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">PDF.NET的消息服务框架（MSF）具有开发服务组件基础的接口和一套消息通信组件，同时还有一个服务容器，可以承载本篇文章说的分布式事务控制器DTC，分布式事务资源服务DTR这些服务应用，同时PDF.NET还有一个强大的数据访问组件 PDF.NET SOD，下一篇文章，我们将来具体讨论基于MSF和SOD的3阶段分布式事务应用的实现过程，它的源码已经发布在&nbsp;<a href="https://github.com/bluedoctor/MSF-DistTransExample" rel="nofollow" style="color:rgb(29,88,209);text-decoration:none;">https://github.com/bluedoctor/MSF-DistTransExample</a>&nbsp;，大家可以先睹为快。</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p><font><span style="font-size:15px;">&nbsp; &nbsp; 本文转自深蓝医生博客园博客，原文链接：http://www.cnblogs.com/bluedoctor/p/8146604.html</span></font><span style="font-size:15px;font-family:Verdana, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <div>
+    <br>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

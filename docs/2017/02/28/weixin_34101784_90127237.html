@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>.NET中的内存管理，GC机制，内存释放过程 « NotBeCN</title>
+  <meta name="description" content="                 引言      作为一个.NET程序员，我们知道托管代码的内存管理是自动的。.NET可以保证我们的托管程序在结束时全部释放，这为我们编程人员省去了不少麻烦，我们可以连想都不想怎么去管理内存，反正.NET自己会保证一切。好吧，有道理，有一定的道理。问题是，当我们用到非托管资源时.N...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/02/28/weixin_34101784_90127237.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">.NET中的内存管理，GC机制，内存释放过程</h1>
+    <p class="post-meta">Feb 28, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="blogpost-body">
+    引言 
+    <br> 作为一个.NET程序员，我们知道托管代码的内存管理是自动的。.NET可以保证我们的托管程序在结束时全部释放，这为我们编程人员省去了不少麻烦，我们可以连想都不想怎么去管理内存，反正.NET自己会保证一切。好吧，有道理，有一定的道理。问题是，当我们用到非托管资源时.NET就不能自动管理了。这是因为非托管代码不受CLR（Common&nbsp;Language&nbsp;Runtime）控制，超出CLR的管理范围。那么如何处理这些非托管资源呢，.NET又是如何管理并释放托管资源的呢？ 
+    <br>
+    <br> -------------------------------------------------------------------------------- 
+    <br>
+    <br> 自动内存管理和GC 
+    <br> 在原始程序中堆的内存分配是这样的：找到第一个有足够空间的内存地址（没被占用的），然后将该内存分配。当程序不再需要此内存中的信息时程序员需要手动将此内存释放。堆的内存是公用的，也就是说所有进程都有可能覆盖另一进程的内存内容，这就是为什么很多设计不当的程序甚至会让操作系统本身都down掉。我们有时碰到的程序莫名其妙的死掉了（随机现象），也是因为内存管理不当引起的（可能由于本身程序的内存问题或是外来程序造成的）。另一个常见的实例就是大家经常看到的游戏的Trainer，他们通过直接修改游戏的内存达到"无敌"的效果。明白了这些我们可以想象如果内存地址被用混乱了的话会多么危险，我们也可以想象为什么C++程序员（某些）一提起指针就头疼的原因了。另外，如果程序中的内存不被程序员手动释放的话那么这个内存就不会被重新分配，直到电脑重起为止，也就是我们所说的内存泄漏。所说的这些是在非托管代码中，CLR通过AppDomain实现代码间的隔离避免了这些内存管理问题，也就是说一个AppDomain在一般情况下不能读/写另一AppDomain的内存。托管内存释放就由GC（Garbage&nbsp;Collector）来负责。我们要进一步讲述的就是这个GC，但是在这之前要先讲一下托管代码中内存的分配，托管堆中内存的分配是顺序的，也就是说一个挨着一个的分配。这样内存分配的速度就要比原始程序高，但是高出的速度会被GC找回去。为什么？看过GC的工作方式后你就会知道答案了。 
+    <br>
+    <br> -------------------------------------------------------------------------------- 
+    <br>
+    <br> GC工作方式 
+    <br> 首先我们要知道托管代码中的对象什么时候回收我们管不了（除非用GC.Collect强迫GC回收，这不推荐，后面会说明为什么）。GC会在它"高兴"的时候执行一次回收（这有许多原因，比如内存不够用时。这样做是为了提高内存分配、回收的效率）。那么如果我们用Destructor呢？同样不行，因为.NET中Destructor的概念已经不存在了，它变成了Finalizer，这会在后面讲到。目前请记住一个对象只有在没有任何引用的情况下才能够被回收。为了说明这一点请看下面这一段代码： 
+    <br> [C#] 
+    <br> object&nbsp;objA&nbsp;=&nbsp;new&nbsp;object(); 
+    <br> object&nbsp;objB&nbsp;=&nbsp;objA; 
+    <br> objA&nbsp;=&nbsp;null; 
+    <br> //&nbsp;强迫回收。 
+    <br> GC.Collect(); 
+    <br> objB.ToString();&nbsp; 
+    <br>
+    <br> [Visual&nbsp;Basic] 
+    <br> Dim&nbsp;objA&nbsp;As&nbsp;New&nbsp;Object() 
+    <br> Dim&nbsp;objB&nbsp;As&nbsp;Object&nbsp;=&nbsp;objA 
+    <br> objA&nbsp;=&nbsp;Nothing 
+    <br> '&nbsp;强迫回收。&nbsp; 
+    <br> GC.Collect() 
+    <br> objB.ToString()&nbsp; 
+    <br> 这里objA引用的对象并没有被回收，因为这个对象还有另一个引用，ObjB。 
+    <br> 对象在没有任何引用后就有条件被回收了。当GC回收时，它会做以下几步： 
+    <br> 确定对象没有任何引用。&nbsp; 
+    <br> 检查对象是否在Finalizer表上有记录。&nbsp; 
+    <br> 如果在Finalizer表上有记录，那么将记录移到另外的一张表上，在这里我们叫它Finalizer2。&nbsp; 
+    <br> 如果不在Finalizer2表上有记录，那么释放内存。&nbsp; 
+    <br> 在Finalizer2表上的对象的Finalizer会在另外一个low&nbsp;priority的线程上执行后从表上删除。当对象被创建时GC会检查对象是否有Finalizer，如果有就会在Finalizer表中添加纪录。我们这里所说的记录其实就是指针。如果仔细看这几个步骤，我们就会发现有Finalizer的对象第一次不会被回收，也就是，有Finalizer的对象要一次以上的Collect操作才会被回收，这样就要慢一步，所以作者推荐除非是绝对需要不要创建Finalizer。为了证明GC确实这么工作而不是作者胡说，我们将在对象的复活一章中给出一个示例，眼见为实，耳听为虚嘛！^_^ 
+    <br> GC为了提高回收的效率使用了Generation的概念，原理是这样的，第一次回收之前创建的对象属于Generation&nbsp;0，之后，每次回收时这个Generation的号码就会向后挪一，也就是说，第二次回收时原来的Generation&nbsp;0变成了Generation&nbsp;1，而在第一次回收后和第二次回收前创建的对象将属于Generation&nbsp;0。GC会先试着在属于Generation&nbsp;0的对象中回收，因为这些是最新的，所以最有可能会被回收，比如一些函数中的局部变量在退出函数时就没有引用了（可被回收）。如果在Generation&nbsp;0中回收了足够的内存，那么GC就不会再接着回收了，如果回收的还不够，那么GC就试着在Generation&nbsp;1中回收，如果还不够就在Generation&nbsp;2中回收，以此类推。Generation也有个最大限制，根据Framework版本而定，可以用GC.MaxGeneration获得。在回收了内存之后GC会重新排整内存，让数据间没有空格，这样是因为CLR顺序分配内存，所以内存之间不能有空着的内存。现在我们知道每次回收时都会浪费一定的CPU时间，这就是我说的一般不要手动GC.Collect的原因（除非你也像我一样，写一些有关GC的示例！^_^）。 
+    <br>
+    <br> -------------------------------------------------------------------------------- 
+    <br>
+    <br> Destructor的没落，Finalizer的诞生 
+    <br> 对于Visual&nbsp;Basic程序员来说这是个新概念，所以前一部分讲述将着重对C++程序员。我们知道在C++中当对象被删除时（delete），Destructor中的代码会马上执行来做一些内存释放工作（或其他）。不过在.NET中由于GC的特殊工作方式，Destructor并不实际存在，事实上，当我们用Destructor的语法时，编译器会自动将它写为protected&nbsp;virtual&nbsp;void&nbsp;Finalize()，这个方法就是我所说的Finalizer。就象它的名字所说，它用来结束某些事物，不是用来摧毁（Destruct）事物。在Visual&nbsp;Basic中它就是以Finalize方法的形式出现的，所以Visual&nbsp;Basic程序员就不用操心了。C#程序员得用Destructor的语法写Finalizer，不过千万不要弄混了，.NET中已经没有Destructor了。C++中我们可以准确的知道什么时候会执行Destructor，不过在.NET中我们不能知道什么时候会执行Finalizer，因为它是在第一次对象回收操作后才执行的。我们也不能知道Finalizer的执行顺序，也就是说同样的情况下，A的Finalize可能先被执行，B的后执行，也可能A的后执行而B的先执行。也就是说，在Finalizer中我们的代码不能有任何的时间逻辑。下面我们以计算一个类有多少个实例为示例，指出Finalizer与Destructor的不同并指出在Finalizer中有时间逻辑的错误，因为Visual&nbsp;Basic中没有过Destructor所以示例只有C#版： 
+    <br> [C#] 
+    <br> public&nbsp;class&nbsp;CountObject&nbsp;{ 
+    <br> &nbsp;&nbsp;public&nbsp;static&nbsp;int&nbsp;Count&nbsp;=&nbsp;0; 
+    <br>
+    <br> &nbsp;&nbsp;public&nbsp;CountObject()&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Count++; 
+    <br> &nbsp;&nbsp;} 
+    <br>
+    <br> &nbsp;&nbsp;~CountObject()&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Count--; 
+    <br> &nbsp;&nbsp;} 
+    <br> } 
+    <br>
+    <br> static&nbsp;void&nbsp;Main()&nbsp;{ 
+    <br> &nbsp;&nbsp;CountObject&nbsp;obj; 
+    <br> &nbsp;&nbsp;for&nbsp;(int&nbsp;i&nbsp;=&nbsp;0;&nbsp;i&nbsp;&lt;&nbsp;5;&nbsp;i++)&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;obj&nbsp;=&nbsp;null;&nbsp;//&nbsp;这一步多余，这么写只是为了更清晰些！ 
+    <br> &nbsp;&nbsp;&nbsp;obj&nbsp;=&nbsp;new&nbsp;CountObject(); 
+    <br> &nbsp;&nbsp;} 
+    <br>
+    <br> &nbsp;&nbsp;//&nbsp;Count不会是1，因为Finalizer不会马上被触发，要等到有一次回收操作后才会被触发。 
+    <br> &nbsp;&nbsp;Console.WriteLine(CountObject.Count); 
+    <br> &nbsp;&nbsp;Console.ReadLine(); 
+    <br> } 
+    <br> 注意以上代码要是改用C++写的话会发生内存泄漏，因为我们没有用delete操作符手动清理内存，但是在托管代码中却不会发生内存泄漏，因为GC会自动检测没有引用了的对象并回收。这里作者推荐你只在实现IDisposable接口时配合使用Finalizer，在其他的情况下不要使用（可能会有特殊情况）。在非托管资源的释放一章我们会更好的了解IDisposable接口，现在让我们来做耶稣吧！ 
+    <br>
+    <br> -------------------------------------------------------------------------------- 
+    <br>
+    <br> 对象的复活 
+    <br> 什么？回收的对象也可以"复活"吗？没错，虽然这么说的定义不准确。让我们先来看一段代码： 
+    <br> [C#] 
+    <br> public&nbsp;class&nbsp;Resurrection&nbsp;{ 
+    <br> &nbsp;&nbsp;public&nbsp;int&nbsp;Data; 
+    <br>
+    <br> &nbsp;&nbsp;public&nbsp;Resurrection(int&nbsp;data)&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;this.Data&nbsp;=&nbsp;data; 
+    <br> &nbsp;&nbsp;} 
+    <br>
+    <br> &nbsp;&nbsp;~Resurrection()&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Main.Instance&nbsp;=&nbsp;this; 
+    <br> &nbsp;&nbsp;} 
+    <br> } 
+    <br>
+    <br> public&nbsp;class&nbsp;Main&nbsp;{ 
+    <br> &nbsp;&nbsp;public&nbsp;static&nbsp;Resurrection&nbsp;Instance; 
+    <br>
+    <br> &nbsp;&nbsp;public&nbsp;static&nbsp;void&nbsp;Main()&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Instance&nbsp;=&nbsp;new&nbsp;Resurrection(1); 
+    <br>
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Instance&nbsp;=&nbsp;null; 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.Collect(); 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.WaitForPendingFinalizers(); 
+    <br>
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;看到了吗，在这里“复活”了。 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Console.WriteLine(Instance.Data); 
+    <br>
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Instance&nbsp;=&nbsp;null; 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.Collect(); 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Console.ReadLine(); 
+    <br> &nbsp;&nbsp;} 
+    <br> } 
+    <br>
+    <br> [Visual&nbsp;Basic] 
+    <br> Public&nbsp;Class&nbsp;Resurrection 
+    <br> &nbsp;&nbsp;Public&nbsp;Data&nbsp;As&nbsp;Integer 
+    <br>
+    <br> &nbsp;&nbsp;Public&nbsp;Sub&nbsp;New(ByVal&nbsp;data&nbsp;As&nbsp;Integer) 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Me.Data&nbsp;=&nbsp;data 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br>
+    <br> &nbsp;&nbsp;Protected&nbsp;Overrides&nbsp;Sub&nbsp;Finalize() 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Main.Instance&nbsp;=&nbsp;Me 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;MyBase.Finalize() 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br> End&nbsp;Class 
+    <br>
+    <br> Public&nbsp;Class&nbsp;Main 
+    <br> &nbsp;&nbsp;Public&nbsp;Shared&nbsp;Instance&nbsp;As&nbsp;Resurrection 
+    <br>
+    <br> &nbsp;&nbsp;Sub&nbsp;Main() 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Instance&nbsp;=&nbsp;New&nbsp;Resurrection(1) 
+    <br>
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Instance&nbsp;=&nbsp;Nothing 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.Collect() 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.WaitForPendingFinalizers() 
+    <br>
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;'&nbsp;看到了吗，在这里“复活”了。 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Console.WriteLine(Instance.Data) 
+    <br>
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Instance&nbsp;=&nbsp;Nothing 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.Collect() 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Console.ReadLine() 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br> End&nbsp;Class 
+    <br> 你可能会问："既然这个对象能复活，那么这个对象在程序结束后会被回收吗？"。会，"为什么？"。让我们按照GC的工作方式走一遍你就明白是怎么回事了。 
+    <br> 1、执行Collect。检查引用。没问题，对象已经没有引用了。 
+    <br> 2、创建新实例时已经在Finalizer表上作了纪录，所以我们检查到了对象有Finalizer。 
+    <br> 3、因为查到了Finalizer，所以将记录移到Finalizer2表上。 
+    <br> 4、在Finalizer2表上有记录，所以不释放内存。 
+    <br> 5、Collect执行完毕。这时我们用了GC.WaitForPendingFinalizers，所以我们将等待所有Finalizer2表上的Finalizers的执行。 
+    <br> 6、Finalizer执行后我们的Instance就又引用了我们的对象。（复活了） 
+    <br> 7、再一次去除所有的引用。 
+    <br> 8、执行Collect。检查引用。没问题。 
+    <br> 9、由于上次已经将记录从Finalizer表删除，所以这次没有查到对象有Finalizer。 
+    <br> 10、在Finalizer2表上也不存在，所以对象的内存被释放了。 
+    <br> 现在你明白原因了，让我来告诉你"复活"的用处。嗯，这个……好吧，我不知道。其实，复活没有什么用处，而且这样做也非常的危险。看来这只能说是GC机制的漏洞（请参看GC.ReRegisterForFinalize再动脑筋想一下就知道为什么可以说是漏洞了）。作者建议大家忘掉有什么复活，避免这类的使用。可能你会问："那你干吗还要对我们说这些？"我说这些为的是让大家更好的了解GC的工作机制！^_^ 
+    <br>
+    <br> -------------------------------------------------------------------------------- 
+    <br>
+    <br> 非托管资源的释放 
+    <br> 到现在为止，我们说了托管内存的管理，那么当我们利用如数据库、文件等非托管资源时呢？这时我们就要用到.NET&nbsp;Framework中的标准：IDisposable接口。按照标准，所有有需要手动释放非托管资源的类都得实现此接口。这个接口只有一个方法，Dispose()，不过有相对的Guidelines指示如何实现此接口，在这里我向大家说一说。实现IDisposable这个接口的类需要有这样的结构： 
+    <br> [C#] 
+    <br> public&nbsp;class&nbsp;Base&nbsp;:&nbsp;IDisposable&nbsp;{ 
+    <br> &nbsp;&nbsp;public&nbsp;void&nbsp;Dispose()&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;this.Dispose(true); 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.SupressFinalize(this); 
+    <br> &nbsp;&nbsp;} 
+    <br>
+    <br> &nbsp;&nbsp;protected&nbsp;virtual&nbsp;void&nbsp;Dispose(bool&nbsp;disposing)&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(disposing)&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;托管类 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;} 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;非托管资源释放 
+    <br> &nbsp;&nbsp;} 
+    <br>
+    <br> &nbsp;&nbsp;~Base()&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;this.Dispose(false); 
+    <br> &nbsp;&nbsp;} 
+    <br> } 
+    <br>
+    <br> public&nbsp;class&nbsp;Derive&nbsp;:&nbsp;Base&nbsp;{ 
+    <br> &nbsp;&nbsp;protected&nbsp;override&nbsp;void&nbsp;Dispose(bool&nbsp;disposing)&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(disposing)&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;托管类 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;} 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;非托管资源释放 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;base.Dispose(disposing); 
+    <br> &nbsp;&nbsp;} 
+    <br> } 
+    <br>
+    <br> [Visual&nbsp;Basic] 
+    <br> Public&nbsp;Class&nbsp;Base 
+    <br> &nbsp;&nbsp;Implements&nbsp;IDisposable 
+    <br>
+    <br> &nbsp;&nbsp;Public&nbsp;Overloads&nbsp;Sub&nbsp;Dispose()&nbsp;Implements&nbsp;IDisposable.Dispose 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Me.Dispose(True) 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.SuppressFinalize(Me) 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br>
+    <br> &nbsp;&nbsp;Protected&nbsp;Overloads&nbsp;Overridable&nbsp;Sub&nbsp;Dispose(ByVal&nbsp;disposing&nbsp;As&nbsp;Boolean) 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;If&nbsp;disposing&nbsp;Then 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'&nbsp;托管类 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;End&nbsp;If 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;'&nbsp;非托管资源释放 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br>
+    <br> &nbsp;&nbsp;Protected&nbsp;Overrides&nbsp;Sub&nbsp;Finalize() 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Me.Dispose(False) 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;MyBase.Finalize() 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br> End&nbsp;Class 
+    <br>
+    <br> Public&nbsp;Class&nbsp;Derive 
+    <br> &nbsp;&nbsp;Inherits&nbsp;Base 
+    <br>
+    <br> &nbsp;&nbsp;Protected&nbsp;Overloads&nbsp;Overrides&nbsp;Sub&nbsp;Dispose(ByVal&nbsp;disposing&nbsp;As&nbsp;Boolean) 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;If&nbsp;disposing&nbsp;Then 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'&nbsp;托管类 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;End&nbsp;If 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;'&nbsp;非托管资源释放 
+    <br>
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;MyBase.Dispose(disposing) 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br> End&nbsp;Class 
+    <br> 为什么要这样设计呢？让我在后面解说一下。现在我们讲讲实现这个Dispose方法的几个准则： 
+    <br> 它不能扔出任何错误，重复的调用也不能扔出错误。也就是说，如果我已经调用了一个对象的Dispose，当我第二次调用Dispose的时候程序不应该出错，简单地说程序在第二次调用Dispose时不会做任何事。这些可以通过一个flag或多重if判断实现。&nbsp; 
+    <br> 一个对象的Dispose要做到释放这个对象的所有资源。拿一个继承类为例，继承类中用到了非托管资源所以它实现了IDisposable接口，如果继承类的基类也用到了非托管资源那么基类也得被释放，基类的资源如何在继承类中释放呢？当然是通过一个virtual/Overridable方法了，这样我们能保证每个Dispose都被调用到。这就是为什么我们的设计有一个virtual/Overridable的Dispose方法。注意我们首先要释放继承类的资源然后再释放基类的资源。&nbsp; 
+    <br> 因为非托管资源一定要被保障正确释放所以我们要定义一个Finalizer来避免程序员忘了调用Dispose的情况。上面的设计就采用了这种形式。如果我们手动调用Dispose方法就没有必要再保留Finalizer了，所以在Dispose中我们用了GC.SupressFinalize将对象从Finalizer表去掉，这样再回收时速度会更快。&nbsp; 
+    <br> 那么那个disposing和"托管类"是怎么回事呢？是这样：在"托管类"中写所有你想在调用Dispose时让其处于可释放状态的托管代码。还记得我们说过我们不知道托管代码是什么时候释放的吗？在这里我们只是去掉成员对象的引用让它处于可被回收状态，并不是直接释放内存。在"托管类"中这里我们也要写上所有实现了IDisposable的成员对象，因为他们也有Dispose，所以也需要在对象的Dispose中调用他们的Dispose，这样才能保证第二个准则。disposing是为了区分Dispose的调用方法，如果我们手动调用那么为了第二个准则"托管类"部分当然得执行，但如果是Finalizer调用的Dispose，这时候对象已经没有任何引用，也就是说对象的成员自然也就不存在了（无引用），也就没有必要执行"托管类"部分了，因为他们已经处于可被回收状态了。好了，这就是IDisposable接口的全部了。现在让我们来回想一下，以前我们可能认为有了Dispose内存就会马上被释放，这是错误的。只有非托管内存才会被马上释放，托管内存的释放由GC管理，我们不用管。 
+    <br>
+    <br> -------------------------------------------------------------------------------- 
+    <br>
+    <br> 弱引用的使用 
+    <br> A&nbsp;=&nbsp;B，我们称这样的引用叫做强引用，GC就是通过检查强引用来决定一个对象是否是可以回收的。另外还有一种引用称作弱引用（WeakReference），这种引用不影响GC回收，这就是它的用处所在。你会问到底有什么用处。现在我们来假设我们有一个很胖的对象，也就是说它占用很多内存。我们用过了这个对象，打算将它的引用去掉好让GC可以回收内存，但是功夫不大我们又需要这个对象了，没办法，重新创建实例，怎么创建这么慢啊？有什么办法解决这样的问题？有，将对象留在内存中不就快了嘛！不过我们不想这样胖得对象总占着内存，而我们也不想总是创建这样胖的新实例，因为这样很耗时。那怎么办……？聪明的朋友一定已经猜到了我要说解决方法是弱引用。不错，就是它。我们可以创建一个这个胖对象的弱引用，这样在内存不够时GC可以回收，不影响内存使用，而在没有被GC回收前我们还可以再次利用该对象。这里有一个示例： 
+    <br> [C#] 
+    <br> public&nbsp;class&nbsp;Fat&nbsp;{ 
+    <br> &nbsp;&nbsp;public&nbsp;int&nbsp;Data; 
+    <br>
+    <br> &nbsp;&nbsp;public&nbsp;Fat(int&nbsp;data)&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;this.Data&nbsp;=&nbsp;data; 
+    <br> &nbsp;&nbsp;} 
+    <br> } 
+    <br>
+    <br> public&nbsp;class&nbsp;Main&nbsp;{ 
+    <br> &nbsp;&nbsp;public&nbsp;static&nbsp;void&nbsp;Main()&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Fat&nbsp;oFat&nbsp;=&nbsp;new&nbsp;Fat(1); 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;WeakReference&nbsp;oFatRef&nbsp;=&nbsp;new&nbsp;WeakReference(oFat); 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;从这里开始，Fat对象可以被回收了。 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;oFat&nbsp;=&nbsp;null; 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(oFatRef.IsAlive)&nbsp;{ 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Console.WriteLine(((Fat)&nbsp;oFatRef.Target).Data);&nbsp;//&nbsp;1 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;} 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;//&nbsp;强制回收。 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.Collect(); 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Console.WriteLine(oFatRef.IsAlive);&nbsp;//&nbsp;False 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Console.ReadLine(); 
+    <br> &nbsp;&nbsp;} 
+    <br> } 
+    <br>
+    <br> [Visual&nbsp;Basic] 
+    <br> Public&nbsp;Class&nbsp;Fat 
+    <br> &nbsp;&nbsp;Public&nbsp;Data&nbsp;As&nbsp;Integer 
+    <br>
+    <br> &nbsp;&nbsp;Public&nbsp;Sub&nbsp;New(ByVal&nbsp;data&nbsp;As&nbsp;Integer) 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Me.Data&nbsp;=&nbsp;data 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br> End&nbsp;Class 
+    <br>
+    <br> Public&nbsp;Module&nbsp;Main 
+    <br> &nbsp;&nbsp;Sub&nbsp;Main() 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Dim&nbsp;oFat&nbsp;As&nbsp;New&nbsp;Fat(1) 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Dim&nbsp;oFatRef&nbsp;As&nbsp;New&nbsp;WeakReference(oFat) 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;'&nbsp;从这里开始，Fat对象可以被回收了。 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;oFat&nbsp;=&nbsp;Nothing 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;If&nbsp;oFatRef.IsAlive&nbsp;Then 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Console.WriteLine(DirectCast(oFatRef.Target,&nbsp;Fat).Data)&nbsp;'&nbsp;1 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;End&nbsp;If 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;'&nbsp;强制回收。 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;GC.Collect() 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Console.WriteLine(oFatRef.IsAlive)&nbsp;'&nbsp;False 
+    <br> &nbsp;&nbsp;&nbsp;&nbsp;Console.ReadLine() 
+    <br> &nbsp;&nbsp;End&nbsp;Sub 
+    <br> End&nbsp;Module 
+    <br> 这里我们的Fat其实并不是很胖，但是可以体现示例的本意：如何使用弱引用。那如果Fat有Finalizer呢，会怎样？如果Fat有Finalizer那么我们可能会用到WeakReference的另一个构造函数，当中有一参数叫做TrackResurrection，如果是True，只要Fat的内存没被释放我们就可以用它，也就是说Fat的Finalizer执行后我们还是可以恢复Fat（相当于第一次回收操作后还可恢复Fat）；如果TrackResurrection是False，那么第一次回收操作后就不能恢复Fat对象了。 
+    <br>
+    <br> -------------------------------------------------------------------------------- 
+    <br>
+    <br> 总结 
+    <br> 我在这里写出了正篇文章的要点： 
+    <br> 一个对象只当在没有任何引用的情况下才会被回收。&nbsp; 
+    <br> 一个对象的内存不是马上释放的，GC会在任何时候将其回收。&nbsp; 
+    <br> 一般情况下不要强制回收工作。&nbsp; 
+    <br> 如果没有特殊的需要不要写Finalizer。&nbsp; 
+    <br> 不要在Finalizer中写一些有时间逻辑的代码。&nbsp; 
+    <br> 在任何有非托管资源或含有Dispose的成员的类中实现IDisposable接口。&nbsp; 
+    <br> 按照给出的Dispose设计写自己的Dispose代码。&nbsp; 
+    <br> 当用胖对象时可以考虑弱引用的使用。&nbsp; 
+    <br> 好了，就说到这里了，希望对GC的了解会让您的代码更加稳固，更加简洁，更加快！更重要的，不再会有内存管理问题，无论是托管还是非托管！ 
+    <br>
+    <br> -------------------------------------------------------------------------------- 
+    <br>
+    <br> 参考信息 
+    <br> 1、GC&nbsp;Class 
+    <br> ms-help://MS.VSCC/MS.MSDNVS.2052/cpref/html/frlrfSystemGCClassTopic.htm 
+    <br> 2、Programming&nbsp;For&nbsp;Garbage&nbsp;Collection 
+    <br> ms-help://MS.VSCC/MS.MSDNVS.2052/cpguide/html/cpconprogrammingessentialsforgarbagecollection.htm 
+    <br> 3、Curso&nbsp;de&nbsp;Erik,&nbsp;Septima&nbsp;Entrega&nbsp;(西班牙语) 
+    <br> http://guille.costasol.net/NET/cursoCSharpErik/Entrega7/Entrega7.htm&nbsp; 
+    <br>
+   </div> 
+   <div>
+    专注于企业信息化，最近对股票数据分析较为感兴趣，可免费分享股票个股主力资金实时变化趋势分析工具，股票交流QQ群：457394862
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    本文转自沧海-重庆博客园博客，原文链接：http://www.cnblogs.com/omygod/archive/2006/11/08/554565.html，如需转载请自行联系原作者
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

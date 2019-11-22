@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>我对PostgreSQL 中 index scan 与 seq scan 的对比学习 « NotBeCN</title>
+  <meta name="description" content="             开始    数据量很小的时候，我们可以看到，seq scan 比 index scan 更加有效。那是因为 index scan 至少要发生两次I/O，一次是 读取索引块， 一次是读取数据块。当index 很大的时候，情况可能会更加复杂。&nbsp;        postgres=# ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/20/weixin_33805743_90130425.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">我对PostgreSQL 中 index scan 与 seq scan 的对比学习</h1>
+    <p class="post-meta">Dec 20, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">开始</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">数据量很小的时候，我们可以看到，seq scan 比 index scan 更加有效。那是因为 index scan 至少要发生两次I/O，一次是 读取索引块， 一次是读取数据块。当index 很大的时候，情况可能会更加复杂。&nbsp;</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>postgres=# <span style="color:rgb(0,0,255);line-height:1.5;">select</span> a.relpages, a.reltuples, a.relfilenode,a.reltype,b.typname <span style="color:rgb(0,0,255);line-height:1.5;">from</span> pg_class a, pg_type b <span style="color:rgb(0,0,255);line-height:1.5;">where</span> a.relname like <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">gaotab%</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> and a.reltype=<span style="line-height:1.5;">b.oid;    
+ relpages </span>| reltuples | relfilenode | reltype |<span style="line-height:1.5;"> typname     
+</span>----------+-----------+-------------+---------+---------    
+        <span style="color:rgb(128,0,128);line-height:1.5;">1</span> |      <span style="color:rgb(128,0,128);line-height:1.5;">100</span> |       <span style="color:rgb(128,0,128);line-height:1.5;">16396</span> |   <span style="color:rgb(128,0,128);line-height:1.5;">16386</span> | gaotab    </pre>
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">数据量为 100条记录。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">预估成本：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>postgres=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_seqscan=<span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;                    
+SET                    
+postgres</span>=# explain <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;                    
+                             QUERY PLAN                                                  
+</span>---------------------------------------------------------------------<span style="line-height:1.5;">                    
+ Index Scan </span><span style="color:rgb(0,0,255);line-height:1.5;">using</span> idx_id on gaotab  (cost=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">8.27</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">5</span><span style="line-height:1.5;">)                    
+   Index Cond: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)                    
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">2</span> rows)                    </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>postgres=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_seqscan=<span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">;        
+SET        
+        
+postgres</span>=# explain <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;        
+                      QUERY PLAN                              
+</span>------------------------------------------------------<span style="line-height:1.5;">        
+ Seq Scan on gaotab  (cost</span>=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">2.25</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">5</span><span style="line-height:1.5;">)        
+   Filter: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)        
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">2</span> rows)        </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">实际执行：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>postgres=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_seqscan=<span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;        
+SET        
+postgres</span>=# explain analyze <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;        
+                                                  QUERY PLAN                            
+                                       
+</span>--------------------------------------------------------------------------------        
+-------------------------------<span style="line-height:1.5;">        
+ Index Scan </span><span style="color:rgb(0,0,255);line-height:1.5;">using</span> idx_id on gaotab  (cost=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">8.27</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">5</span><span style="line-height:1.5;">) (actual tim        
+e</span>=<span style="color:rgb(128,0,128);line-height:1.5;">0.112</span>..<span style="color:rgb(128,0,128);line-height:1.5;">0.113</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> loops=<span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">)        
+   Index Cond: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)        
+ Total runtime: </span><span style="color:rgb(128,0,128);line-height:1.5;">0.133</span><span style="line-height:1.5;"> ms        
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">3</span> rows)        </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>postgres=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_seqscan=<span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">;        
+SET        
+postgres</span>=# explain analyze <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;        
+                                           QUERY PLAN                                   
+                        
+</span>--------------------------------------------------------------------------------        
+----------------<span style="line-height:1.5;">        
+ Seq Scan on gaotab  (cost</span>=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">2.25</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">5</span>) (actual time=<span style="color:rgb(128,0,128);line-height:1.5;">0.014</span>..<span style="color:rgb(128,0,128);line-height:1.5;">0.018</span><span style="line-height:1.5;">         
+rows</span>=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> loops=<span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">)        
+   Filter: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)        
+   Rows Removed by Filter: </span><span style="color:rgb(128,0,128);line-height:1.5;">99</span><span style="line-height:1.5;">        
+ Total runtime: </span><span style="color:rgb(128,0,128);line-height:1.5;">0.034</span><span style="line-height:1.5;"> ms        
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">4</span> rows)        </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">等到数据量大的时候，就是截然不同了。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">数据为1000条记录时，通过查询可以看到，已经跨越了7个page：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>postgres=<span style="line-height:1.5;"># analyze;    
+ANALYZE    
+postgres</span>=# <span style="color:rgb(0,0,255);line-height:1.5;">select</span> a.relpages, a.reltuples, a.relfilenode,a.reltype,b.typname <span style="color:rgb(0,0,255);line-height:1.5;">from</span> pg_class a, pg_type b <span style="color:rgb(0,0,255);line-height:1.5;">where</span> a.relname like <span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">gaotab%</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span> and a.reltype=<span style="line-height:1.5;">b.oid;    
+ relpages </span>| reltuples | relfilenode | reltype |<span style="line-height:1.5;"> typname     
+</span>----------+-----------+-------------+---------+---------    
+        <span style="color:rgb(128,0,128);line-height:1.5;">7</span> |      <span style="color:rgb(128,0,128);line-height:1.5;">1000</span> |       <span style="color:rgb(128,0,128);line-height:1.5;">16396</span> |   <span style="color:rgb(128,0,128);line-height:1.5;">16386</span> |<span style="line-height:1.5;"> gaotab    
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;"> row)    
+    
+postgres</span>=#     </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">再次预估成本，此时seq scan 已经开始变得不划算了：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>postgres=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_seqscan=<span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+SET
+postgres</span>=# explain <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;
+                             QUERY PLAN                              
+</span>---------------------------------------------------------------------<span style="line-height:1.5;">
+ Index Scan </span><span style="color:rgb(0,0,255);line-height:1.5;">using</span> idx_id on gaotab  (cost=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">8.27</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">6</span><span style="line-height:1.5;">)
+   Index Cond: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">2</span><span style="line-height:1.5;"> rows)
+
+postgres</span>=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_seqscan=<span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">;
+SET
+postgres</span>=# explain <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;
+                             QUERY PLAN                              
+</span>---------------------------------------------------------------------<span style="line-height:1.5;">
+ Index Scan </span><span style="color:rgb(0,0,255);line-height:1.5;">using</span> idx_id on gaotab  (cost=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">8.27</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">6</span><span style="line-height:1.5;">)
+   Index Cond: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">2</span><span style="line-height:1.5;"> rows)
+
+postgres</span>=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_indexscan=<span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+SET
+postgres</span>=# explain <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;
+                             QUERY PLAN                              
+</span>---------------------------------------------------------------------<span style="line-height:1.5;">
+ Bitmap Heap Scan on gaotab  (cost</span>=<span style="color:rgb(128,0,128);line-height:1.5;">4.26</span>..<span style="color:rgb(128,0,128);line-height:1.5;">8.27</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">6</span><span style="line-height:1.5;">)
+   Recheck Cond: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)
+   </span>-&gt;  Bitmap Index Scan on idx_id  (cost=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">4.26</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+         Index Cond: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">4</span><span style="line-height:1.5;"> rows)
+
+postgres</span>=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_bitmapscan=<span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+SET
+postgres</span>=# explain <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;
+                      QUERY PLAN                       
+</span>-------------------------------------------------------<span style="line-height:1.5;">
+ Seq Scan on gaotab  (cost</span>=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">19.50</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">6</span><span style="line-height:1.5;">)
+   Filter: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">2</span><span style="line-height:1.5;"> rows)
+
+postgres</span>=# </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:13px;line-height:19.5px;">实际执行</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);"> 
+    <div class="cnblogs_code_toolbar" style="font-family:'Courier New';font-size:12px;">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>postgres=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_seqscan=<span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+SET
+postgres</span>=# explain analyze <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;
+                                                            QUERY PLAN                                      
+                       
+</span>------------------------------------------------------------------------------------------------------------
+-----------------------<span style="line-height:1.5;">
+ Index Scan </span><span style="color:rgb(0,0,255);line-height:1.5;">using</span> idx_id on gaotab  (cost=<span style="color:rgb(128,0,128);line-height:1.5;">10000000000.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">10000000008.27</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">6</span>) (actual time=<span style="color:rgb(128,0,128);line-height:1.5;">0.020</span><span style="line-height:1.5;">.
+.</span><span style="color:rgb(128,0,128);line-height:1.5;">0.022</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> loops=<span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">)
+   Index Cond: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)
+ Total runtime: </span><span style="color:rgb(128,0,128);line-height:1.5;">0.051</span><span style="line-height:1.5;"> ms
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">3</span><span style="line-height:1.5;"> rows)
+
+</span><span style="line-height:1.5;">postgres</span>=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_seqscan=<span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">;
+SET
+postgres</span>=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_indexscan=<span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+SET
+postgres</span>=# <span style="color:rgb(0,0,255);line-height:1.5;">set</span> session enable_bitmapscan=<span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+SET
+postgres</span>=# explain analyze <span style="color:rgb(0,0,255);line-height:1.5;">select</span> name <span style="color:rgb(0,0,255);line-height:1.5;">from</span> gaotab <span style="color:rgb(0,0,255);line-height:1.5;">where</span> id=<span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">;
+                                           QUERY PLAN                                            
+</span>-------------------------------------------------------------------------------------------------<span style="line-height:1.5;">
+ Seq Scan on gaotab  (cost</span>=<span style="color:rgb(128,0,128);line-height:1.5;">0.00</span>..<span style="color:rgb(128,0,128);line-height:1.5;">19.50</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> width=<span style="color:rgb(128,0,128);line-height:1.5;">6</span>) (actual time=<span style="color:rgb(128,0,128);line-height:1.5;">0.015</span>..<span style="color:rgb(128,0,128);line-height:1.5;">0.095</span> rows=<span style="color:rgb(128,0,128);line-height:1.5;">1</span> loops=<span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">)
+   Filter: (id </span>= <span style="color:rgb(128,0,128);line-height:1.5;">50</span><span style="line-height:1.5;">)
+   Rows Removed by Filter: </span><span style="color:rgb(128,0,128);line-height:1.5;">999</span><span style="line-height:1.5;">
+ Total runtime: </span><span style="color:rgb(128,0,128);line-height:1.5;">0.109</span><span style="line-height:1.5;"> ms
+(</span><span style="color:rgb(128,0,128);line-height:1.5;">4</span><span style="line-height:1.5;"> rows)
+
+postgres</span>=# </pre> 
+    <div class="cnblogs_code_toolbar" style="font-family:'Courier New';font-size:12px;">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar" style="font-family:'Courier New';font-size:12px;">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><br></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar" style="font-family:'Courier New';font-size:12px;">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><br></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar" style="font-family:'Courier New';font-size:12px;">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><br></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar" style="font-family:'Courier New';font-size:12px;">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><br></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar" style="font-family:'Courier New';font-size:12px;">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="color:rgb(0,105,214);font-weight:inherit;line-height:inherit;text-decoration:underline;border:none;"><br></a></span>
+    </div> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码" style="border:none;"><font color="#0069d6"><u><span style="font-size:12px;line-height:18px;">本文转自健哥的数据花园博客园博客，原文链接：http://www.cnblogs.com/gaojian/archive/2012/11/07/2758750.html，如需转载请自行联系原作者</span></u></font><br></a></span>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

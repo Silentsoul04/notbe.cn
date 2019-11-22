@@ -1,0 +1,1567 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Timer&TimerTask原理分析 « NotBeCN</title>
+  <meta name="description" content="                  转载地址，请珍惜作者的劳动成果，转载请注明出处：http://www.open-open.com/lib/view/open1337176725619.html     如果你使用Java语言进行开发，对于定时执行任务这样的需求，自然而然会想到使用Timer和TimerTask...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/27/weixin_34365417_90132306.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Timer&TimerTask原理分析</h1>
+    <p class="post-meta">Nov 27, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="blogpost-body" style="color:rgb(73,73,73);font-family:Arial, Helvetica, sans-serif;font-size:14px;line-height:22.4px;"> 
+    <p><span style="color:rgb(0,0,255);">转载地址，请珍惜作者的劳动成果，转载请注明出处：http://www.open-open.com/lib/view/open1337176725619.html</span></p> 
+    <p>如果你使用Java语言进行开发，对于定时执行任务这样的需求，自然而然会想到使用Timer和TimerTask完成任务，我最近就使用 Timer和TimerTask完成了一个定时执行的任务，实现得没有问题，但当在TimerTaks的run()方法中使用 Thread.sleep()方式时，可能会出现奇怪的现象，好像Timer失效了，网上查了一下，倒是有人遇到了相同的问题，但是并没有找到一篇解释为什么会出现这种情况，期待有某位达人能够分析清楚这个问题。</p> 
+    <p>&nbsp;</p> 
+    <p>遇到了这样的问题，始终让我不爽，于是看了一下Timer的源码，先将了解到的内容整理如下，接下来再看看Thread.sleep()的源码，看能否找到问题所在。</p> 
+    <p>&nbsp;</p> 
+    <p>在Java中，与定时任务执行相关的类很少，只有Timer、TimerTask、TimerThread、TaskQueue几个，其中每个类的职责大致如下：</p> 
+    <p>Timer：一个Task的调度类，和TimerTask一样，暴露给最终用户使用的类，通过schedule方法安排Task的执行计划。该类通过TaskQueue和TimerThread类完成Task的调度。</p> 
+    <p>TimerTask：实现Runnable接口，表明每一个任务均为一个独立的线程。通过run()方法提供用户定制自己任务。该类有一个比较重要的成员变量nextExecutionTime&nbsp;，表示下一次执行该任务的时间。以后会看到，Timer机制就是靠这个值安排Task执行的。</p> 
+    <p>TimerThread：继承于Thread，是真正执行Task的类。</p> 
+    <p>TaskQueue：一个存储Task的数据结构，内部由一个最小堆实现，堆的每个成员为一个TimeTask，每个Task依靠其 nextExecutionTime值进行排序，也就是说，nextExecutionTime最小的任务在队列的最前端，从而能够现实最早执行。</p> 
+    <p>&nbsp;</p> 
+    <p>要想使用Timer，用户只需要了解Timer和TimerTask，下面现已一个最基本的Timer和TimerTask使用案例入手，来看一下Timer内部的实现原理。</p> 
+    <div class="cnblogs_Highlighter sh-gutter"> 
+     <div> 
+      <div class="syntaxhighlighter java" style="width:690px;font-size:1em;"> 
+       <table border="0" style="border-spacing:0px;border-collapse:collapse;border:1px solid #C0C0C0;width:690px;line-height:1.1em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:12px;background:none;">
+        <tbody style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;">
+         <tr style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;">
+          <td class="gutter" style="border:1px solid #C0C0C0;border-collapse:collapse;line-height:1.1em;vertical-align:baseline;width:35px;color:rgb(175,175,175);background:none;"> 
+           <div class="line number1 index0 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            1
+           </div> 
+           <div class="line number2 index1 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            2
+           </div> 
+           <div class="line number3 index2 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            3
+           </div> 
+           <div class="line number4 index3 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            4
+           </div> 
+           <div class="line number5 index4 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            5
+           </div> 
+           <div class="line number6 index5 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            6
+           </div> 
+           <div class="line number7 index6 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            7
+           </div> 
+           <div class="line number8 index7 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            8
+           </div> 
+           <div class="line number9 index8 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            9
+           </div> 
+           <div class="line number10 index9 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            10
+           </div> 
+           <div class="line number11 index10 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            11
+           </div> 
+           <div class="line number12 index11 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            12
+           </div> 
+           <div class="line number13 index12 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            13
+           </div> 
+           <div class="line number14 index13 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            14
+           </div> 
+           <div class="line number15 index14 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            15
+           </div> 
+           <div class="line number16 index15 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            16
+           </div> 
+           <div class="line number17 index16 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            17
+           </div> 
+           <div class="line number18 index17 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            18
+           </div> 
+           <div class="line number19 index18 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            19
+           </div> 
+           <div class="line number20 index19 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            20
+           </div> 
+           <div class="line number21 index20 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            21
+           </div> 
+           <div class="line number22 index21 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            22
+           </div> 
+           <div class="line number23 index22 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            23
+           </div> 
+           <div class="line number24 index23 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            24
+           </div> 
+           <div class="line number25 index24 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            25
+           </div> 
+           <div class="line number26 index25 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            26
+           </div> 
+           <div class="line number27 index26 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            27
+           </div> 
+           <div class="line number28 index27 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            28
+           </div> 
+           <div class="line number29 index28 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            29
+           </div> 
+           <div class="line number30 index29 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            30
+           </div> 
+           <div class="line number31 index30 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            31
+           </div> 
+           <div class="line number32 index31 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            32
+           </div> 
+           <div class="line number33 index32 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            33
+           </div> </td> 
+          <td class="code" style="border:1px solid #C0C0C0;border-collapse:collapse;line-height:1.1em;vertical-align:baseline;background:none;"> 
+           <div style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;"> 
+            <div class="line number1 index0 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">import</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">java.util.Timer;</code> 
+            </div> 
+            <div class="line number2 index1 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number3 index2 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">import</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">java.util.TimerTask;</code> 
+            </div> 
+            <div class="line number4 index3 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number5 index4 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">import</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">org.junit.Test;</code> 
+            </div> 
+            <div class="line number6 index5 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number7 index6 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;</code>&nbsp;
+            </div> 
+            <div class="line number8 index7 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number9 index8 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">class</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">TestTimerTask&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">extends</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">TimerTask {</code> 
+            </div> 
+            <div class="line number10 index9 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number11 index10 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;</code>
+             <code class="java color1" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:#808080;background:none;">@Override</code> 
+            </div> 
+            <div class="line number12 index11 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number13 index12 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">public</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">void</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">run() {</code> 
+            </div> 
+            <div class="line number14 index13 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number15 index14 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">System.out.println(</code>
+             <code class="java string" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:#0000FF;background:none;">"TestTimerTask is running......"</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">);</code> 
+            </div> 
+            <div class="line number16 index15 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number17 index16 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number18 index17 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number19 index18 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;">
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code>
+            </div> 
+            <div class="line number20 index19 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number21 index20 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">public</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">class</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">TimerTaskTest {</code> 
+            </div> 
+            <div class="line number22 index21 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number23 index22 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;</code>
+             <code class="java color1" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:#808080;background:none;">@Test</code> 
+            </div> 
+            <div class="line number24 index23 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number25 index24 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">public</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">void</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">testTimerTask() {</code> 
+            </div> 
+            <div class="line number26 index25 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number27 index26 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">Timer timer =&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">new</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">Timer();</code> 
+            </div> 
+            <div class="line number28 index27 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number29 index28 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">timer.schedule(</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">new</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">TestTimerTask(),&nbsp;</code>
+             <code class="java value" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,153,0);background:none;">0</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">,&nbsp;</code>
+             <code class="java value" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,153,0);background:none;">10</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">);</code> 
+            </div> 
+            <div class="line number30 index29 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number31 index30 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number32 index31 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number33 index32 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;">
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code>
+            </div> 
+           </div> </td> 
+         </tr>
+        </tbody>
+       </table>
+      </div> 
+     </div> 
+    </div> 
+    <p>　　</p> 
+    <p>上面的代码是一个典型的Timer&amp;TimerTask的应用，下面先来看一下new Timer()干了什么事，其源码如下：</p> 
+    <p>public&nbsp;Timer(String&nbsp;name)&nbsp;{</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;thread.setName(name);&nbsp;&nbsp;&nbsp; //thread为TimerThread实例。</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;thread.start();</p> 
+    <p>}</p> 
+    <p>从上面的源代码可以知道，创建Timer对象的同时也启动了TimerThread线程。下面来看看TimerThread干了什么事：</p> 
+    <div class="cnblogs_Highlighter sh-gutter"> 
+     <div> 
+      <div class="syntaxhighlighter java" style="width:690px;font-size:1em;"> 
+       <table border="0" style="border-spacing:0px;border-collapse:collapse;border:1px solid #C0C0C0;width:690px;line-height:1.1em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:12px;background:none;">
+        <tbody style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;">
+         <tr style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;">
+          <td class="gutter" style="border:1px solid #C0C0C0;border-collapse:collapse;line-height:1.1em;vertical-align:baseline;width:35px;color:rgb(175,175,175);background:none;"> 
+           <div class="line number1 index0 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            1
+           </div> 
+           <div class="line number2 index1 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            2
+           </div> 
+           <div class="line number3 index2 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            3
+           </div> 
+           <div class="line number4 index3 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            4
+           </div> 
+           <div class="line number5 index4 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            5
+           </div> 
+           <div class="line number6 index5 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            6
+           </div> 
+           <div class="line number7 index6 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            7
+           </div> 
+           <div class="line number8 index7 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            8
+           </div> 
+           <div class="line number9 index8 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            9
+           </div> 
+           <div class="line number10 index9 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            10
+           </div> 
+           <div class="line number11 index10 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            11
+           </div> 
+           <div class="line number12 index11 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            12
+           </div> 
+           <div class="line number13 index12 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            13
+           </div> 
+           <div class="line number14 index13 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            14
+           </div> 
+           <div class="line number15 index14 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            15
+           </div> 
+           <div class="line number16 index15 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            16
+           </div> 
+           <div class="line number17 index16 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            17
+           </div> 
+           <div class="line number18 index17 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            18
+           </div> 
+           <div class="line number19 index18 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            19
+           </div> 
+           <div class="line number20 index19 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            20
+           </div> 
+           <div class="line number21 index20 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            21
+           </div> </td> 
+          <td class="code" style="border:1px solid #C0C0C0;border-collapse:collapse;line-height:1.1em;vertical-align:baseline;background:none;"> 
+           <div style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;"> 
+            <div class="line number1 index0 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">public</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">void</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">run() {</code> 
+            </div> 
+            <div class="line number2 index1 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number3 index2 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">try</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">{</code> 
+            </div> 
+            <div class="line number4 index3 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number5 index4 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">mainLoop();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//线程真正执行的代码在这个私有方法中</code> 
+            </div> 
+            <div class="line number6 index5 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number7 index6 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">finally</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">{</code> 
+            </div> 
+            <div class="line number8 index7 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number9 index8 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Someone killed this Thread, behave as if Timer cancelled</code> 
+            </div> 
+            <div class="line number10 index9 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number11 index10 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">synchronized</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(queue) {</code> 
+            </div> 
+            <div class="line number12 index11 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number13 index12 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">newTasksMayBeScheduled =&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">false</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">;</code> 
+            </div> 
+            <div class="line number14 index13 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number15 index14 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">queue.clear();&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Eliminate obsolete references</code> 
+            </div> 
+            <div class="line number16 index15 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number17 index16 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number18 index17 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number19 index18 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number20 index19 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number21 index20 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;">
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code>
+            </div> 
+           </div> </td> 
+         </tr>
+        </tbody>
+       </table>
+      </div> 
+     </div> 
+    </div> 
+    <p>　　接着来看看私有方法mainLoop()干了什么事：</p> 
+    <div class="cnblogs_Highlighter sh-gutter"> 
+     <div> 
+      <div class="syntaxhighlighter java" style="width:690px;font-size:1em;"> 
+       <table border="0" style="border-spacing:0px;border-collapse:collapse;border:1px solid #C0C0C0;line-height:1.1em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:12px;background:none;">
+        <tbody style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;">
+         <tr style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;">
+          <td class="gutter" style="border:1px solid #C0C0C0;border-collapse:collapse;line-height:1.1em;vertical-align:baseline;width:35px;color:rgb(175,175,175);background:none;"> 
+           <div class="line number1 index0 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            1
+           </div> 
+           <div class="line number2 index1 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            2
+           </div> 
+           <div class="line number3 index2 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            3
+           </div> 
+           <div class="line number4 index3 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            4
+           </div> 
+           <div class="line number5 index4 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            5
+           </div> 
+           <div class="line number6 index5 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            6
+           </div> 
+           <div class="line number7 index6 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            7
+           </div> 
+           <div class="line number8 index7 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            8
+           </div> 
+           <div class="line number9 index8 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            9
+           </div> 
+           <div class="line number10 index9 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            10
+           </div> 
+           <div class="line number11 index10 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            11
+           </div> 
+           <div class="line number12 index11 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            12
+           </div> 
+           <div class="line number13 index12 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            13
+           </div> 
+           <div class="line number14 index13 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            14
+           </div> 
+           <div class="line number15 index14 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            15
+           </div> 
+           <div class="line number16 index15 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            16
+           </div> 
+           <div class="line number17 index16 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            17
+           </div> 
+           <div class="line number18 index17 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            18
+           </div> 
+           <div class="line number19 index18 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            19
+           </div> 
+           <div class="line number20 index19 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            20
+           </div> 
+           <div class="line number21 index20 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            21
+           </div> 
+           <div class="line number22 index21 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            22
+           </div> 
+           <div class="line number23 index22 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            23
+           </div> 
+           <div class="line number24 index23 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            24
+           </div> 
+           <div class="line number25 index24 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            25
+           </div> 
+           <div class="line number26 index25 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            26
+           </div> 
+           <div class="line number27 index26 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            27
+           </div> 
+           <div class="line number28 index27 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            28
+           </div> 
+           <div class="line number29 index28 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            29
+           </div> 
+           <div class="line number30 index29 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            30
+           </div> 
+           <div class="line number31 index30 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            31
+           </div> 
+           <div class="line number32 index31 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            32
+           </div> 
+           <div class="line number33 index32 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            33
+           </div> 
+           <div class="line number34 index33 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            34
+           </div> 
+           <div class="line number35 index34 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            35
+           </div> 
+           <div class="line number36 index35 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            36
+           </div> 
+           <div class="line number37 index36 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            37
+           </div> 
+           <div class="line number38 index37 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            38
+           </div> 
+           <div class="line number39 index38 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            39
+           </div> 
+           <div class="line number40 index39 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            40
+           </div> 
+           <div class="line number41 index40 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            41
+           </div> 
+           <div class="line number42 index41 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            42
+           </div> 
+           <div class="line number43 index42 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            43
+           </div> 
+           <div class="line number44 index43 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            44
+           </div> 
+           <div class="line number45 index44 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            45
+           </div> 
+           <div class="line number46 index45 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            46
+           </div> 
+           <div class="line number47 index46 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            47
+           </div> 
+           <div class="line number48 index47 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            48
+           </div> 
+           <div class="line number49 index48 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            49
+           </div> 
+           <div class="line number50 index49 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            50
+           </div> 
+           <div class="line number51 index50 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            51
+           </div> 
+           <div class="line number52 index51 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            52
+           </div> 
+           <div class="line number53 index52 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            53
+           </div> 
+           <div class="line number54 index53 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            54
+           </div> 
+           <div class="line number55 index54 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            55
+           </div> 
+           <div class="line number56 index55 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            56
+           </div> 
+           <div class="line number57 index56 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            57
+           </div> 
+           <div class="line number58 index57 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            58
+           </div> 
+           <div class="line number59 index58 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            59
+           </div> 
+           <div class="line number60 index59 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            60
+           </div> 
+           <div class="line number61 index60 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            61
+           </div> 
+           <div class="line number62 index61 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            62
+           </div> 
+           <div class="line number63 index62 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            63
+           </div> 
+           <div class="line number64 index63 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            64
+           </div> 
+           <div class="line number65 index64 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            65
+           </div> 
+           <div class="line number66 index65 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            66
+           </div> 
+           <div class="line number67 index66 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            67
+           </div> 
+           <div class="line number68 index67 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            68
+           </div> 
+           <div class="line number69 index68 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            69
+           </div> 
+           <div class="line number70 index69 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            70
+           </div> 
+           <div class="line number71 index70 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            71
+           </div> 
+           <div class="line number72 index71 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            72
+           </div> 
+           <div class="line number73 index72 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            73
+           </div> 
+           <div class="line number74 index73 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            74
+           </div> 
+           <div class="line number75 index74 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            75
+           </div> 
+           <div class="line number76 index75 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            76
+           </div> 
+           <div class="line number77 index76 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            77
+           </div> 
+           <div class="line number78 index77 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            78
+           </div> 
+           <div class="line number79 index78 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            79
+           </div> 
+           <div class="line number80 index79 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            80
+           </div> 
+           <div class="line number81 index80 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            81
+           </div> 
+           <div class="line number82 index81 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            82
+           </div> 
+           <div class="line number83 index82 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            83
+           </div> </td> 
+          <td class="code" style="border:1px solid #C0C0C0;border-collapse:collapse;line-height:1.1em;vertical-align:baseline;background:none;"> 
+           <div style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;"> 
+            <div class="line number1 index0 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">private</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">void</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">mainLoop() {</code> 
+            </div> 
+            <div class="line number2 index1 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number3 index2 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">while</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">true</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">) {</code> 
+            </div> 
+            <div class="line number4 index3 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number5 index4 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">try</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">{</code> 
+            </div> 
+            <div class="line number6 index5 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number7 index6 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">TimerTask task;</code> 
+            </div> 
+            <div class="line number8 index7 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number9 index8 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">boolean</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">taskFired;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//是否已经到达Task的执行时间，如果已经到达，设置为true，否则置为false</code> 
+            </div> 
+            <div class="line number10 index9 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number11 index10 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">synchronized</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(queue) {</code> 
+            </div> 
+            <div class="line number12 index11 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number13 index12 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Wait for queue to become non-empty</code> 
+            </div> 
+            <div class="line number14 index13 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number15 index14 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">while</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(queue.isEmpty() &amp;&amp; newTasksMayBeScheduled)</code> 
+            </div> 
+            <div class="line number16 index15 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number17 index16 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">queue.wait();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//由此可以看出，Timer通过wait &amp; notify 方法安排线程之间的同步</code> 
+            </div> 
+            <div class="line number18 index17 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number19 index18 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(queue.isEmpty())</code> 
+            </div> 
+            <div class="line number20 index19 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number21 index20 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">break</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Queue is empty and will forever remain; die</code> 
+            </div> 
+            <div class="line number22 index21 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number23 index22 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;</code>&nbsp;
+            </div> 
+            <div class="line number24 index23 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number25 index24 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Queue nonempty; look at first evt and do the right thing</code> 
+            </div> 
+            <div class="line number26 index25 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number27 index26 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">long</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">currentTime, executionTime;</code> 
+            </div> 
+            <div class="line number28 index27 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number29 index28 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">task = queue.getMin();</code> 
+            </div> 
+            <div class="line number30 index29 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number31 index30 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">synchronized</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(task.lock) {</code> 
+            </div> 
+            <div class="line number32 index31 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number33 index32 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(task.state == TimerTask.CANCELLED) {</code> 
+            </div> 
+            <div class="line number34 index33 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number35 index34 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">queue.removeMin();</code> 
+            </div> 
+            <div class="line number36 index35 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number37 index36 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">continue</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// No action required, poll queue again</code> 
+            </div> 
+            <div class="line number38 index37 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number39 index38 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number40 index39 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number41 index40 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">currentTime = System.currentTimeMillis();</code> 
+            </div> 
+            <div class="line number42 index41 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number43 index42 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">executionTime = task.nextExecutionTime;</code> 
+            </div> 
+            <div class="line number44 index43 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number45 index44 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(taskFired = (executionTime&lt;=currentTime)) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//Task的执行时间已到，设置taskFired为true</code> 
+            </div> 
+            <div class="line number46 index45 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number47 index46 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(task.period ==&nbsp;</code>
+             <code class="java value" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,153,0);background:none;">0</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">) {&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Non-repeating, remove</code> 
+            </div> 
+            <div class="line number48 index47 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number49 index48 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">queue.removeMin();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//移除队列中的当前任务</code> 
+            </div> 
+            <div class="line number50 index49 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number51 index50 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">task.state = TimerTask.EXECUTED;</code> 
+            </div> 
+            <div class="line number52 index51 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number53 index52 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">else</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">{&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Repeating task, reschedule</code> 
+            </div> 
+            <div class="line number54 index53 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number55 index54 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">queue.rescheduleMin(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//重新设置任务的下一次执行时间</code> 
+            </div> 
+            <div class="line number56 index55 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number57 index56 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">task.period&lt;</code>
+             <code class="java value" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,153,0);background:none;">0</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">? currentTime&nbsp;&nbsp; - task.period</code> 
+            </div> 
+            <div class="line number58 index57 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number59 index58 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">: executionTime + task.period);</code> 
+            </div> 
+            <div class="line number60 index59 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number61 index60 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number62 index61 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number63 index62 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number64 index63 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number65 index64 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number66 index65 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number67 index66 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(!taskFired)&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Task hasn't yet fired; wait</code> 
+            </div> 
+            <div class="line number68 index67 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number69 index68 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">queue.wait(executionTime - currentTime);&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//还没有执行时间，通过wait等待特定时间</code> 
+            </div> 
+            <div class="line number70 index69 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number71 index70 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number72 index71 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number73 index72 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(taskFired)&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">// Task fired; run it, holding no locks</code> 
+            </div> 
+            <div class="line number74 index73 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number75 index74 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">task.run();&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//已经到达执行时间，执行任务</code> 
+            </div> 
+            <div class="line number76 index75 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number77 index76 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">catch</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(InterruptedException e) {</code> 
+            </div> 
+            <div class="line number78 index77 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number79 index78 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number80 index79 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number81 index80 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number82 index81 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number83 index82 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;">
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code>
+            </div> 
+           </div> </td> 
+         </tr>
+        </tbody>
+       </table>
+      </div> 
+     </div> 
+    </div> 
+    <p>　　</p> 
+    <p>也就是说，一旦创建了Timer类的实例，就一直存在一个循环在遍历queue中的任务，如果有任务的话，就通过thread去执行该任务，否则线程通过wait()方法阻塞自己，由于没有任务在队列中，就没有必要继续thread中的循环。</p> 
+    <p>&nbsp;</p> 
+    <p>上面提到，如果Timer的任务队列中不包含任务时，Timer中的TimerThread线程并不会执行，接着来看看为Timer添加任务后会出现怎样的情况。为Timer添加任务就是timer.schedule()干的事，schedule()方法直接调用Timer的私有方法 sched()，sched()是真正安排Task的地方，其源代码如下：</p> 
+    <div class="cnblogs_Highlighter sh-gutter"> 
+     <div> 
+      <div class="syntaxhighlighter java" style="width:690px;font-size:1em;"> 
+       <table border="0" style="border-spacing:0px;border-collapse:collapse;border:1px solid #C0C0C0;line-height:1.1em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;font-size:12px;background:none;">
+        <tbody style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;">
+         <tr style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;">
+          <td class="gutter" style="border:1px solid #C0C0C0;border-collapse:collapse;line-height:1.1em;vertical-align:baseline;width:35px;color:rgb(175,175,175);background:none;"> 
+           <div class="line number1 index0 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            1
+           </div> 
+           <div class="line number2 index1 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            2
+           </div> 
+           <div class="line number3 index2 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            3
+           </div> 
+           <div class="line number4 index3 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            4
+           </div> 
+           <div class="line number5 index4 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            5
+           </div> 
+           <div class="line number6 index5 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            6
+           </div> 
+           <div class="line number7 index6 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            7
+           </div> 
+           <div class="line number8 index7 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            8
+           </div> 
+           <div class="line number9 index8 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            9
+           </div> 
+           <div class="line number10 index9 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            10
+           </div> 
+           <div class="line number11 index10 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            11
+           </div> 
+           <div class="line number12 index11 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            12
+           </div> 
+           <div class="line number13 index12 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            13
+           </div> 
+           <div class="line number14 index13 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            14
+           </div> 
+           <div class="line number15 index14 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            15
+           </div> 
+           <div class="line number16 index15 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            16
+           </div> 
+           <div class="line number17 index16 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            17
+           </div> 
+           <div class="line number18 index17 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            18
+           </div> 
+           <div class="line number19 index18 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            19
+           </div> 
+           <div class="line number20 index19 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            20
+           </div> 
+           <div class="line number21 index20 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            21
+           </div> 
+           <div class="line number22 index21 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            22
+           </div> 
+           <div class="line number23 index22 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            23
+           </div> 
+           <div class="line number24 index23 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            24
+           </div> 
+           <div class="line number25 index24 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            25
+           </div> 
+           <div class="line number26 index25 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            26
+           </div> 
+           <div class="line number27 index26 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            27
+           </div> 
+           <div class="line number28 index27 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            28
+           </div> 
+           <div class="line number29 index28 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            29
+           </div> 
+           <div class="line number30 index29 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            30
+           </div> 
+           <div class="line number31 index30 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            31
+           </div> 
+           <div class="line number32 index31 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            32
+           </div> 
+           <div class="line number33 index32 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            33
+           </div> 
+           <div class="line number34 index33 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            34
+           </div> 
+           <div class="line number35 index34 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            35
+           </div> 
+           <div class="line number36 index35 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            36
+           </div> 
+           <div class="line number37 index36 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            37
+           </div> 
+           <div class="line number38 index37 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            38
+           </div> 
+           <div class="line number39 index38 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            39
+           </div> 
+           <div class="line number40 index39 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            40
+           </div> 
+           <div class="line number41 index40 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            41
+           </div> 
+           <div class="line number42 index41 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            42
+           </div> 
+           <div class="line number43 index42 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            43
+           </div> 
+           <div class="line number44 index43 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            44
+           </div> 
+           <div class="line number45 index44 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            45
+           </div> 
+           <div class="line number46 index45 alt1" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background-image:none;">
+            46
+           </div> 
+           <div class="line number47 index46 alt2" style="border-width:0px 2px 0px 0px;border-right-style:solid;border-right-color:rgb(108,226,108);line-height:1.8em;text-align:right;vertical-align:baseline;background:rgb(244,244,244) none;">
+            47
+           </div> </td> 
+          <td class="code" style="border:1px solid #C0C0C0;border-collapse:collapse;line-height:1.1em;vertical-align:baseline;background:none;"> 
+           <div style="border:0px;line-height:1.1em;vertical-align:baseline;background:none;"> 
+            <div class="line number1 index0 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">private</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">void</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">sched(TimerTask task,&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">long</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">time,&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">long</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">period) {</code> 
+            </div> 
+            <div class="line number2 index1 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number3 index2 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(time &lt;&nbsp;</code>
+             <code class="java value" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,153,0);background:none;">0</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">)</code> 
+            </div> 
+            <div class="line number4 index3 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number5 index4 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">throw</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">new</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">IllegalArgumentException(</code>
+             <code class="java string" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:#0000FF;background:none;">"Illegal execution time."</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">);</code> 
+            </div> 
+            <div class="line number6 index5 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number7 index6 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;</code>&nbsp;
+            </div> 
+            <div class="line number8 index7 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number9 index8 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">synchronized</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(queue) {</code> 
+            </div> 
+            <div class="line number10 index9 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number11 index10 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(!thread.newTasksMayBeScheduled)</code> 
+            </div> 
+            <div class="line number12 index11 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number13 index12 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">throw</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">new</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">IllegalStateException(</code>
+             <code class="java string" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:#0000FF;background:none;">"Timer already cancelled."</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">);</code> 
+            </div> 
+            <div class="line number14 index13 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number15 index14 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;</code>&nbsp;
+            </div> 
+            <div class="line number16 index15 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number17 index16 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">synchronized</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(task.lock) {</code> 
+            </div> 
+            <div class="line number18 index17 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number19 index18 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(task.state != TimerTask.VIRGIN)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//我喜欢virgin状态，其他状态表明该Task已经被schedule过了</code> 
+            </div> 
+            <div class="line number20 index19 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number21 index20 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">throw</code>&nbsp;
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">new</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">IllegalStateException(</code> 
+            </div> 
+            <div class="line number22 index21 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number23 index22 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java string" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:#0000FF;background:none;">"Task already scheduled or cancelled"</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">);</code> 
+            </div> 
+            <div class="line number24 index23 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number25 index24 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>&nbsp;
+            </div> 
+            <div class="line number26 index25 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number27 index26 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//设置Task下一次应该执行的时间, 由System.currentTimeMillis()+/-delay得到</code> 
+            </div> 
+            <div class="line number28 index27 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number29 index28 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">task.nextExecutionTime = time;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code> 
+            </div> 
+            <div class="line number30 index29 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number31 index30 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">task.period = period;</code> 
+            </div> 
+            <div class="line number32 index31 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number33 index32 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">task.state = TimerTask.SCHEDULED;</code> 
+            </div> 
+            <div class="line number34 index33 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number35 index34 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number36 index35 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number37 index36 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;</code>&nbsp;
+            </div> 
+            <div class="line number38 index37 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number39 index38 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">queue.add(task);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//queue为TaskQueue类的实例，添加任务到队列中</code> 
+            </div> 
+            <div class="line number40 index39 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number41 index40 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java keyword" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,255);background:none;">if</code>&nbsp;
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">(queue.getMin() == task)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//获取队列中nextExecutionTime最小的任务，如果与当前任务相同</code> 
+            </div> 
+            <div class="line number42 index41 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number43 index42 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">queue.notify();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java comments" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,130,0);background:none;">//还记得前面看到的queue.wait()方法么</code> 
+            </div> 
+            <div class="line number44 index43 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number45 index44 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;"> 
+             <code class="java spaces" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;background:none;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code> 
+            </div> 
+            <div class="line number46 index45 alt1" style="border:0px;line-height:1.8em;vertical-align:baseline;background-image:none;">
+             &nbsp;
+            </div> 
+            <div class="line number47 index46 alt2" style="border:0px;line-height:1.8em;vertical-align:baseline;background:rgb(244,244,244) none;">
+             <code class="java plain" style="border:0px;line-height:1.8em;vertical-align:baseline;font-family:Consolas, 'Bitstream Vera Sans Mono', 'Courier New', Courier, monospace;color:rgb(0,0,0);background:none;">}</code>
+            </div> 
+           </div> </td> 
+         </tr>
+        </tbody>
+       </table>
+      </div> 
+     </div> 
+    </div> 
+    <p>　　</p> 
+    <p>不要奇怪，为什么要判断queue.getMin()&nbsp;==&nbsp;task时，才通过queue.notify()恢复执行。因为这种方式已经满足所有的唤醒要求了。</p> 
+    <p>如果安排当前Task之前queue为空，显然上述判断为true，于是mainLoop()方法能够继续执行。</p> 
+    <p>如果安排当前Task之前queue不为空，那么mainLoop()方法不会一直被阻塞，不需要notify方法调用。</p> 
+    <p>调用该方法还有一个好处是，如果当前安排的Task的下一次执行时间比queue中其余Task的下一次执行时间都要小，通过notify方法可以提前打开queue.wait(executionTime&nbsp;-&nbsp;currentTime)方法对mainLoop()照成的阻塞，从而使得当前任务能够被优先执行，有点抢占的味道。</p> 
+    <p>&nbsp;</p> 
+    <p>&nbsp;上述分析可以看出，Java中Timer机制的实现仅仅使用了JDK中的方法，通过wait &amp; notify机制实现，其源代码也非常简单，但可以想到的是这种实现机制会对开发者造成一种困扰，sched()方法中可以看出，对于一个重复执行的任务，Timer的实现机制是先安排Task下一次执行的时间，然后再启动Task的执行，如果Task的执行时间大于下一次执行的间隔时间，可能出现不可预期的错误。当然，了解了Timer的实现原理，修改这种实现方式也就非常简单了。</p> 
+    <p>&nbsp;</p> 
+   </div> 
+   <div class="clear" style="clear:both;color:rgb(73,73,73);font-family:Arial, Helvetica, sans-serif;font-size:14px;line-height:22.4px;"></div> 
+   <div style="color:rgb(73,73,73);font-family:Arial, Helvetica, sans-serif;font-size:14px;line-height:22.4px;"> 
+    <div>
+     分类:&nbsp;
+     <a href="http://www.cnblogs.com/0616--ataozhijia/category/576534.html" rel="nofollow" style="color:rgb(73,73,73);line-height:normal;">Java基础</a> 
+    </div> 
+    <div>
+     本文转自demoblog博客园博客，原文链接http://www.cnblogs.com/0616--ataozhijia/p/3710599.html如需转载请自行联系原作者
+    </div> 
+    <div>
+     <br>
+    </div> 
+    <div>
+     demoblog
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

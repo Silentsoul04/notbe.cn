@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>缓存篇~第八回　Redis实现基于方法签名的数据集缓存~续（优化缓存中的key） « NotBeCN</title>
+  <meta name="description" content="             上一讲主要是说如何将数据集存储到redis服务器里，而今天主要说的是缓存里的键名，我们习惯叫它key.    redis或者其它缓存组件实现的存储机制里，它将很多方法对应的数据集存储在一个公共的空间里，这个空间足够大，当然它也是共享的，没有具体的分区，也就是说，如果你的key重复了，那这...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/07/weixin_33871366_90136069.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">缓存篇~第八回　Redis实现基于方法签名的数据集缓存~续（优化缓存中的key）</h1>
+    <p class="post-meta">Dec 7, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><a href="http://www.cnblogs.com/lori/p/4073290.html" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">上一讲主要是说如何将数据集存储到redis服务器里</a>，而今天主要说的是缓存里的键名，我们习惯叫它key.</p> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">redis或者其它缓存组件实现的存储机制里，它将很多方法对应的数据集存储在一个公共的空间里，这个空间足够大，当然它也是共享的，没有具体的分区，也就是说，如果你的key重复了，那这事就有点坏味道了，对于一个项目肯定没什么问题，只要做到方法名不相同就可以，但是，如果是多个项目共享一个缓存服务器（缓存中间件，这是很正常的，没有什么公司一个项目对应一个缓存服务器，没必要，当你的项目足够大时，可以会有分模块去做缓存服务器的概念），今天的重点就是在拦截组件中优化我们的key，对于get和put,remove方法都要进行优化.</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre> <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+    <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 表示用于方法缓存功能的拦截行为。
+    </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+    <span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">class</span><span style="line-height:1.5;"> CachingBehavior : IInterceptionBehavior
+    {
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 缓存项目名称，每个项目有自己的名称
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 避免缓存键名重复
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">static</span> <span style="color:rgb(0,0,255);line-height:1.5;">readonly</span> <span style="color:rgb(0,0,255);line-height:1.5;">string</span> cacheProjectName = System.Configuration.ConfigurationManager.AppSettings[<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">CacheProjectName</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>] ?? <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">DataSetCache</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">;
+
+
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">#region</span> Private Methods
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 根据指定的</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;see cref="CachingAttribute"/&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">以及</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;see cref="IMethodInvocation"/&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">实例，
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 获取与某一特定参数值相关的键名。
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;param name="cachingAttribute"&gt;&lt;see cref="CachingAttribute"/&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">实例。</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;/param&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;param name="input"&gt;&lt;see cref="IMethodInvocation"/&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">实例。</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;/param&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;returns&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">与某一特定参数值相关的键名。</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;/returns&gt;</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">private</span> <span style="color:rgb(0,0,255);line-height:1.5;">string</span><span style="line-height:1.5;"> GetValueKey(CachingAttribute cachingAttribute, IMethodInvocation input)
+        {
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">switch</span><span style="line-height:1.5;"> (cachingAttribute.Method)
+            {
+                </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 如果是Remove，则不存在特定值键名，所有的以该方法名称相关的缓存都需要清除</span>
+                <span style="color:rgb(0,0,255);line-height:1.5;">case</span><span style="line-height:1.5;"> CachingMethod.Remove:
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">;
+                </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 如果是Get或者Put，则需要产生一个针对特定参数值的键名</span>
+                <span style="color:rgb(0,0,255);line-height:1.5;">case</span><span style="line-height:1.5;"> CachingMethod.Get:
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">case</span><span style="line-height:1.5;"> CachingMethod.Put:
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (input.Arguments != <span style="color:rgb(0,0,255);line-height:1.5;">null</span> &amp;&amp;<span style="line-height:1.5;">
+                        input.Arguments.Count </span>&gt; <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">)
+                    {
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> sb = <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> StringBuilder();
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">for</span> (<span style="color:rgb(0,0,255);line-height:1.5;">int</span> i = <span style="color:rgb(128,0,128);line-height:1.5;">0</span>; i &lt; input.Arguments.Count; i++<span style="line-height:1.5;">)
+                        {
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (input.Arguments[i].GetType().BaseType == <span style="color:rgb(0,0,255);line-height:1.5;">typeof</span>(LambdaExpression))<span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">lambda处理</span>
+<span style="line-height:1.5;">                            {
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> exp = input.Arguments[i] <span style="color:rgb(0,0,255);line-height:1.5;">as</span><span style="line-height:1.5;"> LambdaExpression;
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> arr =<span style="line-height:1.5;"> ((System.Runtime.CompilerServices.Closure)(((System.Delegate)(Expression.Lambda(exp).Compile().DynamicInvoke())).Target)).Constants;
+
+                                Type t </span>= arr[<span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">].GetType();
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">string</span> result = <span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">;
+
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">foreach</span> (<span style="color:rgb(0,0,255);line-height:1.5;">var</span> member <span style="color:rgb(0,0,255);line-height:1.5;">in</span><span style="line-height:1.5;"> t.GetFields())
+                                {
+                                    result </span>+= member.Name + <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">_</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> + t.GetField(member.Name).GetValue(arr[<span style="color:rgb(128,0,128);line-height:1.5;">0</span>]) + <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">_</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">;
+                                }
+                                result </span>= result.Remove(result.Length - <span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">);
+                                sb.Append(result.ToString());
+                            }
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span> <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (input.Arguments[i].GetType() != <span style="color:rgb(0,0,255);line-height:1.5;">typeof</span>(<span style="color:rgb(0,0,255);line-height:1.5;">string</span>)<span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">类和结构体处理</span>
+                                &amp;&amp;<span style="line-height:1.5;"> input.Arguments[i].GetType().BaseType.IsClass)
+                            {
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> obj =<span style="line-height:1.5;"> input.Arguments[i];
+                                Type t </span>=<span style="line-height:1.5;"> obj.GetType();
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">string</span> result = <span style="color:rgb(128,0,0);line-height:1.5;">""</span><span style="line-height:1.5;">;
+
+                                </span><span style="line-height:1.5;">foreach (var member in t.GetProperties())//公开属性<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; result += member.Name + "_" + t.GetProperty(member.Name).GetValue(obj) + "_";<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; foreach (var member in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))//私有和公用字段<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; result += member.Name + "_" + t.GetField(member.Name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance).GetValue(obj) + "_";<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+                                result </span>= result.Remove(result.Length - <span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">);
+                                sb.Append(result.ToString());
+                            }
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">简单值类型处理</span>
+<span style="line-height:1.5;">                            {
+                                sb.Append(input.Arguments[i].ToString());
+                            }
+
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (i != input.Arguments.Count - <span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;">)
+                                sb.Append(</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">_</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+                        }
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> sb.ToString();
+                    }
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span>
+                        <span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">NULL</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">;
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">default</span><span style="line-height:1.5;">:
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">throw</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span> InvalidOperationException(<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">无效的缓存方式。</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">);
+            }
+        }
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">#endregion</span>
+
+        <span style="color:rgb(0,0,255);line-height:1.5;">#region</span> IInterceptionBehavior Members
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 获取当前行为需要拦截的对象类型接口。
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;returns&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">所有需要拦截的对象类型接口。</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;/returns&gt;</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">public</span> IEnumerable&lt;Type&gt;<span style="line-height:1.5;"> GetRequiredInterfaces()
+        {
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> Type.EmptyTypes;
+        }
+
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 通过实现此方法来拦截调用并执行所需的拦截行为。
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;param name="input"&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">调用拦截目标时的输入信息。</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;/param&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;param name="getNext"&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">通过行为链来获取下一个拦截行为的委托。</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;/param&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;returns&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">从拦截目标获得的返回信息。</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;/returns&gt;</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">public</span><span style="line-height:1.5;"> IMethodReturn Invoke(IMethodInvocation input, GetNextInterceptionBehaviorDelegate getNext)
+        {
+
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> method =<span style="line-height:1.5;"> input.MethodBase;
+            </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">键值前缀</span>
+            <span style="color:rgb(0,0,255);line-height:1.5;">string</span> prefix = cacheProjectName + <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">_</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> + input.Target.ToString() + <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">_</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">;
+            </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">键名，在put和get时使用</span>
+            <span style="color:rgb(0,0,255);line-height:1.5;">var</span> key = prefix +<span style="line-height:1.5;"> method.Name;
+
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> (method.IsDefined(<span style="color:rgb(0,0,255);line-height:1.5;">typeof</span>(CachingAttribute), <span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">))
+            {
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> cachingAttribute = (CachingAttribute)method.GetCustomAttributes(<span style="color:rgb(0,0,255);line-height:1.5;">typeof</span>(CachingAttribute), <span style="color:rgb(0,0,255);line-height:1.5;">false</span>)[<span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">];
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> valKey =<span style="line-height:1.5;"> GetValueKey(cachingAttribute, input);
+                </span><span style="color:rgb(0,0,255);line-height:1.5;">switch</span><span style="line-height:1.5;"> (cachingAttribute.Method)
+                {
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">case</span><span style="line-height:1.5;"> CachingMethod.Get:
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">try</span><span style="line-height:1.5;">
+                        {
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span><span style="line-height:1.5;"> (CacheManager.Instance.Exists(key, valKey))
+                            {
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> obj =<span style="line-height:1.5;"> CacheManager.Instance.Get(key, valKey);
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> arguments = <span style="color:rgb(0,0,255);line-height:1.5;">new</span> <span style="color:rgb(0,0,255);line-height:1.5;">object</span><span style="line-height:1.5;">[input.Arguments.Count];
+                                input.Arguments.CopyTo(arguments, </span><span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;">);
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> VirtualMethodReturn(input, obj, arguments);
+                            }
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+                            {
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> methodReturn =<span style="line-height:1.5;"> getNext().Invoke(input, getNext);
+                                CacheManager.Instance.Add(key, valKey, methodReturn.ReturnValue);
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> methodReturn;
+                            }
+                        }
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">catch</span><span style="line-height:1.5;"> (Exception ex)
+                        {
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> VirtualMethodReturn(input, ex);
+                        }
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">case</span><span style="line-height:1.5;"> CachingMethod.Put:
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">try</span><span style="line-height:1.5;">
+                        {
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> methodReturn =<span style="line-height:1.5;"> getNext().Invoke(input, getNext);
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span><span style="line-height:1.5;"> (CacheManager.Instance.Exists(key))
+                            {
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span><span style="line-height:1.5;"> (cachingAttribute.Force)
+                                {
+                                    CacheManager.Instance.Remove(key);
+                                    CacheManager.Instance.Add(key, valKey, methodReturn.ReturnValue);
+                                }
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+                                    CacheManager.Instance.Put(key, valKey, methodReturn.ReturnValue);
+                            }
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">else</span><span style="line-height:1.5;">
+                                CacheManager.Instance.Add(key, valKey, methodReturn.ReturnValue);
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> methodReturn;
+                        }
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">catch</span><span style="line-height:1.5;"> (Exception ex)
+                        {
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> VirtualMethodReturn(input, ex);
+                        }
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">case</span><span style="line-height:1.5;"> CachingMethod.Remove:
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">try</span><span style="line-height:1.5;">
+                        {
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> removeKeys =<span style="line-height:1.5;"> cachingAttribute.CorrespondingMethodNames;
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">foreach</span> (<span style="color:rgb(0,0,255);line-height:1.5;">var</span> removeKey <span style="color:rgb(0,0,255);line-height:1.5;">in</span><span style="line-height:1.5;"> removeKeys)
+                            {
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">string</span> delKey = prefix +<span style="line-height:1.5;"> removeKey;
+                                </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span><span style="line-height:1.5;"> (CacheManager.Instance.Exists(delKey))
+                                    CacheManager.Instance.Remove(delKey);
+                            }
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">var</span> methodReturn =<span style="line-height:1.5;"> getNext().Invoke(input, getNext);
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> methodReturn;
+                        }
+                        </span><span style="color:rgb(0,0,255);line-height:1.5;">catch</span><span style="line-height:1.5;"> (Exception ex)
+                        {
+                            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> VirtualMethodReturn(input, ex);
+                        }
+                    </span><span style="color:rgb(0,0,255);line-height:1.5;">default</span>: <span style="color:rgb(0,0,255);line-height:1.5;">break</span><span style="line-height:1.5;">;
+                }
+            }
+
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> getNext().Invoke(input, getNext);
+        }
+
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;summary&gt;</span>
+        <span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 获取一个</span><span style="color:rgb(128,128,128);line-height:1.5;">&lt;see cref="Boolean"/&gt;</span><span style="color:rgb(0,128,0);line-height:1.5;">值，该值表示当前拦截行为被调用时，是否真的需要执行
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span><span style="color:rgb(0,128,0);line-height:1.5;"> 某些操作。
+        </span><span style="color:rgb(128,128,128);line-height:1.5;">///</span> <span style="color:rgb(128,128,128);line-height:1.5;">&lt;/summary&gt;</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">bool</span><span style="line-height:1.5;"> WillExecute
+        {
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">get</span> { <span style="color:rgb(0,0,255);line-height:1.5;">return</span> <span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">; }
+        }
+
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">#endregion</span><span style="line-height:1.5;">
+    }</span></pre>
+   </div> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">优化后的key的结构为项目前缀_项目命名空间_方法名，这样的设计我想它不会再有重复了，事实上，如果你的项目正规的话，只要有（项目命名空间_方法名）这一层控制就可以做到key值唯一了，而为了避免意外，我们还是加了一个项目前缀CacheProjectName！</p> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">我们可以看一下缓存存储时的键名截图</p> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><img src="data:image/png;base64,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" alt="" style="border:1px solid rgb(204,204,204);"></p> 
+   <p style="line-height:24px;"><font color="#333333"><span style="font-size:15px;">本文转自博客园张占岭（仓储大叔）的博客，原文链接：<a href="http://www.cnblogs.com/lori/p/4078188.html" rel="nofollow">缓存篇~第八回　Redis实现基于方法签名的数据集缓存~续（优化缓存中的key）</a></span></font><span style="font-size:15px;color:rgb(51,51,51);font-family:'comic sans ms';">，如需转载请自行联系原博主。</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

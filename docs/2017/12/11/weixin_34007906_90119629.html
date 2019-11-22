@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Oracle数据库 ORA-600 [13013]故障处理 « NotBeCN</title>
+  <meta name="description" content="             中午接到电话，客户的核心系统Oracle数据库实例宕机，远程过去在告警日志中看到大量的如下报错，报错很频繁：    ......Fri Jul 25 13:20:14 2014Errors in file /u01/app/oracle/diag/rdbms/d012band/d012b...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/11/weixin_34007906_90119629.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Oracle数据库 ORA-600 [13013]故障处理</h1>
+    <p class="post-meta">Dec 11, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>中午接到电话，客户的核心系统Oracle数据库实例宕机，远程过去在告警日志中看到大量的如下报错，报错很频繁：</p> 
+   <pre><code class="js">......
+Fri Jul 25 13:20:14 2014
+Errors in file /u01/app/oracle/diag/rdbms/d012band/d012band/trace/d012band_smon_5964354.trc  (incident=43361):
+ORA-00600: internal error code, arguments: [13013], [5001], [268], [8452274], [7], [8452274], [17], [], [], [], [], []
+Incident details in: /u01/app/oracle/diag/rdbms/d012band/d012band/incident/incdir_43361/d012band_smon_5964354_i43361.trc
+Use ADRCI or Support Workbench to package the incident.
+See Note 411.1 at My Oracle Support for error and packaging details.
+Non-fatal internal error happenned while SMON was doing logging scn-&gt;time mapping.
+SMON encountered 1 out of maximum 100 non-fatal internal errors.
+Fri Jul 25 13:20:17 2014
+Dumping diagnostic data in directory=[cdmp_20140725132017], requested by (instance=1, osid=5964354 (SMON)), summary=[incident=43361].
+Starting background process SMCO
+......
+</code></pre> 
+   <p>一段时间后，最后实例被PMON进程终止，导致核心系统宕机。</p> 
+   <p>客户环境：Oracle Database 11.2.0.3.0 for IBM AIX 6.1，单机，IBM HACMP主备模式保护。</p> 
+   <pre><code>参考《    New and Improved: ORA-600 [13013] "Unable to get a Stable set of Records" (文档 ID 1438920.1)》和《ORA-600 [13013] "Unable to get a Stable set of Records" (文档 ID 28185.1)》文章；该报错是由于对某个表执行DML操作，该表对应的某个索引损坏导致的，解决的办法是找出操作的表和受损的索引，重建索引即可。
+</code></pre> 
+   <p>下面是对ORA-600的参数说明：</p> 
+   <pre><code class="js">6 Argument format
+  =================
+
+  This format relates to Oracle Server 8.0.3 and above
+
+    Arg [a] Passcount
+    Arg [b] Data Object number
+    Arg [c] Tablespace Decimal Relative DBA (RDBA) of block containing the row to be updated
+    Arg [d] Row Slot number
+    Arg [e] Decimal RDBA of block being updated (Typically same as [c])
+    Arg [f] Code
+</code></pre> 
+   <p>由此执行下面的SQL语句查询找出DML操作的表，以及表对应的索引：</p> 
+   <pre><code class="js">SQL&gt; SELECT OWNER,OBJECT_NAME,OBJECT_TYPE FROM DBA_OBJECTS WHERE DATA_OBJECT_ID=268;
+
+发现问题对象是SYS用户下面的SMON_SCN_TIME表，SYS.SMON_SCN_TIME是Oracle更新非常频繁的一张表，该数据字典用于维护SCN和时间的关系。
+
+SQL&gt; SELECT OWNER,INDEX_NAME FROM DBA_INDEXES WHERE TABLE_NAME='SMON_SCN_TIME';
+
+发现这个表对应有SMON_SCN_TIME_TIM_IDX和SMON_SCN_TIME_SCN_IDX两个索引。
+</code></pre> 
+   <p>对表进行分析，找出有问题的索引：</p> 
+   <pre><code class="js">SQL&gt; ANALYZE TABLE smon_scn_time VALIDATE STRUCTURE;
+
+Table analyzed.
+
+SQL&gt; ANALYZE TABLE smon_scn_time VALIDATE STRUCTURE CASCADE ONLINE;
+
+table/Index Cross Reference Failure - see trace file
+</code></pre> 
+   <p>能够正常的分析表，但是不能正常的分析表上的索引。</p> 
+   <p>参考《OERR: ORA-1499 table/Index Cross Reference Failure - see trace file (文档 ID 1499.1)》文章，尝试找出受影响的索引：</p> 
+   <p>查看trace file:</p> 
+   <pre><code class="js">BH (0x70000078fe2df98) file#: 2 rdba: 0x0081483e (2/84030) class: 1 ba: 0x70000078ce52000
+            set: 174 pool: 3 bsz: 8192 bsi: 0 sflg: 2 pwc: 2272,19
+            dbwrid: 5 obj: 272 objn: 272 tsn: 1 afn: 2 hint: f
+            hash: [0x700000801ff36a0,0x700000801ff36a0] lru: [0x70000074bf81f40,0x70000074bf81ce0]
+            ckptq: [NULL] fileq: [NULL] objq: [0x7000007f59b4138,0x7000007f59b4138] objaq: [0x7000007f59b4128,0x7000007f59b4128]
+            use: [NULL] wait: [NULL] fast-cr-pins: 2
+            st: XCURRENT md: NULL fpin: 'kdiwh15: kdifxs' tch: 12
+            flags:
+            LRBA: [0x0.0.0] LSCN: [0x0.0] HSCN: [0xffff.ffffffff] HSUB: [65535]
+            buffer tsn: 1 rdba: 0x0081483e (2/84030)
+            scn: 0x0000.2f4752d8 seq: 0x01 flg: 0x06 tail: 0x52d80601
+            frmt: 0x02 chkval: 0x0778 type: 0x06=trans data
+
+0x0081483e要去掉0x，0x表示十六进制。
+</code></pre> 
+   <p>执行下面的SQL语句：</p> 
+   <pre><code class="js">SELECT owner, segment_name, segment_type, partition_name
+FROM   DBA_SEGMENTS
+WHERE  header_file = (SELECT file# 
+                      FROM   v$datafile 
+                      WHERE  rfile# = dbms_utility.data_block_address_file(to_number('0080f8b2','XXXXXXXX'))
+                        AND  ts#= 1)
+  AND header_block = dbms_utility.data_block_address_block(to_number('0080f8b2','XXXXXXXX'));
+</code></pre> 
+   <p>可惜没有任何的查询结果。</p> 
+   <p>继续参考《Instance Terminated With Error ORA-00474: SMON Process Terminated With Error (文档 ID 1361872.1)》文章，文章有下面一段描述：</p> 
+   <pre><code class="js">CAUSE
+
+ORA600 [13011] is raised due to indexes corruption. To verify the corruption run the following statements:
+
+
+SQL&gt; conn / as sysdba
+SQL&gt; ANALYZE TABLE smon_scn_time VALIDATE STRUCTURE;
+
+Table analyzed.
+
+-- It should come out clean giving message table analyzed.
+
+SQL&gt; ANALYZE TABLE smon_scn_time VALIDATE STRUCTURE CASCADE ONLINE; 
+
+-- it should fail with Ora-1499 if at least one index is corrupted
+</code></pre> 
+   <p>ORA-1499就是我们前面遇到的报错：</p> 
+   <pre><code class="js">Error: ORA 1499 
+Text: table/Index Cross Reference Failure - see trace file 
+-------------------------------------------------------------------------------
+Cause:  An error occurred when validating an index or a table using the 
+        ANALYZE command.
+        One or more entries does not point to the appropriate cross-reference.
+Action: Check the trace file for more descriptive messages about the problem.
+        Correct these errors.
+</code></pre> 
+   <p>如果在分析表的时候收到ORA-1499的错误，表示至少有一个索引是损坏的。</p> 
+   <pre><code class="js">SOLUTION
+
+Rebuild corrupted indexes:
+
+
+SQL&gt; conn as sysdba
+SQL&gt; ALTER INDEX SMON_SCN_TIME_TIM_IDX REBUILD ONLINE;
+SQL&gt; ALTER INDEX SMON_SCN_TIME_SCN_IDX REBUILD ONLINE;
+
+then re-run
+
+
+SQL&gt; ANALYZE TABLE smon_scn_time VALIDATE STRUCTURE CASCADE ONLINE;
+
+Table analyzed.
+
+Note: The last statement should not report any errors.
+</code></pre> 
+   <p>两个索引重建之后，ANALYZE TABLE smon_scn_time VALIDATE STRUCTURE CASCADE ONLINE语句能顺利的分析，告警日志不再有报错产生。</p> 
+   <p>本文转自ICT时空 dbasdk博客，原文链接：[Oracle数据库 ORA-600 [13013]故障处理](<a href="http://blog.itpub.net/29734436/viewspace-1240001/)" rel="nofollow">http://blog.itpub.net/29734436/viewspace-1240001/)</a> ，如需转载请自行联系原博主。</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

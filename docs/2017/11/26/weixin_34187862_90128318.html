@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>LinkedIn的即时消息：在一台机器上支持几十万条长连接 « NotBeCN</title>
+  <meta name="description" content="             最近我们介绍了LinkedIn的即时通信，最后提到了分型指标和读回复。为了实现这些功能，我们需要有办法通过长连接来把数据从服务器端推送到手机或网页客户端，而不是许多当代应用所采取的标准的请求-响应模式。在这篇文章中会描述在我们收到了消息、分型指标和读回复之后，如何立刻把它们发往客户端。 ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/26/weixin_34187862_90128318.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">LinkedIn的即时消息：在一台机器上支持几十万条长连接</h1>
+    <p class="post-meta">Nov 26, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>最近我们介绍了LinkedIn的即时通信，最后提到了分型指标和读回复。为了实现这些功能，我们需要有办法通过长连接来把数据从服务器端推送到手机或网页客户端，而不是许多当代应用所采取的标准的请求-响应模式。在这篇文章中会描述在我们收到了消息、分型指标和读回复之后，如何立刻把它们发往客户端。</p> 
+   <p>内容会包含我们是如何使用Play框架和Akka Actor Model来管理长连接、由服务器主动发送事件的。我们也会分享一些在生产环境中我们是如何在服务器上做负载测试，来管理数十万条并发长连接的，还有一些心得。最后，我们会分享在整个过程中我们用到的各种优化方法。</p> 
+   <p>服务器发送事件</p> 
+   <p>服务器发送事件(Server-sent events，SSE）是一种客户端服务器之间的通信技术，具体是在客户端向服务器建立起了一条普通的HTTP连接之后，服务器在有事件发生时就通过这条连接向客户端推送持续的数据流，而不需要客户端不断地发出后续的请求。客户端要用到EventSource接口来以文本或事件流的形式不断地接收服务器发送的事件或数据块，而不必关闭连接。所有的现代网页浏览器都支持EventSource接口，iOS和安卓上也都有现成的库支持。</p> 
+   <p>在我们最早实现的版本中，我们选择了基于Websockets的SSE技术，因为它可以基于传统的HTTP工作，而且我们也希望我们采用的协议可以最大的兼容LinkedIn的广大会员们，他们会从各式各样的网络来访问我们的网站。基于这样的理念，Websockets是一种可以实现双向的、全双工通信的技术，可以把它作为协议的候选，我们也会在合适的时候升级成它。</p> 
+   <p>Play框架和服务器发送的消息</p> 
+   <p>我们LinkedIn的服务器端程序使用了Play框架。Play是一个开源的、轻量级的、完全异步的框架，可用于开发Java和Scala程序。它本身自带了对EventSource和Websockets的支持。为了能以可扩展的方式维护数十万条SSE长连接，我们把Play和Akka结合起来用了。Akka可以让我们改进抽象模型，并用Actor Model来为每个服务器建立起来的连接分配一个Actor。</p> 
+   <p>// Client A connects to the server and is assigned connectionIdA</p> 
+   <p>public Result listen() {</p> 
+   <p> return ok(EventSource.whenConnected(eventSource -&gt; {</p> 
+   <p> String connectionId = UUID.randomUUID().toString();</p> 
+   <p> // construct an Akka Actor with the new EventSource connection identified by a random connection identifier</p> 
+   <p> Akka.system().actorOf(</p> 
+   <p> ClientConnectionActor.props(connectionId, eventSource),</p> 
+   <p> connectionId);</p> 
+   <p> }));</p> 
+   <p>}</p> 
+   <p>上面的这段代码演示了如何使用Play的EventSource API来在程序控制器中接受并建立一条连接，再将它置于一个Akka Actor的管理之下。这样Actor就开始负责管理这个连接的整个生命周期，在有事件发生时把数据发送给客户端就被简化成了把消息发送给Akka Actor。</p> 
+   <p>// User B sends a message to User A</p> 
+   <p>// We identify the Actor which manages the connection on which User A is connected (connectionIdA)</p> 
+   <p>ActorSelection actorSelection = Akka.system().actorSelection("akka://application/user/" + connectionIdA);</p> 
+   <p>// Send B's message to A's Actor</p> 
+   <p>actorSelection.tell(new ClientMessage(data), ActorRef.noSender());</p> 
+   <p>请注意唯一与这条连接交互的地方就是向管理着这条连接的Akka Actor发送一条消息。这很重要，因此才能使Akka具有异步、非阻塞、高性能和为分布式系统而设计的特性。相应地，Akka Actor处理它收到的消息的方式就是转发给它管理的EventSource连接。</p> 
+   <p>public class ClientConnectionActor extends UntypedActor {</p> 
+   <p> public static Props props(String connectionId, EventSource eventSource) {</p> 
+   <p> return Props.create(ClientConnectionActor.class, () -&gt; new ClientConnectionActor(connectionId, eventSource));</p> 
+   <p> }</p> 
+   <p> public void onReceive(Object msg) throws Exception {</p> 
+   <p> if (msg instanceof ClientMessage) {</p> 
+   <p> eventSource.send(event(Json.toJson(clientMessage)));</p> 
+   <p> }</p> 
+   <p> }</p> 
+   <p>}</p> 
+   <p>就是这样了。用Play框架和Akka Actor Model来管理并发的EventSource连接就是这么简单。</p> 
+   <p>但是在系统上规模之后这也能工作得很好吗？读读下面的内容就知道答案了。</p> 
+   <p>使用真实生产环境流量做压力测试</p> 
+   <p>所有的系统最终都是要用真实生产流量来考验一下的，可真实生产流量又不是那么容易复制的，因为大家可以用来模拟做压力测试的工具并不多。但我们在部署到真实生产环境之前，又是如何用真实的生产流量来做测试的呢？在这一点上我们用到了一种叫“暗地启动”的技术，在我们下一篇文章中会详细讨论一下。</p> 
+   <p>为了让这篇文章只关注自己的主题，让我们假设我们已经可以在我们的服务器集群中产生真实的生产压力了。那么测试系统极限的一个有效方法就是把导向一个单一节点的压力不断加大，以此让整个生产集群在承受极大压力时所该暴露的问题极早暴露出来。</p> 
+   <p>通过这样的办法以及其它的辅助手段，我们发现了系统的几处限制。下面几节就讲讲我们是如何通过几处简单的优化，让单台服务器最终可以支撑数十万条连接的。</p> 
+   <p><b>限制一：一个</b><b>Socket</b><b>上的处于待定状态的连接的最大数量</b></p> 
+   <p>在一些最早的压力测试中我们就常碰到一个奇怪的问题，我们没办法同时建立很多个连接，大概128个就到上限了。请注意服务器是可以很轻松地处理几千个并发连接的，但我们却做不到向连接池中同时加入多于128条连接。在真实的生产环境中，这大概相当于有128个会员同时在向同一个服务器初始化连接。</p> 
+   <p>做了一番研究之后，我们发现了下面这个内核参数：</p> 
+   <p>net.core.somaxconn</p> 
+   <p>这个内核参数的意思就是程序准备接受的处于等待建立连接状态的最大TCP连接数量。如果在队列满的时候来了一条连接建立请求，请求会直接被拒绝掉。在许多的主流操作系统上这个值都默认是128。</p> 
+   <p>在“/etc/sysctl.conf”文件中把这个值改大之后，就解决了在我们的Linux服务器上的“拒绝连接”问题了。</p> 
+   <p>请注意Netty 4.x版本及以上在初始化Java ServerSocket时，会自动从操作系统中取到这个值并直接使用。不过，如果你也想在应用程序的级别配置它，你可以在Play程序的配置参数中这样设置：</p> 
+   <p>play.server.netty.option.backlog=1024</p> 
+   <p><b>限制二：</b><b>JVM</b><b>线程数量</b></p> 
+   <p>在让比较大的生产流量第一次压向我们的服务器之后，没过几个小时我们就收到了告警，负载均衡器开始没办法连上一部分服务器了。做了进一步调查之后，我们在服务器日志中发现了下面这些内容：</p> 
+   <p>java.lang.OutOfMemoryError: unable to create new native thread</p> 
+   <p>下面关于我们服务器上JVM线程数量的图也证实了我们当时出现了线程泄露，内存也快耗尽了。</p> 
+   <p>我们把JVM进程的线程状态打出来查看了一下，发现了许多处于如下状态的睡眠线程：</p> 
+   <p>"Hashed wheel timer #11327" #27780 prio=5 os_prio=0 tid=0x00007f73a8bba000 nid=0x27f4 sleeping[0x00007f7329d23000] java.lang.Thread.State: TIMED_WAITING (sleeping)</p> 
+   <p> at java.lang.Thread.sleep(Native Method)</p> 
+   <p> at org.jboss.netty.util.HashedWheelTimer$Worker.waitForNextTick(HashedWheelTimer.java:445)</p> 
+   <p> at org.jboss.netty.util.HashedWheelTimer$Worker.run(HashedWheelTimer.java:364)</p> 
+   <p> at org.jboss.netty.util.ThreadRenamingRunnable.run(ThreadRenamingRunnable.java:108)</p> 
+   <p> at java.lang.Thread.run(Thread.java:745)</p> 
+   <p>经过进一步调查，我们发现原因是LinkedIn对Play框架的实现中对于Netty的空闲超时机制的支持有个BUG，而本来的Play框架代码中对每条进来的连接都会相应地创建一个新的HashedWheelTimer实例。这个补丁非常清晰地说明了这个BUG的原因。</p> 
+   <p>如果你也碰上了JVM线程限制的问题，那很有可能在你的代码中也会有一些需要解决的线程泄露问题。但是，如果你发现其实你的所有线程都在干活，而且干的也是你期望的活，那有没有办法改改系统，允许你创建更多线程，接受更多连接呢？</p> 
+   <p>一如既往，答案还是非常有趣的。要讨论有限的内存与在JVM中可以创建的线程数之间的关系，这是个有趣的话题。一个线程的栈大小决定了可以用来做静态内存分配的内存量。这样，理论上的最大线程数量就是一个进程的用户地址空间大小除以线程的栈大小。不过，实际上JVM也会把内存用于堆上的动态分配。在用一个小Java程序做了一些简单实验之后，我们证实了如果堆分配的内存多，那栈可以用的内存就少。这样，线程数量的限制会随着堆大小的增加而减少。</p> 
+   <p>结论就是，如果你想增加线程数量限制，你可以减少每个线程使用的栈大小（-Xss），也可以减少分配给堆的内存（-Xms，-Xmx）。</p> 
+   <p><b>限制三：临时端口耗尽</b></p> 
+   <p>事实上我们倒没有真的达到这个限制，但我们还是想把它写在这里，因为当大家想在一台服务器上支持几十万条连接时通常都会达到这个限制。每当负载均衡器连上一个服务器节点时，它都会占用一个临时端口。在这个连接的生命周期内，这个端口都会与它相关联，因此叫它“临时的”。当连接被终止之后，临时端口就会被释放，可以重复使用。可是长连接并不象普通的HTTP连接一样会终止，所以在负载均衡器上的可用临时端口池就会最终被耗尽。这时候的状态就是没有办法再建立新连接了，因为所有操作系统可以用来建立新连接的端口号都已经用掉了。在较新的负载均衡器上解决临时端口耗尽问题的方法有很多，但那些内容就不在本文范围之内了。</p> 
+   <p>很幸运我们每台负载均衡器都可以支持高达25万条连接。不过，但你达到这个限制的时候，要和管理你的负载均衡器的团队一起合作，来提高负载均衡器与你的服务器节点之间的开放连接的数量限制。</p> 
+   <p><b>限制四：文件描述符</b></p> 
+   <p>当我们在数据中心中搭建起来了16台服务器，并且可以处理很可观的生产流量之后，我们决定测试一下每台服务器所能承受的长连接数量的限制。具体的测试方法是一次关掉几台服务器，这样负载均衡器就会把越来越多的流量导到剩下的服务器上了。这样的测试产生了下面这张美妙的图，表示了每台服务器上我们的服务器进程所使用的文件描述符数量，我们内部给它起了个花名：“毛毛虫图”。</p> 
+   <p>文件描述符在Unix一类操作系统中都是一种抽象的句柄，与其它不同的是它是用来访问网络Socket的。不出意外，每台服务器上支撑的持久连接越多，那所需要分配的文件描述符也越多。你可以看到，当16台服务器只剩2台时，它们每一台都用到了2万个文件描述符。当我们把它们之中再关掉一台时，我们在剩下的那台上看到了下面的日志：</p> 
+   <p>java.net.SocketException: Too many files open</p> 
+   <p>在把所有的连接都导向唯一的一台服务器时，我们就会达到单进程的文件描述符限制。要查看一个进程可用的文件描述符限制数，可以查看下面这个文件的“Max open files”的值。</p> 
+   <p>$ cat /proc/&lt;pid&gt;/limits</p> 
+   <p>Max open files 30000</p> 
+   <p>如下面的例子，这个可以加大到20万，只需要在文件/etc/security/limits.conf中添加下面的行：</p> 
+   <p>&lt;process username&gt; soft nofile 200000</p> 
+   <p>&lt;process username&gt; hard nofile 200000</p> 
+   <p>注意还有一个系统级的文件描述符限制，可以调节文件/etc/sysctl.conf中的内核参数：</p> 
+   <p>fs.file-max</p> 
+   <p>这样我们就把所有服务器上面的单进程文件描述符限制都调大了，所以你看，我们现在每台服务器才能轻松地处理3万条以上的连接。</p> 
+   <p><b>限制五：</b><b>JVM</b><b>堆</b></p> 
+   <p>下一步，我们重复了上面的过程，只是把大约6万条连接导向剩下的两台服务器中幸存的那台时，情况又开始变糟了。已分配的文件描述符数，还有相应的活跃长连接的数量，都一下子大大降低，而延迟也上升到了不可接受的地步。</p> 
+   <p>经过进一步的调查，我们发现原因是我们耗尽了4GB的JVM堆空间。这也造就了下面这张罕见的图，显示每次内存回收器所能回收的堆空间都越来越少，直到最后全都用光了。</p> 
+   <p>我们在数据中心的即时消息服务里用了TLS处理所有的内部通信。实践中，每条TLS连接都会消耗JVM的约20KB的内存，而且还会随着活跃的长连接数量的增加而增涨，最终导致如上图所示的内存耗尽状态。</p> 
+   <p>我们把JVM堆空间的大小调成了8GB（-Xms8g, -Xmx8g）并重跑了测试，不断地向一台服务器导过去越来越多的连接，最终在一台服务器处理约9万条连接时内存再次耗尽，连接数开始下降。</p> 
+   <p>事实上，我们又把堆空间耗尽了，这一次是8G。</p> 
+   <p>处理能力倒是从来都没用达到过极限，因为CPU利用率一直低于80%。</p> 
+   <p>我们接下来是怎么测的？因为我们每台服务器都是非常奢侈地有着64GB内存的配置，我们直接把JVM堆大小调成了16GB。从那以后，我们就再也没在性能测试中达到这个内存极限了，也在生产环境中成功地处理了10万条以上的并发长连接。可是，在上面的内容中你已经看到，当压力继续增大时我们还会碰上某些限制的。你觉得会是什么呢？内存？CPU？请通过我的Twitter账号@agupta03告诉我你的想法。</p> 
+   <p>结论</p> 
+   <p>在这篇文章中，我们简单介绍了LinkedIn为了向即时通信客户端推送服务器主动发送的消息而要保持长连接的情况。事实也证明，Akka的Actor Model在Play框架中管理这些连接是非常好用的。</p> 
+   <p>不断地挑战我们的生产系统的极限，并尝试提高它，这样的事情是我们在LinkedIn最喜欢做的。我们分享了在我们在我们经过重重挑战，最终让我们的单台即时通信服务器可以处理几十万条长连接的过程中，我们碰到的一些有趣的限制和解决方法。我们把这些细节分享出来，这样你就可以理解每个限制每种技术背后的原因所在，以便可以压榨出你的系统的最佳性能。希望你能从我们的文章中借鉴到一些东西，并且应用到你自己的系统上。</p> 
+   <p><br></p> 
+   <p><br></p> 
+   <p><br></p> 
+   <p>本文转自94cool博客园博客，原文链接：http://www.cnblogs.com/94cool/p/6136164.html，如需转载请自行联系原作者</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

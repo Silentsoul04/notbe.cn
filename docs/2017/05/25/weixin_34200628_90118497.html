@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>v4l2读取摄像头程序流程解析【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：https://my.oschina.net/u/1024767/blog/210801               v4l2 操作实际上就是 open() 设备， close() 设备，以及中间过程的 ioctl() 操作。对于 ioctl 的调用，要注意对 errno 的判断，...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/05/25/weixin_34200628_90118497.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">v4l2读取摄像头程序流程解析【转】</h1>
+    <p class="post-meta">May 25, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="https://my.oschina.net/u/1024767/blog/210801" rel="nofollow">https://my.oschina.net/u/1024767/blog/210801</a></p> 
+   <div class="BlogContent"> 
+    <div> 
+     <p>v4l2 操作实际上就是 open() 设备， close() 设备，以及中间过程的 ioctl() 操作。对于 ioctl 的调用，要注意对 errno 的判断，如果调用被其他信号中断，即 errno 等于 EINTR 的时候，要重新调用。</p> 
+     <p>Video capture device 的实际功能就是采集视频信号，并将数字化的图像保存在 memory 中，现在几乎上所有的相关设备都能采集 25/30 帧 /s 。在下面的讨论中，我只列举出一些和 camera 密切相关的一些属性和方法。</p> 
+     <h2><strong>1 、 open_device</strong></h2> 
+     <p>打开设备一般都是使用 open() 打开 /dev 下的 video 设备文件 ，比如说 /dev/video1, 打开之前首先要对相应的设备文件进行检查 ，比如说使用 stat() 获得文件属性，并判断是否为字符设备文件。</p> 
+     <p>驱动通过主设备号 81 和 0 ～ 255 之间的次设备号来注册 device note ，系统 管理 员通过设备的主次设备号在 /dev 目录下创建相应的字符设备文件。应用 程序不能通过设备的主次设备号来打开设备，而必须通过适当的 device name ，即 /dev 目录下的设备文件来打开设备。</p> 
+     <p>v4l2 支持一个设备文件可以被多次打开，却只允许其中一个应用程序与设备进行数据 交换 ，其他应用程序只能用来设定一些设备参数，对设备进行一些控制。</p> 
+     <p>//====== 相关 spec ： <a href="http://v4l2spec.bytesex.org/spec/c174.htm#OPEN" rel="nofollow">http://v4l2spec.bytesex.org/spec/c174.htm#OPEN</a></p> 
+     <h2><strong>2 、 init_device</strong></h2> 
+     <p>对设备进行初始化是一个很复杂的过程，其中要进行一系列参数的协商，其中重要的包括 v4l2_capability, v4l2_cropcap, v4l2_format 等等。</p> 
+     <h3> 2.1 VIDIOC_QUERYCAP查询能力<br></h3> 
+     <p> 首先使用 VIDIOC_QUERYCAP 命令 来获得当前设备的各个属性，查看设备对各项功能的支持程度： </p> 
+     <p> int ioctl(int fd, int request, struct v4l2_capability *argp); </p> 
+     <p> 所有的 v4l2 驱动都必须支持 VIDIOC_QUERYCAP ，而且在打开设备以后，这个 ioctl 必须是被首先调用的。 </p> 
+     <p> v4l2_capability 的各项参数可以查 API ，其中比较重要的是下面的成员变量： </p> 
+     <p> _u32 capabilities </p> 
+     <p> 这个 32 位无符号整型定义了当前设备对一些关键属性的支持： </p> 
+     <pre><code class="language-cpp"><code class="hljs actionscript">V4L2_CAP_VIDEO_CAPTURE <span class="hljs-number"><span class="hljs-number">0x00000001 <span class="hljs-comment"><span class="hljs-comment">// 这个设备支持 video capture 的接口，即这个设备具备 video capture 的功能 V4L2_CAP_VIDEO_OUTPUT <span class="hljs-number"><span class="hljs-number">0x00000002 <span class="hljs-comment"><span class="hljs-comment">// 这个设备支持 video output 的接口，即这个设备具备 video output 的功能 V4L2_CAP_VIDEO_OVERLAY <span class="hljs-number"><span class="hljs-number">0x00000004 <span class="hljs-comment"><span class="hljs-comment">// 这个设备支持 video overlay 的接口，即这个设备具备 video overlay 的功能，在这个功能下会将采集到的 imag 方在视频设备的 meomory 中保存，并直接在屏幕上显示，而不需要经过其他的处理。 V4L2_CAP_VIDEO_OUTPUT_OVERLAY <span class="hljs-number"><span class="hljs-number">0x00000200 <span class="hljs-comment"><span class="hljs-comment">// 这个设备支持 video output overlay( 又名 On-Screen Display) ，这是一个实验性的功能， spec 说明他在将来可能会改变，如果打开这个功能必须将 video overlay 功能给关闭，反之亦然 V4L2_CAP_READWRITE <span class="hljs-number"><span class="hljs-number">0x01000000 <span class="hljs-comment"><span class="hljs-comment">// 这个设备是否支持 read() 和 write() I/O 操作函数 V4L2_CAP_STREAMING <span class="hljs-number"><span class="hljs-number">0x04000000 <span class="hljs-comment"><span class="hljs-comment">// 这个设备是否支持 streaming I/O 操作函数</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></code></pre> 
+     <p> <br></p> 
+     <p> <br></p> 
+     <span><span><span><span> <br></span></span></span></span> 
+     <p> 在实际操作过程中，可以将取得的 capabilites 与这些宏进行与远算来判断设备是否支持相应的功能。 </p> 
+     <p> 除了 VIDIOC_QUERYCAP 之外，设备其他属性的获得可以通过其他的命令，比如说 VIDIOC_ENUMINPUT 和 VIDIOC_ENUMOUTPUT 可以枚举出设备的输入输出物理连接。 </p> 
+     <p> //============== 相关 spec ： <a href="http://v4l2spec.bytesex.org/spec/x282.htm" rel="nofollow">http://v4l2spec.bytesex.org/spec/x282.htm</a> </p> 
+     <h3> &nbsp;2.2 设置设备参数<br></h3> 
+     <p> 获得 device 的 capability 以后，可以根据应用程序的功能要求对设备参数进行一系列的设置 ，这些参数又分为两部分，一个是 user contrl ，还一个是 extended control </p> 
+     <h4> 2.2.1 设置user contrl 的参数 </h4> 
+     <p> User control 参数包含一个 ID ，以及相应的 Type ，下面对各个 type 进行简单的列举： </p> 
+     <pre><code class="language-cpp"><code class="hljs java">ID Type V4L2_CID_BASE <span class="hljs-comment"><span class="hljs-comment">// 第一个预定义的 ID ，实际等于 V4L2_CID_BRIGHTNESS ，因为 V4L2_CID_BRIGHTNESS 是第一个预定义的 ID V4L2_CID_USER_BASE <span class="hljs-comment"><span class="hljs-comment">// 实际上等同于 V4L2_CID_BASE V4L2_CID_BRIGHTNESS integer <span class="hljs-comment"><span class="hljs-comment">// 图片的亮度，或者说黑色位准 V4L2_CID_AUTO_WHITE_BALANCE <span class="hljs-keyword"><span class="hljs-keyword">boolean <span class="hljs-comment"><span class="hljs-comment">//camera 的自动白平衡 V4L2_CID_EXPOSURE integer <span class="hljs-comment"><span class="hljs-comment">//camera 的爆光时间 V4L2_CID_LASTP1 <span class="hljs-comment"><span class="hljs-comment">// 最后一个预定义的 ID ，实际等于上一个 ID ＋ 1 V4L2_CID_PRIVATE_BASE <span class="hljs-comment"><span class="hljs-comment">// 第一个 driver 定义的一般 control ID</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></code></pre> 
+     <p> <br></p> 
+     <p> <br></p> 
+     <span><span><span><span><span><span> <br></span></span></span></span></span></span> 
+     <p> 可以通过 VIDIOC_QUERYCTRL 和 VIDIOC_QUERYMENU ioctls 来枚举出有效的 control ID ，及其属性，比如说 ID 值，类型，是否有效，是否可修改，最大值，最小值，步长等等 ，主要的数据结构是 v4l2_queryctrl 和 v4l2_querymenu ，他们的结构可以参考 spec 。另外可以通过 V4L2_CID_BASE 和 V4L2_CID_LASTP1 可以枚举出所有的预定义 control ID ，可以通过 V4L2_CID_PRIVATE_BASE 来枚举出所有的驱动定义的 control ID 。 Menu 实际上是同一个 ID 可能具有多个选项的目录。 </p> 
+     <p> int ioctl(int fd, int request,struct v4l2_queryctrl *argp); </p> 
+     <p> int ioctl(int fd, int request, struct v4l2_querymenu *argp); </p> 
+     <p> 获得 user control ID 以后，可以对其中可以修改的 ID 按照应用程序的要求进行修改 VIDIOC_G_CTRL, VIDIOC_S_CTRL ： </p> 
+     <p> int ioctl(int fd, int request, struct v4l2_control *argp); </p> 
+     <p> v4l2_control 的结构比较简单，就是相应的 ID 及其 value 。 </p> 
+     <p> //========== 相关 spec ： <a href="http://v4l2spec.bytesex.org/spec/x542.htm" rel="nofollow">http://v4l2spec.bytesex.org/spec/x542.htm</a> </p> 
+     <h4> 2.2.2 扩展控制 <br></h4> 
+     <p> 除了 user control 之外还有一个就是扩展控制，扩展控制可以同时原子的对多个 ID 进行 control ，相关命令是三个： VIDIOC_G_EXT_CTRLS, VIDIOC_S_EXT_CTRLS 和 VIDIOC_TRY_EXT_CTRLS ： </p> 
+     <p> int ioctl(int fd, int request, struct v4l2_ext_controls *argp); </p> 
+     <p> 其中最重要的是 v4l2_ext_controls 这个数据结构，它包含几个内容： </p> 
+     <p> __u32 ctrl_class </p> 
+     <p> // 现在 spec 中只定义了两种类型的 class ： V4L2_CTRL_CLASS_USER 和 V4L2_CTRL_CLASS_MPEG </p> 
+     <p> __u32 count </p> 
+     <p> //ctrl 数组中的 control ，即 v4l2_ext_control 的个数 </p> 
+     <p> struct v4l2_ext_control * controls </p> 
+     <p> //control 数组， v4l2_ext_control 包含要设定的 ID ，以及 value </p> 
+     <p> 应用程序可以使用 V4L2_CTRL_FLAG_NEXT_CTRL 来对扩展 control 进行枚举， V4L2_CTRL_FLAG_NEXT_CTRL 返回下一个 ID 更高的 control ID ： </p> 
+     <p> struct v4l2_queryctrl qctrl; </p> 
+     <p> qctrl.id = V4L2_CTRL_FLAG_NEXT_CTRL; </p> 
+     <p> while (0 == ioctl (fd, VIDIOC_QUERYCTRL, &amp;qctrl)) { </p> 
+     <p> /* ... */ </p> 
+     <p> qctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL; </p> 
+     <p> } </p> 
+     <p> 要枚举指定的 control class 中的 control 可以使用下面的方法： </p> 
+     <p> qctrl.id = V4L2_CTRL_CLASS_MPEG | V4L2_CTRL_FLAG_NEXT_CTRL; </p> 
+     <p> while (0 == ioctl (fd, VIDIOC_QUERYCTRL, &amp;qctrl)) { </p> 
+     <p> if (V4L2_CTRL_ID2CLASS (qctrl.id) != V4L2_CTRL_CLASS_MPEG) </p> 
+     <p> break; </p> 
+     <p> /* ... */ </p> 
+     <p> qctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL; </p> 
+     <p> } </p> 
+     <p> 当然前提是驱动必须提供对 V4L2_CTRL_FLAG_NEXT_CTRL 的支持。 </p> 
+     <p> 应用程序可以为创建一个控制面板，其中包含一系列控制，每个 control class 用一个 V4L2_CTRL_TYPE_CTRL_CLASS 类型开始，当使用 VIDIOC_QUERYCTRL 的时候将返回这个 control class 的 name ，下面我们来看 camera control class 的一些 control ： </p> 
+     <p> ID Type </p> 
+     <p> V4L2_CID_CAMERA_CLASS class </p> 
+     <p> //camera class 的描述符，当调用 VIDIOC_QUERYCTRL 的时候将返回一个对这个 class 的描述 </p> 
+     <p> V4L2_CID_EXPOSURE_AUTO integer </p> 
+     <p> // 自动爆光 </p> 
+     <p> V4L2_CID_FOCUS_AUTO boolean </p> 
+     <p> // 自动对焦 </p> 
+     <p> //============== 相关 spec ： <a href="http://v4l2spec.bytesex.org/spec/x802.htm" rel="nofollow">http://v4l2spec.bytesex.org/spec/x802.htm</a> </p> 
+     <h3> 2.3 获取设备对Image Cropping 和Scaling的支持信息<br></h3> 
+     <p> 对各种控制参数进行设置以后，下面要进行的就是要获得设备对 Image Cropping 和 Scaling 的支持，即对图像的取景范围以及图片的比例缩放的支持。 Image Crop 的功能通俗一点讲就是他对 camera 镜头能捕捉的图像，截取一个范围来保存，而这个要截取的范围就是最终保存下来的图像。 </p> 
+     <p> 对于一个视频捕捉或者视频直接播放的设备来说，源是视频信号，而 cropping ioctl 决定视频信号的哪部分被采样，目标则是应用程序或者屏幕上读到的图片。对于视频输出设备来说，输入是应用程序传入的图片，而输出则是视频流， cropping ioctl 此时则决定图片的哪部分会被插入视频信号，所有的视频捕捉和视频输出设备都必须支持 VIDIOC_CROPCAP ioctl: </p> 
+     <p> Int ioctl(int fd, int request, struct v4l2_cropcap *argp) </p> 
+     <p> 其中数据结构 v4l2_cropcap 的几个要重要的成员变量是下面这些： </p> 
+     <pre><code class="language-cpp"><code class="hljs cpp"><span class="hljs-keyword"><span class="hljs-keyword">enum v4l2_buf_type type <span class="hljs-comment"><span class="hljs-comment">// 数据流的类型，在 VIDIOC_CROPCAP 这个控制中只有 V4L2_BUF_TYPE_CAPTURE, V4L2_BUF_TYPE_OUTPUT, V4L2_BUF_TYPE_OVERLAY 以及驱动定义的一些一般类型 V4L2_BUF_TYPE_PRIVATE 是有用的 <span class="hljs-keyword"><span class="hljs-keyword">struct v4l2_rect bounds <span class="hljs-comment"><span class="hljs-comment">// 这是 camera 的镜头能捕捉到的窗口大小的局限，在应用程序设置窗口参数的时候要注意，不能超过这个长宽限制 <span class="hljs-keyword"><span class="hljs-keyword">struct v4l2_rect defrect <span class="hljs-comment"><span class="hljs-comment">// 定义了默认的窗口大小，包括起点的位置以及长宽的大小，大小以像素为单位 <span class="hljs-keyword"><span class="hljs-keyword">struct v4l2_fract pixelaspect <span class="hljs-comment"><span class="hljs-comment">// 定义了图片的宽高比</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></code></pre> 
+     <p> <br></p> 
+     <p> <br></p> 
+     <span><span><span><span><span><span><span><span> <br></span></span></span></span></span></span></span></span> 
+     <p> 应用程序可以使用 VIDIOC_G_CROP 和 VIDIOC_S_CROP 来获得对这些窗口参数并对其进行设置，也就是所谓的 Scaling Adjustments ，因为硬件可能在这些窗口参数设置上具有很多限制，当需要对窗口参数进行设置的时候，驱动会按照自身的规律在应用程序要求和设备限制上决定一个平衡值，一 般应用程序应该先使用 VIDIOC_CROPCAP 来获得硬件限制，并使设定的参数在 bound 范围以内： </p> 
+     <p> int ioctl(int fd, int request, struct v4l2_crop *argp); </p> 
+     <p> int ioctl(int fd, int request, const struct v4l2_crop *argp); </p> 
+     <p> //==== 相关 spec ： <a href="http://v4l2spec.bytesex.org/spec/x1904.htm" rel="nofollow">http://v4l2spec.bytesex.org/spec/x1904.htm</a> </p> 
+     <h3> &nbsp;2.4 设置图像格式 </h3> 
+     <p> 设置好取景窗口参数以后，下面要进行的设置就是对图形格式的协商，这个 Data Format 的协商通过 VIDIOC_G_FMT 和 VIDIOC_S_FMT 来实现。另外 VIDIOC_TRY_FMT 的功能等同与 VIDIOC_S_FMT ，唯一的不同就是他不会改变驱动的状态，它在任何时候都可以被调用，主要用来获得硬件的限制，从而对参数进行协商。如果驱动需要与应用程序交换数据，则必 须支持 VIDIOC_G_FMT 和 VIDIOC_S_FMT ， VIDIOC_TRY_FMT 是可选的，但是是强烈推荐实现的。 </p> 
+     <p> Int ioctl(int fd, int requeset, struct v4l2_format *argp) ; </p> 
+     <p> 前面讲过，虽然一个设备文件可以支持多打开，但是只允许一个能与驱动进行数据交换，因此在设备的初始化过程中对 VIDIOC_S_FMT ioctl 的调用是一个转折点，第一个调用 VIDIOC_S_FMT ioctl 的文件描述符会打开一个逻辑的流 ，如果此时其他的文件描述符对设备进行的操作有可能破坏这个流的时候是会被禁止的，比如说如果另外一个应用程序想修改 video standard ，只有对流拥有所有权的文件描述符才能修改这方面的属性。再比如当 overlay 已经开始的时候， video capture 就会被限制在和 overlay 相同的 cropping 和 image size 。 </p> 
+     <p> 一般来说只允许同一个文件描述符拥有一个逻辑流，唯一的例外是 video capture 和 video overlay 可以使用同一个文件描述符。 </p> 
+     <p> 下面来看看 v4l2_format 这个数据结构，它包含几个重要内容： </p> 
+     <pre><code class="language-cpp"><code class="hljs cpp"><span class="hljs-keyword"><span class="hljs-keyword">enum v4l2_buf_type type <span class="hljs-comment"><span class="hljs-comment">//buf 的类型，比如说 V4L2_BUF_TYPE_VIDEO_CAPTURE <span class="hljs-keyword"><span class="hljs-keyword">union fmt <span class="hljs-keyword"><span class="hljs-keyword">struct v4l2_pix_format <span class="hljs-comment"><span class="hljs-comment">//used for video capture and output <span class="hljs-keyword"><span class="hljs-keyword">struct v4l2_window <span class="hljs-comment"><span class="hljs-comment">//used for video overlay ………… 其中最重要的是 <span class="hljs-keyword"><span class="hljs-keyword">union 中的两个结构体， v4l2_window 是 overlay interface 的内容，将在 overlay 中再讨论，先看一下 v4l2_pix_format 的结构： <span class="hljs-number"><span class="hljs-number">__u32 width <span class="hljs-number"><span class="hljs-number">__u32 height <span class="hljs-comment"><span class="hljs-comment">// 分别是 image 的宽度和高度，以像素为单位，应用程序可以设置这些参数，驱动会返回一个最靠近这些参数的值，为什么是最靠近的值呢，因为图像格式以及硬件限制的原因，可 能应用程序要求的值无法得到满足。［在这里普及一个基础 知识 ， YUV 格式有两种存储方式，一种就是将其 3 个分量存在同一个数组中，然后几个像素组成一个宏块，这种方式叫 packed ；另外一种就是 3 个分量分别存放在不同的数组中，这种方式叫做 planar 。］ <span class="hljs-number"><span class="hljs-number">__u32 pixelformat <span class="hljs-comment"><span class="hljs-comment">// 这就是图像格式了，可以是 RGB ，也可以是 YUV ，还可以是压缩格式 MPEG 或者 JPEG ，这个值是通过一个 4 字母宏来计算出来的： #define v4l2_fourcc(a,b,c,d)(((__u32)(a)&lt;&lt;0) | ((__u32)(b)&lt;&lt;8)| ((__u32)(c)&lt;&lt;16) | ((__u32)(a)&lt;&lt;24)) ，具体格式的标准宏可以参照 spec 。 <span class="hljs-keyword"><span class="hljs-keyword">enum v4l2_field field <span class="hljs-comment"><span class="hljs-comment">// 这个定义了视频信号的场的顺序，比如视频信号可能是顺序扫描的，也可能是隔行扫描的。一般将场分为 top 场和 bottom 场，一个 video camera 不会在一个时间内暴光一个整帧，而是将其分成场分别传输。所有的 video capture 和 output 装置都必须指定其场的传输顺序，即是 top 场在前还是 bottom 场在时间上和空间 上的顺序 。具体的可以从参考 spec 关于 Field Order 的描述，一般采用的是 V4L2_FIILED_INTERLACED ，在这个模式下 image 包含交叉存取的帧，场的顺序由当前的视频标准来决定。 <span class="hljs-number"><span class="hljs-number">__u32 bytesperline <span class="hljs-comment"><span class="hljs-comment">// 即每行像素所占的 byte 数，应用程序和驱动都可以设置这个参数，但驱动可以忽略应用程序的参数，而返回一个硬件要求的参数，应用程序可以设置这个参数为 0 来让驱动返回一个默认值。 Image 在内存中还是按照每行像素这样来存储的，每一行像素后面都有一个衬垫来代表该行像素的结束。 <span class="hljs-number"><span class="hljs-number">__u32 sizeimage <span class="hljs-comment"><span class="hljs-comment">// 要保存一个完整的 Image 需要的 buffer 空间，单位是 byte ，由驱动来设定，是保存一个图像所需要的最大 byte 数，而不是图像被压缩的 byte 数。</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></code></pre> 
+     <p> <br></p> 
+     <p> <br></p> 
+     <span><span><span><span><span><span><span><span><span> <br></span></span></span></span></span></span></span></span></span> 
+     <p> 如果驱动需要与应用程序交换 image data 则必须支持 VIDIOC_ENUM_FMT 来列出所有驱动支持的 FMT 格式 ： </p> 
+     <p> &nbsp; <br> ［实际上， crop 是对取景进行限制，而 fmt 则是对最终保存下来的图片属性进行设置 ，如果取景后的图片和要求的图像属性有冲突，就要将取景后的图片进行相应的调整，比如放大，缩小等等 ］ </p> 
+     <p> 看下面的例子： </p> 
+     <pre><code class="language-cpp"><code class="hljs cpp"><span class="hljs-function"><span class="hljs-function">Resetting the cropping <span class="hljs-title"><span class="hljs-function"><span class="hljs-title">parameters<span class="hljs-function"> <span class="hljs-params"><span class="hljs-function"><span class="hljs-params">(A video capture device is assumed; change V4L2_BUF_TYPE_VIDEO_CAPTURE <span class="hljs-keyword"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">for<span class="hljs-function"><span class="hljs-params"> other devices.)<span class="hljs-function"> <span class="hljs-keyword"><span class="hljs-function"><span class="hljs-keyword">struct<span class="hljs-function"> v4l2_cropcap cropcap; <span class="hljs-keyword"><span class="hljs-keyword">struct v4l2_crop crop; <span class="hljs-built_in"><span class="hljs-built_in">memset (&amp;cropcap, <span class="hljs-number"><span class="hljs-number">0, <span class="hljs-keyword"><span class="hljs-keyword">sizeof (cropcap)); cropcap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; <span class="hljs-keyword"><span class="hljs-keyword">if (<span class="hljs-number"><span class="hljs-number">-1 == ioctl (fd, VIDIOC_CROPCAP, &amp;cropcap)) { perror (<span class="hljs-string"><span class="hljs-string">"VIDIOC_CROPCAP"); <span class="hljs-built_in"><span class="hljs-built_in">exit (EXIT_FAILURE); } <span class="hljs-built_in"><span class="hljs-built_in">memset (&amp;crop, <span class="hljs-number"><span class="hljs-number">0, <span class="hljs-keyword"><span class="hljs-keyword">sizeof (crop)); crop.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; crop.c = cropcap.defrect; <span class="hljs-comment"><span class="hljs-comment">/* Ignore if cropping is not supported (EINVAL). */ <span class="hljs-keyword"><span class="hljs-keyword">if (<span class="hljs-number"><span class="hljs-number">-1 == ioctl (fd, VIDIOC_S_CROP, &amp;crop) &amp;&amp; errno != EINVAL) { perror (<span class="hljs-string"><span class="hljs-string">"VIDIOC_S_CROP"); <span class="hljs-built_in"><span class="hljs-built_in">exit (EXIT_FAILURE); } <span class="hljs-function"><span class="hljs-function">Simple <span class="hljs-title"><span class="hljs-function"><span class="hljs-title">downscaling<span class="hljs-function"> <span class="hljs-params"><span class="hljs-function"><span class="hljs-params">(A video capture device is assumed.)<span class="hljs-function"> <span class="hljs-keyword"><span class="hljs-function"><span class="hljs-keyword">struct<span class="hljs-function"> v4l2_cropcap cropcap; <span class="hljs-keyword"><span class="hljs-keyword">struct v4l2_format format; reset_cropping_parameters (); <span class="hljs-comment"><span class="hljs-comment">/* Scale down to 1/4 size of full picture. */ <span class="hljs-built_in"><span class="hljs-built_in">memset (&amp;format, <span class="hljs-number"><span class="hljs-number">0, <span class="hljs-keyword"><span class="hljs-keyword">sizeof (format)); <span class="hljs-comment"><span class="hljs-comment">/* defaults */ format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; format.fmt.pix.width = cropcap.defrect.width &gt;&gt; <span class="hljs-number"><span class="hljs-number">1; format.fmt.pix.height = cropcap.defrect.height &gt;&gt; <span class="hljs-number"><span class="hljs-number">1; format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV; <span class="hljs-keyword"><span class="hljs-keyword">if (<span class="hljs-number"><span class="hljs-number">-1 == ioctl (fd, VIDIOC_S_FMT, &amp;format)) { perror (<span class="hljs-string"><span class="hljs-string">"VIDIOC_S_FORMAT"); <span class="hljs-built_in"><span class="hljs-built_in">exit (EXIT_FAILURE); } <span class="hljs-comment"><span class="hljs-comment">/* We could check the actual image size now, the actual scaling factor or if the driver can scale at all. */</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></code></pre> 
+     <p> <br></p> 
+     <p> <br></p> 
+     <span><span><span><span><span><span><span><span><span> <br></span></span></span></span></span></span></span></span></span> 
+     <p> 另外还有一个可选的选项，就是如果采用 read/write 模式，还可以通过设置流参数属性来优化 capture 的性能，在这里就不讨论了，具体的可以去参照 spec 。 </p> 
+     <h3> &nbsp;2.5 I/O模式的选择<br></h3> 
+     <p> 完成这一系列参数的初始化以后，最后一个要协商的就是 I/0 模式的选择：主要分为两种，一种是 Read/Write ，这也是打开 video device 之后默认选择的 I/O 方法，其他的方法如果使用必须经过协商；还有一个就是 stream ，其中 stream 中根据实现方式的不同又可以分为 Memory Mapping 和 User Pointers 。 Driver 可以决定是否支持对 I/O 的 switch ，这不是必须的，如果 driver 不支持，则只有通过 open/close device 来实现 I/0 的切换。 </p> 
+     <h4> 2.5.1 read/write<br></h4> 
+     <p> 首先来看 Read/Write ，如果 VIDIOC_QUERYCAP 调用返回的 v4l2_capability 参数中， V4L2_CAP_READWRITE 被设置成真了的话，就说明支持 Read/Write I/O 。这是最简单最原始的方法，它需要进行数据 的拷贝 ( 而不是像 memory map 那样只需要进行指针的交换 ) ，而且不会交换元数据 ( 比如说帧计数器和时间戳之类的可用于识别帧丢失和进行帧同步 ) ，虽然它是最原始的方法，但因为其简单，所以对于简单的应用 程序比如只需要 capture 静态图像是很有用的 。 </p> 
+     <p> 如果使用 Read/Write 方法支持的话，必须同时支持另外两个函数 select() 和 poll() ，这两个函数用来进行 I/0 的多路复用。 </p> 
+     <p> 对于 streaming 它有两种方式， driver 对两种方式的支持要使用 VIDIOC_REQBUFS 来确定： </p> 
+     <p> int ioctl(int fd, int request, struct v4l2_requestbuffers *argp); </p> 
+     <p> 对于 memory mapped 方式， Memory mapped buffers 是通过 VIDIOC_REQBUFS 在 device memory 中申请的，而且必须在 map 进应用程序虚拟地址空间 之前就申请好。而对于 User pointers ， User buffers 是在应用程序自己开辟的，只是通过 VIDIOC_REQBUFS 将驱动转化到 user pointer 的 I/O 模式下。这两种方式都不会拷贝数据，而只是 buffer 指针的交互。 </p> 
+     <p> 首先来看一下 v4l2_requestbuffers 这个数据结构： </p> 
+     <pre><code class="language-cpp"><code class="hljs rust">__<span class="hljs-keyword"><span class="hljs-keyword">u32 count <span class="hljs-comment"><span class="hljs-comment">// 要申请的 buffer 的数量，只有当 memory 被设置成 V4L2_MEMORY_MMAP 的时候才会设置这个参数 <span class="hljs-class"><span class="hljs-keyword"><span class="hljs-class"><span class="hljs-keyword">enum<span class="hljs-class"> <span class="hljs-title"><span class="hljs-class"><span class="hljs-title">v4l2_buf_type <span class="hljs-class"><span class="hljs-keyword"><span class="hljs-class"><span class="hljs-keyword">type<span class="hljs-class"> <span class="hljs-title"><span class="hljs-class"><span class="hljs-title">enum v4l2_memory memory <span class="hljs-comment"><span class="hljs-comment">// 要么是 V4L2_MEMORY_MMAP ，要么是 V4L2_MEMORY_USERPTR</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></code></pre> 
+     <p> <br></p> 
+     <p> <br></p> 
+     <span><span><span><span><span><span><span><span><span><span><span> <br></span></span></span></span></span></span></span></span></span></span></span> 
+     <h4> 2.5.2 内存映射<br></h4> 
+     <p> 对于 memory mapped 模式，要在 device memory 下申请 buffer ，应用程序必须初始化上面的 3 个参数，驱动最后返回的 buffer 的个数可能等于 count ，也可能少于或者多于 count ，少于可能是因为内存不足，多于则可能是驱动为更好地完成相应功能增加的 buffer 。如果 driver 不支持 memory mapped 调用这个 ioctl 就会返回 EINVAL 。 </p> 
+     <p> 因为 memory map 模式下分配的是实实在在的物理内存，不是虚拟内存，所以使用完以后一定要使用 munmap() 释放。 </p> 
+     <p> 应用程序可以重新调用 VIDICO_REQBUFS 来改变 buffer 的个数，但前提是必须先释放已经 mapped 的 buffer ，可以先 munmap ，然后设置参数 count 为 0 来释放所有的 buffer 。 </p> 
+     <p> 对于 User pointer I/O ，应用程序只需设置上面的 type 和 memory 类型就可以了。 </p> 
+     <p> 申请好 buffer 后在进行 memory mapped 之前，首先要使用 VIDIOC_QUERYBUF 来获得分配的 buffer 信息，以传给函数 mmap() 来进行 map ： </p> 
+     <p> int ioctl(int fd, int request, struct v4l2_buffer *argp); </p> 
+     <p> VIDIOC_QUERYBUF 是 memory mapped 这种模式下使用的方法，在 User pointer 模式下不需要使用这个函数，在调用之前应用程序需要设定 v4l2_buffer 中的两个参数，一个是 buffer 类型，另外一个是 index number( 有效值从 0 到申请的 buffer 数目减 1) ，调用这个 ioctl 会将相应 buffer 中的 flag ： V4L2_BUF_FLAG_MAPPED, V4L2_BUF_FLAG_QUEUED 和 V4L2_BUF_FLAG_DONE 设置为有效。下面我们来仔细看看 v4l2_buffer 这个数据结构： </p> 
+     <p> __u32 index </p> 
+     <p> // 应用程序来设定，仅仅用来申明是哪个 buffer </p> 
+     <p> enum v4l2_buf_type type </p> 
+     <p> __u32 bytesused </p> 
+     <p> //buffer 中已经使用的 byte 数，如果是 input stream 由 driver 来设定，相反则由应用程序来设定 </p> 
+     <p> __u32 flags </p> 
+     <p> // 定义了 buffer 的一些标志位，来表明这个 buffer 处在哪个队列，比如输入队列或者输出队列 (V4L2_BUF_FLAG_QUEUED V4L2_BUF_FLAG_DONE) ，是否关键帧等等，具体可以参照 spec </p> 
+     <p> enum v4l2_memory memory </p> 
+     <p> //V4L2_MEOMORY_MMAP ／ V4L2_MEMORY_USERPTR ／ V4L2_MEMORY_OVERLAY </p> 
+     <p> union m </p> 
+     <p> __u32 offset </p> 
+     <p> // 当 memory 类型是 V4L2_MEOMORY_MMAP 的时候，主要用来表明 buffer 在 device momory 中相对起始位置的偏移，主要用在 mmap() 参数中，对应用程序没有左右 </p> 
+     <p> unsigned long userptr </p> 
+     <p> // 当 memory 类型是 V4L2_MEMORY_USERPTR 的时候，这是一个指向虚拟内存中 buffer 的指针，由应用程序来设定。 </p> 
+     <p> __u32 length </p> 
+     <p> //buffer 的 size </p> 
+     <p> 在 driver 内部管理 着两个 buffer queues ，一个输入队列，一个输出队列。对于 capture device 来说，当输入队列中的 buffer 被塞满数据以后会自动变为输出队列，等待调用 VIDIOC_DQBUF 将数据进行处理以后重新调用 VIDIOC_QBUF 将 buffer 重新放进输入队列；对于 output device 来说 buffer 被显示以后自动变为输出队列。 </p> 
+     <p> 刚初始化的所有 map 过的 buffer 开始都处于 dequeced 的状态，由 driver 来管理对应用程序是不可访问的。对于 capture 应用程序来说，首先是通过 VIDIOC_QBUF 将所有 map 过的 buffer 加入队列，然后通过 VIDIOC_STREAMON 开始 capture ，并进入 read loop ，在这里应用程序会等待直到有一个 buffer 被填满可以从队列中 dequeued ，当数据使用完后再 enqueue 进输入队列；对于 output 应用程序来说，首先应用程序会 buffer 装满数据然后 enqueued ，当足够的 buffer 进入队列以后就调用 VIDIOC_STREAMON 将数据输出。 </p> 
+     <p> 有两种方法来阻塞应用程序的执行，直到有 buffer 能被 dequeued ，默认的是当调用 VIDIOC_DQBUF 的时候会被阻塞，直到有数据在 outgoing queue ，但是如果打开设备文件 的时候使用了 O_NONBLOCK ，则当调用 VIDIOC_DQBUF 而又没有数据可读的时候就会立即返回。另外一种方法是调用 select 和 poll 来对文件描述符进行监听是否有数据可读。 </p> 
+     <p> VIDIOC_STREAMON 和 VIDIOC_STREAMOFF 两个 ioctl 用来开始和停止 capturing 或者 output ，而且 VIDIOC_STREAMOFF 会删除输入和输出队列中的所有 buffer 。 </p> 
+     <p> 因此 drvier 如果要实现 memory mapping I/O 必须支持 VIDIOC_REQBUFS, VIDIOC_QUERYBUF, VIDIOC_QBUF, VIDIOC_DQBUF, VIDIOC_STREAMON 和 VIDIOC_STREAMOFF ioctl, the mmap(), munmap(), select() 和 poll() 函数 。 </p> 
+     <h4> &nbsp;2.5.3 用户空间指针<br></h4> 
+     <p> User Pointers 是一种综合了 Read/Write 和 memory mappded 优势的 I/O 方法， buffer 是由应用程序自己申请的，可以是在虚拟内存或者共享内存中。在 capture 和 output 方面基本来说和 memory mapped 方式是相同的，在这里只提一下它申请内存的方式。 </p> 
+     <p> User pointer 方式下，申请的内存也 memory page size 为单位对齐，而且 buffersize 也有一定限制，例示代码中是这样计算 buffer size 的，暂时还不知道这样分配 buffer size 的依据是什么，先简单地这样用就好了： </p> 
+     <p> page_size = getpagesize (); </p> 
+     <p> buffer_size = (buffer_size + page_size - 1) &amp; ~(page_size – 1); </p> 
+     <p> buffers[n_buffers].start = memalign (/* boundary */ page_size, </p> 
+     <p> buffer_size); </p> 
+     <p> &nbsp; </p> 
+     <h2> <strong>3 、 start_capturing</strong> </h2> 
+     <p> 经过上面的一系列的数据协商已经 buffer 的分配以后就可以调用 VIDIOC_QBUF 将 buffer 全部加入输入队列中，并调用 VIDIOC_STREAM0N 开始捕获数据了： </p> 
+     <p> int ioctl(int fd, int request, struct v4l2_buffer *argp); </p> 
+     <p> //VIDIOC_QBUF VIDIOC_DQBUF </p> 
+     <p> int ioctl(int fd, int request, const int *argp); </p> 
+     <p> //VIDIOC_STREAM0N VIDIOC_STREAMOFF （ int 参数是 buffer 类型） </p> 
+     <p> &nbsp; </p> 
+     <h2> <strong>4 、 mainloop</strong> </h2> 
+     <p> 开始捕获数据以后就会进入一个主循环，可以使用 select 或者 poll 来监听文件描述符的状态，一旦有数据可读，就调用函数来读取数据。 </p> 
+     <p> &nbsp; </p> 
+     <h2> <strong>5 、 read_frame</strong> </h2> 
+     <p> 读取数据根据 I/O 方式的不同而不同： </p> 
+     <p> Read/Write 方式直接从文件描述符中读一个帧大小的数据； </p> 
+     <p> Memory mapped 方式下先从输出队列中 dequeued 一个 buffer ，然后对帧数据进行处理，处理完成以后再放入输入队列。 </p> 
+     <p> User pointer 方式下也是首先从输出队列中 dequeued 一个 buffer ，然后对这个 buffer 进行判断，看是否是应用程序开始申请的 buffer ，然后再对这个 buffer 进行处理，最后放入输入队列。 </p> 
+     <h2> <strong>6 、 stop_capturing / uninit_device / close device</strong> </h2> 
+     <p> 最后就是捕捉以及资源释放并关闭 device 。 </p> 
+    </div> 
+   </div> 
+   <div class="blog-copyright">
+     原文地址：
+    <a href="http://www.cnblogs.com/wangxianzhen/archive/2013/04/15/3022344.html" rel="nofollow">http://www.cnblogs.com/wangxianzhen/archive/2013/04/15/3022344.html</a> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

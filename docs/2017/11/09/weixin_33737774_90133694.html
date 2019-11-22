@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>android之LruCache源代码解析 « NotBeCN</title>
+  <meta name="description" content="             移动设备开发中,因为移动设备(手机等)的内存有限,所以使用有效的缓存技术是必要的.android提供来一个缓存工具类LruCache,开发中我们会经经常使用到,以下来他是怎样实现的.    在package android.util包里面有对LruCache定义的java文件.为了能准确...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/09/weixin_33737774_90133694.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">android之LruCache源代码解析</h1>
+    <p class="post-meta">Nov 9, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">移动设备开发中,因为移动设备(手机等)的内存有限,所以使用有效的缓存技术是必要的.android提供来一个缓存工具类LruCache,开发中我们会经经常使用到,以下来他是怎样实现的.</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">在package android.util包里面有对LruCache定义的java文件.为了能准确的理解LruCache,我们先来看看原文的说明:</p> 
+   <pre><code class="language-java"> * A cache that holds strong references to a limited number of values. Each time
+ * a value is accessed, it is moved to the head of a queue. When a value is
+ * added to a full cache, the value at the end of that queue is evicted and may
+ * become eligible for garbage collection.</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 简单翻译:LruCache缓存数据是採用持有数据的强引用来保存</span>
+   <span style="line-height:1.8;font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;color:rgb(204,0,0);">一定数量</span>
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">的数据的.每次用到(获取)一个数据时,这个数据就会被移动(一个保存数据的)队列的头部,当往这个缓存里面增加一个新的数据时,假设这个缓存已经满了,就</span>
+   <span style="line-height:1.8;font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;color:rgb(255,0,0);">会自己主动删除</span>
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">这个缓存队列里面最后一个数据,这样一来使得这个删除的数据没有强引用而可以被gc回收.</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 从上面的翻译,能够知道LruCache的工作原理.以下来一步一步说明他的详细实现:</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<strong>&nbsp;(1)</strong>怎样实现保存的数据是有一定顺序的,而且使用过一个存在的数据,这个数据就会被移动到数据队列的头部.这里採用的是LinkedHashMap.</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 我们知道LinkedHashMap是保存一个键值对数据的,而且能够维护这些数据对应的顺序的.一般能够保证存储的数据依照存入的顺序或者使用的顺序的.以下来看看LruCache的构造方法:&nbsp;<br></p> 
+   <pre><code class="language-java">    public LruCache(int maxSize) {//指定缓存数据的数量
+        if (maxSize &lt;= 0) {//必须大于0
+            throw new IllegalArgumentException("maxSize &lt;= 0");
+        }
+        this.maxSize = maxSize;
+        this.map = new LinkedHashMap&lt;K, V&gt;(0, 0.75f, true);//创建一个LinkedHashMap,而且依照訪问数据的顺序排序    
+    }</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;</span>
+   <strong style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;(2)</strong>
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">如上面的构造方法能够知道,在创建一个LruCache就须要指定其缓存数据的数量.这里要详解一下这个缓存数据的"数量"究竟是指什么:是指缓存数据对象的个数呢,还是缓存数据所占用的内存总量呢?</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 答案是:都是. 能够是缓存数据的个数,也能够使缓存数据所占用内存总量,当然也能够是其它.究竟是什么,须要看你的LruCache怎样重写这种方法:sizeOf(K key, V value)</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java">    protected int sizeOf(K key, V value) {//子类覆盖这种方法来计算出自己的缓存对于每个保存的数据所占用的量
+        return 1;//默认返回1,这说明:默认情况下缓存的数量就是指缓存数据的总个数(每个数据都是1).
+    }</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp; 那假设我使用LruCache来保存bitmap的图片,而且希望缓存的容量是4M那这么做?</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">在原文的说明中,android给来这样一个实例:</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java"> * &lt;p&gt;By default, the cache size is measured in the number of entries. Override
+ * {@link #sizeOf} to size the cache in different units. For example, this cache
+ * is limited to 4MiB of bitmaps:
+ * &lt;pre&gt;   {@code
+ *   int cacheSize = 4 * 1024 * 1024; // 4MiB
+ *   LruCache&lt;String, Bitmap&gt; bitmapCache = new LruCache&lt;String, Bitmap&gt;(cacheSize) {//保存bitmap的LruCache,容量是4M
+ *       protected int sizeOf(String key, Bitmap value) {
+ *           return value.getByteCount();//计算每个缓存的图片所占用内存大小
+ *       }
+ *   }}&lt;/pre&gt;</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;</span>
+   <strong style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">(3)</strong>
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">那么LruCache怎样,何时推断是否缓存已经满来,而且须要移除不经常使用的数据呢?</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 事实上在LruCache里面有一个方法:trimToSize()就是用来检測一次当前是否已经满,假设满来就自己主动移除一个数据,一直到不满为止:</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java">    public void trimToSize(int maxSize) {//默认情况下传入是上面说的最大容量的值 this.maxSize
+        while (true) {//死循环.保证一直到不满为止
+            K key;
+            V value;
+            synchronized (this) {//线程安全保证
+                if (size &lt; 0 || (map.isEmpty() &amp;&amp; size != 0)) {
+                    throw new IllegalStateException(getClass().getName()
+                            + ".sizeOf() is reporting inconsistent results!");
+                }
+
+                if (size &lt;= maxSize) {//假设不满,就跳出循环
+                    break;
+                }
+
+                Map.Entry&lt;K, V&gt; toEvict = map.eldest();//取出最后的数据(最不经常使用的数据)
+                if (toEvict == null) {
+                    break;
+                }
+
+                key = toEvict.getKey();
+                value = toEvict.getValue();
+                map.remove(key);//移除这个数据
+                size -= safeSizeOf(key, value);//容量降低
+                evictionCount++;//更新自己主动移除数据的数量(次数)
+            }
+
+            entryRemoved(true, key, value, null);//用来通知这个数据已经被移除,假设你须要知道一个数据何时被移除你须要从写这种方法entryRemoved
+        }
+    }</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 上面的源代码中我给出了说明,非常好理解.这里要注意的是trimToSize这种方法是public的,说明事实上我们自己能够调用这种方法的.这一点非常重要.记住他,你会用到的.</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 以下的问题是:trimToSize这种方法何时调用呢?</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trimToSize这种方法在LruCache里面多个方法里面会被调用来检測是否已经满了,比方在往LruCache里面增加一个新的数据的方法put里面,还有在通过get(K key)这种方法获取一个数据的时候等,都会调用trimToSize来检測一次.下了来看看put里面怎样调用:</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java">    public final V put(K key, V value) {//增加一个新的数据
+        if (key == null || value == null) {
+            throw new NullPointerException("key == null || value == null");
+        }
+
+        V previous;
+        synchronized (this) {
+            putCount++;
+            size += safeSizeOf(key, value);
+            previous = map.put(key, value);
+            if (previous != null) {
+                size -= safeSizeOf(key, previous);
+            }
+        }
+
+        if (previous != null) {//增加反复位置的数据,则移除老的数据
+            entryRemoved(false, key, previous, value);
+        }
+
+        trimToSize(maxSize);//检測缓存的数据是否已经满
+        return previous;
+    }</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;</span>
+   <br style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span>
+   <strong style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">(4)</strong>
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">细心的人在看了上面的源代码能够发现,原来对 LruCache的操作都加了synchronized来保证线程安全,是的,LruCache就是线程安全的,其它的方法也都使用来synchronized</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<strong>(5)</strong>事实上你应该立即有一个疑问:假设LruCache中已经删除了一个数据,但是如今又调用LruCache的get方法获取这个数据怎么办?来看看源代码是否有解决问题:</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java">    public final V get(K key) {//获取一个数据
+        if (key == null) {
+            throw new NullPointerException("key == null");
+        }
+
+        V mapValue;
+        synchronized (this) {
+            mapValue = map.get(key);
+            if (mapValue != null) {//取得这个数据
+                hitCount++;//成取得数据的次数
+                return mapValue;//成功取得这个数据
+            }
+            missCount++;//取得数据失败次数
+        }
+
+        /*
+         * Attempt to create a value. This may take a long time, and the map
+         * may be different when create() returns. If a conflicting value was
+         * added to the map while create() was working, we leave that value in
+         * the map and release the created value.
+         */
+
+        V createdValue = create(key);//尝试创建这个数据
+        if (createdValue == null) {
+            return null;//创建数据失败
+        }
+
+        synchronized (this) {//增加这个又一次创建的数据
+            createCount++;//从新创建数据次数
+            mapValue = map.put(key, createdValue);
+
+            if (mapValue != null) {
+                // There was a conflict so undo that last put
+                map.put(key, mapValue);
+            } else {
+                size += safeSizeOf(key, createdValue);
+            }
+        }
+
+        if (mapValue != null) {
+            entryRemoved(false, key, createdValue, mapValue);
+            return mapValue;
+        } else {
+            trimToSize(maxSize);//检測是否满
+            return createdValue;
+        }
+    }</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 从上面的分析能够知道,我们能够从写create方法来又一次创建已经不存在的数据.这种方法默认情况是什么也不做的,所以须要你自己做</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-java">    protected V create(K key) {
+        return null;
+    }</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p><font color="#333333"><span style="font-size:14px;">本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/5135819.html，如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

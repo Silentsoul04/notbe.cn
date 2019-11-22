@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>关于move tablespace的问题总结 « NotBeCN</title>
+  <meta name="description" content="             现在得到一个需求，需要把生产环境的多个schema下的表结构复制到测试环境中的一个schema下。生产环境和测试i环境的表空间配置都不一样。目前可以考虑用如下的几种方式来实现。1）使用exp/imp来做表结构的导出导入。2）使用dbms_metadata.get_ddl来生成对应的ddl...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/11/weixin_34292287_90130132.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">关于move tablespace的问题总结</h1>
+    <p class="post-meta">Dec 11, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>现在得到一个需求，需要把生产环境的多个schema下的表结构复制到测试环境中的一个schema下。<br>生产环境和测试i环境的表空间配置都不一样。<br>目前可以考虑用如下的几种方式来实现。<br>1）使用exp/imp来做表结构的导出导入。<br>2）使用dbms_metadata.get_ddl来生成对应的ddl语句。<br>3）使用expdp/impdp来做表结构的导入导出。<br>因为涉及的表大约有2000个，采用dbms_metadata是一个很大的工作量而且在多个schema中需要权衡，所以没有采用。<br>expdp需要在服务端配置directory，客户要求只能在备库上做导出，备库是在read only状态下的，所以一下子切断了使用expdp的希望。<br>最后只能使用传统的exp/imp来做了，根据我的经验，这方面exp/imp的速度一点也不逊色。</p> 
+   <pre><code class="js">exp prod_user1/prod_user1 file=prod_user1.dmp buffer=9102000 log=prod_user1.log statistics=none indexes=y constraints=y grants=n rows=n
+exp prod_user3/prod_user2 file=prod_user2.dmp buffer=9102000 log=prod_user2.log statistics=none indexes=y constraints=y grants=n rows=n
+exp prod_user3/prod_user3 file=prod_user3.dmp buffer=9102000 log=prod_user3.log statistics=none indexes=y constraints=y grants=n rows=n
+</code></pre> 
+   <p>导出很快就做完了，然后压缩打包，看起来很顺利。<br>在尝试导入的时候，发现tablespace不匹配，因为测试环境和生产环境的表空间不同，而且因为lob字段的原因，会固执的去找原来的表空间。这个时候就想起来impdp的remap_tablespace的优点了。<br>但是没法用，最后就临时建了和生产类似的表空间，准备先把表导进去再说，然后再做move的操作，对于move tablespace的时候，需要考虑表和索引，对于表，如果没有lob字段，就可以直接使用move 操作（因为只有表结构没有数据)，如果含有lob字段，则需要指定lob列做move操作，对于索引而言move操作就不可用了，需要使用rebuild<br>如果没有lob字段,表的move操作就不多说了，类似下面的样子,就把表移到了large_data这个表空间里。</p> 
+   <pre><code class="js">alter table xxxx move tablespace large_data;
+</code></pre> 
+   <p>对于索引，可以采用如下的方式，就索引在large_data中进行了重建。</p> 
+   <pre><code class="js">alter index xxxx rebuild tablespace large_data;
+</code></pre> 
+   <p>如果表中含有lob字段，则需要指定lob列，lob字段会自动创建数据段，索引段，如果尝试rebuild lob索引时会报如下的错误。</p> 
+   <pre><code class="js">alter index SYS_IL0002310750C00009
+$$
+ rebuild tablespace large_data
+*
+ERROR at line 1:
+ORA-02327: cannot create index on expression with datatype LOB
+</code></pre> 
+   <p>对于lob的地方，多说一些。如果通过数据字典,user_ind_columns来查看，是没有结果的，需要到user_lobs中去查找。</p> 
+   <pre><code class="js">SQL&gt; select index_name,table_name from user_indexes where index_name='SYS_IL0002310750C00009
+$$
+';
+
+INDEX_NAME                     TABLE_NAME
+------------------------------ ------------------------------
+SYS_IL0002310750C00009
+$$
+       APP_XML_CONFIG
+
+SQL&gt; select index_name,column_name from user_ind_columns where index_name='SYS_IL0002310750C00009
+$$
+';
+
+no rows selected
+
+select table_name,column_name,tablespace_name,index_name from user_lobs where index_name='SYS_IL0002310750C00009
+$$
+'
+SQL&gt; /
+
+TABLE_NAME                     COLUMN_NAME                    TABLESPACE_NAME                INDEX_NAME
+------------------------------ ------------------------------ ------------------------------ ------------------------------
+APP_XML_CONFIG                 XML                            DATAL01                        SYS_IL0002310750C00009
+$$
+
+</code></pre> 
+   <p>可以使用下面形式的语句来做lob字段的迁移。</p> 
+   <pre><code class="js">SQL&gt; alter table app_xml_config move tablespace large_data lob(xml) store as lobsegment(tablespace large_data);
+
+Table altered.
+</code></pre> 
+   <p>对于上千张表来说，使用如下的sql能够自动生成move tablespace的语句。</p> 
+   <pre><code class="js">--对表中的非lob列进行move tablespace操作
+select 'alter table '|| table_name||' move tablespace large_data;' from user_tables t where tablespace_name!='LARGE_DATA' and exists ( select null from user_tab_cols where table_name=t.table_name and data_type not in ('LONG','BLOB','CLOB'));
+ --对表中的lob 列进行move tablespace操作
+select 'alter table '||table_name||' move tablespace large_data lob('||column_name||') store as '||SEGMENT_NAME||'(tablespace large_data);' from user_lobs where index_name in (select index_name from user_indexes where tablespace_name!='LARGE_DATA');
+</code></pre> 
+   <p>--对表中的索引进行rebuild，因为lob数据段已经做了move 操作，对于索引lob段就不用再做move 操作了。</p> 
+   <pre><code class="js">select 'alter index '||index_name||' rebuild tablespace large_data;' from user_indexes where tablespace_name!='LARGE_DATA';
+</code></pre> 
+   <p>本文转自ICT时空 dbasdk博客，原文链接：<a href="http://blog.itpub.net/29734436/viewspace-1243799/" rel="nofollow">关于move tablespace的问题总结</a> ，如需转载请自行联系原博主。</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

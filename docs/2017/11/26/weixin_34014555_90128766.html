@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>修复ext4日志（jbd2）bug( Ext4 文件系统有以下 Bug) « NotBeCN</title>
+  <meta name="description" content="                      生产上报来了内核bug：mysql在做reset master时内核整个panic了。     DBA同学非常热心的帮忙找到了重新步骤：就是一个地雷一样的文件，只要open它，再fdatasync，kernel就panic。 从panic的代码位置看，就是 jbd2_j...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/26/weixin_34014555_90128766.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">修复ext4日志（jbd2）bug( Ext4 文件系统有以下 Bug)</h1>
+    <p class="post-meta">Nov 26, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p></p> 
+   <div style="border:0px;line-height:24px;vertical-align:baseline;" class="post-content clearfix"> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">生产上报来了内核bug：mysql在做reset master时内核整个panic了。</p> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">DBA同学非常热心的帮忙找到了重新步骤：就是一个地雷一样的文件，只要open它，再fdatasync，kernel就panic。<br> 从panic的代码位置看，就是 jbd2_journal_commit_transaction() 里的<br> J_ASSERT(journal-&gt;j_running_transaction != NULL);<br> 判断失败触发panic</p> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">但是，为什么jbd2在没有running_transaction的时候也会提交事务？那就只能把所有唤醒kjournald2内核线程（里面调用了jbd2_journal_commit_transaction）的地方——即wake_up(&amp;journal-&gt;j_wait_commit)处都加上trace，由于重现步骤是现成的，很快就定位到了原因：open一个文件再直接fdatasync的时候，会调用ext4_sync_file ，里面调用jbd2_log_start_commit开始提交jbd2的日志，jbd2_log_start_commit里会加锁然后调用__jbd2_log_start_commit，代码如下:</p> 
+    <pre>int __jbd2_log_start_commit(journal_t *journal, tid_t target)                      
+{       
+        /* 
+         * Are we already doing a recent enough commit?                            
+         */
+        if (!tid_geq(journal-&gt;j_commit_request, target)) {
+                /*
+                 * We want a new commit: OK, mark the request and wakup the        
+                 * commit thread.  We do _not_ do the commit ourselves.            
+                 */
+                journal-&gt;j_commit_request = target;
+                jbd_debug(1, "JBD: requesting commit %d/%d\n",                     
+                          journal-&gt;j_commit_request,
+                          journal-&gt;j_commit_sequence);
+                wake_up(&amp;journal-&gt;j_wait_commit);
+                return 1;
+        }       
+        return 0;
+}
+</pre> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">从trace的结果看，journal-&gt;j_commit_request的值为2177452108，而target的值为0,看上去j_commit_request显然比target小，应该不会走到if判断里面去，但是实际上是走了的，因为tid_geq的实现是：</p> 
+    <pre>static inline int tid_geq(tid_t x, tid_t y)
+{
+        int difference = (x - y);
+        return (difference &gt;= 0);
+}               
+</pre> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">unsigned int型2177452108减去0然后转为int型，猜猜结果是多少？等于 -2117515188 ！看上去好像tid_geq的实现又罗嗦又奇怪，于是翻了一下注释，才发现，jbd2给每个transaction一个tid，这个tid是不断增长的，而它又是个unsigned int型，所以容易溢出，于是弄出来这么一个tid_geq，把0看成是比2177452108更“晚”的tid，当commit_request为2177452108而target为0时，意思是：编号2177452108的tid已经提交了，0比2177452108更“晚”，所以有必要把0号transaction给commit一下，于是唤醒kjournald2（那句wake_up）。而这一唤醒，就发现没有running_transaction，于是悲剧了。<br> 从trace看，大部分传入__jbd2_log_start_commit的target值都不是0，看来这个0来得蹊跷，翻了一下upstream的代码，找到了Ted在去年3月份提的一个patch：</p> 
+    <pre>commit 688f869ce3bdc892daa993534dc6df18c95df931
+Author: Theodore Ts'o 
+Date:   Wed Mar 16 17:16:31 2011 -0400
+    ext4: Initialize fsync transaction ids in ext4_new_inode()
+    When allocating a new inode, we need to make sure i_sync_tid and
+    i_datasync_tid are initialized.  Otherwise, one or both of these two
+    values could be left initialized to zero, which could potentially
+    result in BUG_ON in jbd2_journal_commit_transaction.
+    (This could happen by having journal-&gt;commit_request getting set to
+    zero, which could wake up the kjournald process even though there is
+    no running transaction, which then causes a BUG_ON via the
+    J_ASSERT(j_ruinning_transaction != NULL) statement.
+    Signed-off-by: "Theodore Ts'o" 
+diff --git a/fs/ext4/ialloc.c b/fs/ext4/ialloc.c
+index 2fd3b0e..a679a48 100644
+--- a/fs/ext4/ialloc.c
++++ b/fs/ext4/ialloc.c
+@@ -1054,6 +1054,11 @@ got:
+                }
+        }
++       if (ext4_handle_valid(handle)) {
++               ei-&gt;i_sync_tid = handle-&gt;h_transaction-&gt;t_tid;
++               ei-&gt;i_datasync_tid = handle-&gt;h_transaction-&gt;t_tid;
++       }
++
+        err = ext4_mark_inode_dirty(handle, inode);
+        if (err) {
+                ext4_std_error(sb, err);
+@mit.edu&gt;@mit.edu&gt;</pre> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">啊哈，就是它了，由于i_sync_tid和i_datasync_tid都没有正确赋值，所以带上了默认的0值，一路传给ext4_sync_file，而后面的__jbd2_log_start_commit又误认为0是一个要提交的新事务（其实此时还没有把当前事务挂到running_transaction上去),所以错误了。打上这个patch，再走重现步骤kernel也不panic了。</p> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">既然这么容易重现为什么其它机器上没有遇到？原因就是这个commit_request必须是一个很大的值，大到转为int型时会变为负数。我试了一下在ext4上不停的创建空文件并fdatasync之，10分钟左右commit_request才变为一百万，如果要让它到二十亿，至少还需要十四天，而线上的io压力毕竟没有人工压力测试那么大，所以几个月后commit_request才到二十亿，才触发了这个bug。<br> redhat最新的2.6.32-220内核是有这个问题的，大家多小心。</p> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">感谢<a style="font:inherit;border:0px;color:rgb(44,99,169);text-decoration:none;vertical-align:baseline;" href="http://weibo.com/legsantking" rel="nofollow">@元云</a>和<a style="font:inherit;border:0px;color:rgb(44,99,169);text-decoration:none;vertical-align:baseline;" href="http://weibo.com/u/1658875175" rel="nofollow">@希羽</a>两位同学帮忙提供了重现步骤，内核修bug，最难的就是重现，两位却直接把步骤提供出来了，真是太体贴太客气了！</p> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">======</p> 
+    <p style="font-family:inherit;border:0px;color:rgb(68,68,68);line-height:inherit;font-size:13px;font-style:inherit;font-variant:inherit;font-weight:inherit;vertical-align:baseline;">本来想用<a style="font:inherit;border:0px;color:rgb(44,99,169);text-decoration:none;vertical-align:baseline;" href="http://www.ibm.com/developerworks/cn/aix/library/au-spunix_ksplice/" rel="nofollow">ksplice</a>来不重启升级内核，这样DBA就可以不重启机器修复这个bug，但是研究了一下ksplice，发现它要求加gcc参数 -ffunction-sections -fdata-sections 来编译内核，而这两个参数又和 -pg 参数冲突，而我们的kernel trace需要用到 -pg ，所以....目前无解，还没有办法用ksplice来帮助我们在线升级内核。</p> 
+    <p style="border:0px;line-height:inherit;vertical-align:baseline;"><font color="#444444"><span style="font-size:13px;"><br></span></font></p> 
+    <p style="border:0px;line-height:inherit;vertical-align:baseline;"><font color="#444444"><span style="font-size:13px;"><br></span></font></p> 
+    <p style="border:0px;line-height:inherit;vertical-align:baseline;"><font color="#444444"><span style="font-size:13px;"><br></span></font></p> 
+    <p style="border:0px;line-height:inherit;vertical-align:baseline;"><font color="#444444"><span style="font-size:13px;">本文转自94cool博客园博客，原文链接：http://www.cnblogs.com/94cool/p/5661008.html，如需转载请自行联系原作者</span></font></p> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

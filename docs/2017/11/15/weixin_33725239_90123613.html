@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>探索 OpenStack 之（9）：深入块存储服务Cinder （功能篇） « NotBeCN</title>
+  <meta name="description" content="             继研究了Neutron之后，继续Nova的外围研究之旅。本站是研究块存储服务Cinder。    &nbsp;    0。验证环境        环境包括：    1、一个controller节点，运行nova-api, nova-scheduler, cinder-api, cinde...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_33725239_90123613.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">探索 OpenStack 之（9）：深入块存储服务Cinder （功能篇）</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">继研究了Neutron之后，继续Nova的外围研究之旅。本站是研究块存储服务Cinder。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">0。验证环境</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/122153441986089.jpg" alt="" style="border:0px;"></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">环境包括：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">1、一个controller节点，运行nova-api, nova-scheduler, cinder-api, cinder-scheduler, mysql, rabbitmq</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">2、一个Nova compute节点，运行一个虚机</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">3、三个cinder volume节点，每个节点使用LVMISCSIDriver来使用本地存储</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">4. 创建一个volume type，设置&nbsp;volume_backend_name = lvmbackend</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">cinder.conf 在 block1上
+enabled_backends =&nbsp; lvmdriver-b1
+[lvmdriver</span>-<span style="line-height:1.5;">b1]
+volume_group </span>= cinder-<span style="line-height:1.5;">volumes
+volume_driver </span>=<span style="line-height:1.5;"> cinder.volume.drivers.lvm.LVMISCSIDriver
+volume_backend_name </span>=<span style="line-height:1.5;"> lvmbackend
+
+cinder.conf 在 block2上
+enabled_backends = lvmdriver-b21,lvmdriver-b22
+storage_availability_zone</span>=<span style="line-height:1.5;">az1
+[lvmdriver</span>-<span style="line-height:1.5;">b21]
+iscsi_ip_address </span>= <span style="color:rgb(128,0,128);line-height:1.5;">10.0</span>.<span style="color:rgb(128,0,128);line-height:1.5;">1.29</span><span style="line-height:1.5;">
+volume_group </span>= cinder-<span style="line-height:1.5;">volumes1
+volume_driver </span>=<span style="line-height:1.5;"> cinder.volume.drivers.lvm.LVMISCSIDriver
+volume_backend_name </span>=<span style="line-height:1.5;"> lvmbackend
+
+[lvmdriver</span>-<span style="line-height:1.5;">b22]
+volume_group </span>= cinder-<span style="line-height:1.5;">volumes2
+volume_driver </span>=<span style="line-height:1.5;"> cinder.volume.drivers.lvm.LVMISCSIDriver
+volume_backend_name </span>=<span style="line-height:1.5;"> lvmbackend
+
+cinder.conf 在 block3上<br>
+enabled_backends = lvmdrier-network
+[lvmdriver</span>-<span style="line-height:1.5;">network]
+volume_group </span>=<span style="line-height:1.5;"> system
+volume_driver </span>=<span style="line-height:1.5;"> cinder.volume.drivers.lvm.LVMISCSIDriver
+volume_backend_name </span>= lvmbackend</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">cinder的service如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@controller:/home/s1# cinder service-<span style="line-height:1.5;">list
+</span>+------------------+---------------------------+------+---------+-------+----------------------------+-----------------+
+|      Binary      |            Host           | Zone |  Status | State |         Updated_at         | Disabled Reason |
++------------------+---------------------------+------+---------+-------+----------------------------+-----------------+
+|  cinder-backup   |         controller        | nova | enabled |   up  | <span style="color:rgb(128,0,128);line-height:1.5;">2015</span>-<span style="color:rgb(128,0,128);line-height:1.5;">01</span>-11T16:<span style="color:rgb(128,0,128);line-height:1.5;">36</span>:<span style="color:rgb(128,0,128);line-height:1.5;">00.000000</span> |       None      |
+| cinder-scheduler |         controller        | nova | enabled |   up  | <span style="color:rgb(128,0,128);line-height:1.5;">2015</span>-<span style="color:rgb(128,0,128);line-height:1.5;">01</span>-11T16:<span style="color:rgb(128,0,128);line-height:1.5;">36</span>:<span style="color:rgb(128,0,128);line-height:1.5;">01.000000</span> |       None      |
+|  cinder-volume   |    block1@lvmdriver-b1    | nova | enabled |   up  | <span style="color:rgb(128,0,128);line-height:1.5;">2015</span>-<span style="color:rgb(128,0,128);line-height:1.5;">01</span>-11T16:<span style="color:rgb(128,0,128);line-height:1.5;">36</span>:<span style="color:rgb(128,0,128);line-height:1.5;">08.000000</span> |       None      |
+|  cinder-volume   |    block2@lvmdriver-b21   | az1  | enabled |   up  | <span style="color:rgb(128,0,128);line-height:1.5;">2015</span>-<span style="color:rgb(128,0,128);line-height:1.5;">01</span>-11T16:<span style="color:rgb(128,0,128);line-height:1.5;">36</span>:<span style="color:rgb(128,0,128);line-height:1.5;">06.000000</span> |       None      |
+|  cinder-volume   |    block2@lvmdriver-b22   | az1  | enabled |   up  | <span style="color:rgb(128,0,128);line-height:1.5;">2015</span>-<span style="color:rgb(128,0,128);line-height:1.5;">01</span>-11T16:<span style="color:rgb(128,0,128);line-height:1.5;">36</span>:<span style="color:rgb(128,0,128);line-height:1.5;">05.000000</span> |       None      |
+|  cinder-volume   | network@lvmdriver-network | nova | enabled |   up  | <span style="color:rgb(128,0,128);line-height:1.5;">2015</span>-<span style="color:rgb(128,0,128);line-height:1.5;">01</span>-11T16:<span style="color:rgb(128,0,128);line-height:1.5;">36</span>:<span style="color:rgb(128,0,128);line-height:1.5;">02.000000</span> |       None      |
++------------------+---------------------------+------+---------+-------+----------------------------+-----------------+</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;说明:</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">Cinder为每一个backend运行一个cinder-volume服务</li> 
+    <li style="list-style-type:disc;">通过在cinder.conf中设置&nbsp;storage_availability_zone=az1 可以指定cinder-volume host的Zone。用户创建volume的时候可以选择AZ，配合cinder-scheduler的AvailabilityZoneFilter可以将volume创建到指定的AZ中。&nbsp;默认的情况下Zone为nova。</li> 
+    <li style="list-style-type:disc;">通过在cinder.conf中的backend配置部分设置&nbsp;iscsi_ip_address = 10.0.1.29 可以指定iSCSI session使用的网卡，从而做到数据网络和管理网络的分离。</li> 
+    <li style="list-style-type:disc;">搭以上多节点环境，一定要注意各节点之间使用NTP进行时间同步，否则可能出现cinder-volume没有任何错误，但是其状态为down的情况。</li> 
+   </ul>
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">1、关于OpenStack块存储</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.1 OpenStack中的存储</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/122204276517310.jpg" alt="" style="border:0px;"></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.2 虚机对块存储的要求</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/122205561365545.jpg" alt="" style="border:0px;"></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.3 Cinder概述</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/122207124642660.jpg" alt="" style="border:0px;"></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.4 Cinder的内部架构</h3> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">三个主要组成部分 
+     <ul style="list-style:none;font-size:12px;">
+      <li class="O1" style="list-style-type:disc;">–cinder-api 组件负责向外提供Cinder REST API</li> 
+      <li class="O1" style="list-style-type:disc;">–cinder-scheduler 组件负责分配存储资源</li> 
+      <li class="O1" style="list-style-type:disc;">–cinder-volume 组件负责封装driver，不同的driver负责控制不同的后端存储</li> 
+     </ul></li> 
+    <li style="list-style-type:disc;">组件之间的RPC靠消息队列（Queue）实现</li> 
+    <li style="list-style-type:disc;">Cinder的开发工作主要集中在scheduler和driver，以便提供更多的调度算法、更多的功能、以及指出更多的后端存储</li> 
+    <li style="list-style-type:disc;">Volume元数据和状态保存在Database中</li> 
+   </ul>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.5 Cinder的基本功能</h3> 
+   <table border="0" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td class="oa1" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">1</p> </td> 
+      <td class="oa1" rowspan="4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">卷操作</p> </td> 
+      <td class="oa1" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">创建卷</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">2</p> </td> 
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">从已有卷创建卷 （克隆）</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">3</p> </td> 
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">扩展卷</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">4</p> </td> 
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">删除卷</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">5</p> </td> 
+      <td class="oa4" rowspan="2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">卷-虚机操作</p> </td> 
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">挂载卷到虚机</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">6</p> </td> 
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">分离虚机卷</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">7</p> </td> 
+      <td class="oa4" rowspan="3" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">卷-快照操作</p> </td> 
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">创建卷的快照</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">8</p> </td> 
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">从已有卷快照创建卷</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">9</p> </td> 
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">删除快照</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">10</p> </td> 
+      <td class="oa2" rowspan="2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">卷-镜像操作</p> </td> 
+      <td class="oa2" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">从镜像创建卷</p> </td> 
+     </tr>
+     <tr>
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">11</p> </td> 
+      <td class="oa4" style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">从卷创建镜像</p> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">1.6 Cinder 插件</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/122209576511493.jpg" alt="" style="border:0px;"></p> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">1.6.1 LVMISCSIDriver</h4> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/122211149955664.jpg" alt="" style="border:0px;"></p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <div> 
+     <span style="line-height:1.5;font-family:Menlo;">每个hyperviosor作为一个iSCSI&nbsp;initiator。比如&nbsp;</span>&nbsp;Initiator: iqn.1993-08.org.debian:01:8d794081cd6a alias: compute1
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     root@compute1:/home/s1# cat /etc/iscsi/initiatorname.iscsi
+    </div> 
+    <div>
+     InitiatorName=iqn.1993-08.org.debian:01:8d794081cd6a
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     每个Lun作为一个iSCSI target：
+    </div> 
+    <div>
+     比如 IQN -&nbsp;&nbsp;iqn.2010-10.org.openstack:volume-3f204086-609e-449f-90a1-3a0d2c92c525
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     每个initiator和target之间有个tcp&nbsp;session。在compute node上查看iSCSI session：&nbsp;
+    </div> 
+    <div> 
+     <div>
+      root@compute1:/home/s1# iscsiadm -m session
+      <br> tcp: [10] 192.168.1.24:3260,1 iqn.2010-10.org.openstack:volume-5cfc715d-a7b3-47b4-bded-44c0a228360c
+      <br> tcp: [11] 192.168.1.19:3260,1 iqn.2010-10.org.openstack:volume-4039eb07-90eb-4a92-8fd3-e3514cb4969b
+      <br> tcp: [14] 192.168.1.29:3260,1 iqn.2010-10.org.openstack:volume-3f204086-609e-449f-90a1-3a0d2c92c525
+      <br> tcp: [16] 10.0.1.29:3260,1 iqn.2010-10.org.openstack:volume-1b7f6669-06db-474e-bf78-4feea529be5b
+      <br> tcp: [6] 192.168.1.24:3260,1 iqn.2010-10.org.openstack:volume-39363c5f-cf3c-4461-af83-00314839f05a
+     </div> 
+     <div>
+      tcp: [9] 192.168.1.24:3260,1 iqn.2010-10.org.openstack:volume-a0a7ccb3-8864-4fd0-aee2-0e20d43ba8dd
+     </div> 
+     <div>
+      &nbsp;
+     </div> 
+     <div>
+      每个target的详细信息：
+     </div> 
+     <div>
+      tgtadm --lld iscsi --op show --mode target
+      <br> Target 1: iqn.2010-10.org.openstack:volume-136354c3-5920-46b9-a930-52c055c53295
+      <br> &nbsp;&nbsp;&nbsp; System information:
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Driver: iscsi
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; State: ready
+      <br> &nbsp;&nbsp;&nbsp; I_T nexus information:
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; I_T nexus: 2
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Initiator: iqn.1993-08.org.debian:01:8d794081cd6a alias: compute1
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Connection: 0
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IP Address: 192.168.1.15
+      <br> &nbsp;&nbsp;&nbsp; LUN information:
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LUN: 0
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Type: controller
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SCSI ID: IET &nbsp;&nbsp;&nbsp; 00010000
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SCSI SN: beaf10
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Size: 0 MB, Block size: 1
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Online: Yes
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Removable media: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Prevent removal: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Readonly: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SWP: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Thin-provisioning: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Backing store type: null
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Backing store path: None
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Backing store flags:
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; LUN: 1
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Type: disk
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SCSI ID: IET &nbsp;&nbsp;&nbsp; 00010001
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SCSI SN: beaf11
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Size: 1074 MB, Block size: 512
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Online: Yes
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Removable media: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Prevent removal: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Readonly: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SWP: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Thin-provisioning: No
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Backing store type: rdwr
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Backing store path: /dev/cinder-volumes/volume-136354c3-5920-46b9-a930-52c055c53295
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Backing store flags:
+      <br> &nbsp;&nbsp;&nbsp; Account information:
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; s6KdhjSUrU2meEyxPTDZ
+      <br> &nbsp;&nbsp;&nbsp; ACL information:
+      <br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ALL
+     </div> 
+     <div>
+      &nbsp;
+     </div> 
+     <div>
+      volume被从虚机分离后，相应的tcp session被删除。
+     </div> 
+    </div> 
+   </div> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">1.6.2 IBM SVC/DS8K/XIV 插件</h4> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/122212255267283.jpg" alt="" style="border:0px;"></p> 
+   <h4 style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">1.6.3 LVM插件和Vendor插件的比较</h4> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog/697113/201501/122213590428414.jpg" alt="" style="border:0px;"></p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2、 Cinder操作</h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">下面讲讲几个比较有意思的操作。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.1 tranfer volume：将volume 的拥有权从一个tenant中的用户转移到另一个tenant中的用户。</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><strong style="line-height:1.5;">&nbsp;两步走：</strong></p> 
+   <div style="color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"> 
+    <div> 
+     <span style="line-height:1.5;color:rgb(1,1,1);font-family:'Times New Roman';">1。 在volume所在tenant的用户使用命令&nbsp;</span>cinder transfer-create&nbsp;产生tranfer的时候会产生transfer id 和 authkey：
+    </div> 
+    <div>
+     root@dev:/home/s1# cinder transfer-create d146a947-9c1e-489f-b7a3-6b9604d9fb49
+     <br> +------------+--------------------------------------+
+     <br> |&nbsp; Property&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Value&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+     <br> +------------+--------------------------------------+
+     <br> |&nbsp; auth_key&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; a94e45d06dd54500&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+     <br> | created_at |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2015-01-07T07:36:33.916921&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+     <br> |&nbsp;&nbsp;&nbsp;&nbsp; id&nbsp;&nbsp;&nbsp;&nbsp; | b14d1d26-8249-4dd2-8213-258ccfe31542 |
+     <br> |&nbsp;&nbsp;&nbsp; name&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; None&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+     <br> | volume_id&nbsp; | d146a947-9c1e-489f-b7a3-6b9604d9fb49 |
+     <br> +------------+--------------------------------------+
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     目前的tenant id： os-vol-tenant-attr:tenant_id&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp; 96aacc75dc3a488cb073faa06a34b235
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     2。 在另一个tenant中的用户使用命令cinder transfer-accept 接受transfer的时候，需要输入transfer id 和&nbsp;auth_key
+    </div> 
+    <div>
+     s1@dev:~$ cinder transfer-accept b14d1d26-8249-4dd2-8213-258ccfe31542 a94e45d06dd54500
+     <br> +-----------+--------------------------------------+
+     <br> |&nbsp; Property |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Value&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+     <br> +-----------+--------------------------------------+
+     <br> |&nbsp;&nbsp;&nbsp;&nbsp; id&nbsp;&nbsp;&nbsp; | b14d1d26-8249-4dd2-8213-258ccfe31542 |
+     <br> |&nbsp;&nbsp;&nbsp; name&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; None&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+     <br> | volume_id | d146a947-9c1e-489f-b7a3-6b9604d9fb49 |
+     <br> +-----------+--------------------------------------+
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     新的tenant id： os-vol-tenant-attr:tenant_id&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp; 2f07ad0f1beb4b629e42e1113196c04b
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     其实，对volume来说，就是修改了tenant id （属性：os-vol-tenant-attr:tenant_id ）而已。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.2 volume migrate： 将volume从一个backend迁移到另一个backend</h3> 
+    <p style="line-height:1.5;">多种可能的情况：</p> 
+    <div> 
+     <div>
+      1. 如果volume没有attach到虚机，
+     </div> 
+     <div>
+      &nbsp; &nbsp; 1.1 如果是同一个存储上不同backend之间的迁移，需要存储的driver会直接支持存储上的migrate。
+     </div> 
+     <div>
+      &nbsp; &nbsp; 1.2 如果是不同存储上的backend之间的volume迁移，或者存储cinder driver不支持同一个存储上backend之间的迁移，那么将使用cinder默认的迁移操作：Cinder首先创建一个新的volume，然后从源volume拷贝数据到新volume，然后将老的volume删除。
+     </div> 
+     <div>
+      2. 如果volume已经被attach到虚机，Cinder创建一个新的volume，调用Nova去将数据从源volume拷贝到新volume，然后将老的volume删除。目前只支持Compute libvirt driver.
+     </div> 
+     <div>
+      &nbsp;
+     </div> 
+     <div>
+      注意在多个backend的情况下，host必须使用host全名。比如：&nbsp;cinder migrate vol-b21-1 block2@lvmdriver-b22
+     </div> 
+     <div>
+      &nbsp;
+     </div> 
+     <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.3 volume backup</h3> 
+     <div>
+      OpenStack Juno版本支持将volume备份到&nbsp;Ceph，Swift，IBM Tivoli Storage Manager (TSM)。&nbsp;
+     </div> 
+     <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.4 qos 支持</h3> 
+     <div>
+      Cinder提供qos支持框架，具体的实现依赖于各vendor实现的plugin。
+     </div> 
+     <div>
+      &nbsp;
+     </div> 
+     <div>
+      以IBM SVC为例，可以按照如下方法使用qos：
+     </div> 
+     <div>
+      （1）创建一个qos spec：
+     </div> 
+     <div> 
+      <div>
+       cinder qos-create qos-spec qos:IOThrottling=12345
+      </div> 
+      <div>
+       （2）关联qos spec到一个volume &nbsp;type
+      </div> 
+      <div>
+       cinder qos-associate 0e710a13-3c40-4d50-8522-72bddabd93cc
+      </div> 
+      <div>
+       （3）创建该volume type类型的volume
+      </div> 
+      <div>
+       cinder create 1 --volume-type svc-driver25 --display-name volwit
+      </div> 
+      <div>
+       （4）查看该volume，其被设置了throttling 属性，它限制了该volume上最大的I/O。
+      </div> 
+      <div>
+       SVC Volume:&nbsp;throttling 12345
+      </div> 
+     </div> 
+     <div>
+      &nbsp;
+     </div> 
+     <h2 style="font-size:21px;line-height:1.5;">3 cinder的组件</h2> 
+     <p style="line-height:1.5;"><img src="https://images0.cnblogs.com/blog/697113/201501/122317557293117.jpg" alt="" style="border:0px;"></p> 
+     <p style="line-height:1.5;">关于RPC： cinder内部各组件之间使用基于RabbitMQ的RPC通信。cinder-scheduler和cinder-volume分别 会 创建RPC连接，启动消费者线程，然后等待队列消息。当轮询查询到消息到达后，创建线程处理相关消息。</p> 
+     <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.1 cinder-api</h3> 
+     <p style="line-height:1.5;">主要服务接口, 负责接受和处理外界的API请求，并将请求放入RabbitMQ队列，交由后端执行。&nbsp;</p> 
+     <p style="line-height:1.5;">cinder-api提供两个版本的REST API：<a href="http://developer.openstack.org/api-ref-guides/bk-api-ref-blockstorage-v1.pdf" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">V1</a>提供Volume，Vloume type，Snapshot操作的API；<a href="http://developer.openstack.org/api-ref-guides/bk-api-ref-blockstorage-v2.pdf" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">V2</a>增加了QoS，Limits，Backup操作的API。</p> 
+     <p style="line-height:1.5;">除了V1和V2文档列出来的API外，一些volume的操作需要通过POST + action的方式实现，比如extend volume：</p> 
+     <p style="line-height:1.5;">POST http://controller:8776/v1/fa2046aaead44a698de8268f94759fc1/volumes/8e87490c-fa18-4cff-b10e-27645c2a7b99/action</p> 
+     <p style="line-height:1.5;">Action body: {"os-extend": {"new_size": 2}}</p> 
+     <p style="line-height:1.5;">此类操作有：</p> 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">os-reset_status</li> 
+      <li style="list-style-type:disc;">os-force_delete</li> 
+      <li style="list-style-type:disc;">os-force_detach</li> 
+      <li style="list-style-type:disc;">os-migrate_volume</li> 
+      <li style="list-style-type:disc;">os-migrate_volume_completion</li> 
+      <li style="list-style-type:disc;">os-reset_status</li> 
+      <li style="list-style-type:disc;">os-update_snapshot_status</li> 
+      <li style="list-style-type:disc;">os-attach</li> 
+      <li style="list-style-type:disc;">os-detach</li> 
+      <li style="list-style-type:disc;">os-reserve</li> 
+      <li style="list-style-type:disc;">os-unreserve</li> 
+      <li style="list-style-type:disc;">os-begin_detaching</li> 
+      <li style="list-style-type:disc;">os-roll_detaching</li> 
+      <li style="list-style-type:disc;">os-initialize_connection</li> 
+      <li style="list-style-type:disc;">os-terminate_connection</li> 
+      <li style="list-style-type:disc;">os-volume_upload_image</li> 
+      <li style="list-style-type:disc;">os-extend</li> 
+      <li style="list-style-type:disc;">os-update_readonly_flag</li> 
+      <li style="list-style-type:disc;">os-retype</li> 
+      <li style="list-style-type:disc;">os-set_bootable</li> 
+      <li style="list-style-type:disc;">os-promote-replica</li> 
+      <li style="list-style-type:disc;">os-reenable-replica</li> 
+      <li style="list-style-type:disc;">os-unmanage</li> 
+     </ul>
+     <p style="line-height:1.5;">cinder-api service 的启动过程分析见&nbsp;<a class="titlelink" href="http://www.cnblogs.com/sammyliu/p/4272611.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">探索 OpenStack 之（11）：cinder-api Service 启动过程分析 以及 WSGI / Paste deploy / Router 等介绍</a>&nbsp;(2015-02-04 16:01)</p> 
+     <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.2 cinder-scheduler</h3> 
+     <p style="line-height:1.5;">cinder-scheduler的用途是在多backend环境中决定新建volume的放置host：</p> 
+     <p style="line-height:1.5;">0。 首先判断host的状态，只有service状态为up的host才会被考虑。</p> 
+     <p style="line-height:1.5;">1。创建volume的时候，根据filter和weight算法选出最优的host来创建volume。</p> 
+     <p style="line-height:1.5;">2。迁移volume的时候，根据filter和weight算法来判断目的host是不是符合要求。</p> 
+     <p style="line-height:1.5;">如果选出一个host，则使用RPC调用cinder-volume来执行volume操作。</p> 
+     <p style="line-height:1.5;">&nbsp;</p> 
+     <p style="line-height:1.5;">为了维护host的状态，cinder-scheduler接受定时的host上cinder-volume状态上报：</p> 
+     <p style="line-height:1.5;">2015-01-12 02:02:56.688 828 DEBUG cinder.scheduler.host_manager [req-403ef666-5551-4f31-a130-7bcad8e9d1ec - - - - -] Received volume service update from block2@lvmdriver-b21: {u'pools': [{u'pool_name': u'lvmbackend', u'QoS_support': False, u'allocated_capacity_gb': 1, u'free_capacity_gb': 3.34, u'location_info': u'LVMVolumeDriver:block2:cinder-volumes1:default:0', u'total_capacity_gb': 5.34, u'reserved_percentage': 0}], u'driver_version': u'2.0.0', u'vendor_name': u'Open Source', u'volume_backend_name': u'lvmbackend', u'storage_protocol': u'iSCSI'} update_service_capabilities /usr/lib/python2.7/dist-packages/cinder/scheduler/host_manager.py:434</p> 
+     <h4 style="font-size:14px;">3.2.1 Host Filtering 算法</h4> 
+     <p style="line-height:1.5;">默认的filter包括&nbsp;AvailabilityZoneFilter,CapacityFilter,CapabilitiesFilter。其中：</p> 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">AvailabilityZoneFilter会判断cinder host的availability zone是不是与目的az相同。不同则被过滤掉。</li> 
+      <li style="list-style-type:disc;">CapacityFilter会判断host上的剩余空间&nbsp;free_capacity_gb&nbsp;大小，确保free_capacity_gb 大于volume 的大小。不够则被过滤掉。</li> 
+      <li style="list-style-type:disc;">CapabilitiesFilter会检查host的属性是否和volume type中的extra specs是否完全一致。不一致则被国旅掉。</li> 
+     </ul>
+     <p style="line-height:1.5;">经过以上Filter的过滤，cinder-scheduler会得到符合条件的host列表，然后进入weighting环节，根据weighting算法选出最优的host。得到空列表则报No valid host was found错误。</p> 
+     <p style="line-height:1.5;">cinder.conf中，scheduler_default_filters不设置的话，cinder-scheduler默认会使用这三个filter。</p> 
+     <h4 style="font-size:14px;">3.2.2 Host Weighting 算法</h4> 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">AllocatedCapacityWeigher：有最小已使用空间的host胜出。&nbsp;可设置allocated_capacity_weight_multiplier为正值来反转，其默认值为-1。</li> 
+      <li style="list-style-type:disc;"> <p style="line-height:1.5;"><span style="line-height:1.5;">CapacityWeigher：有最大可使用空间的host胜出。可设置capacity_weight_multiplier为负值来反转算法，其默认值为1</span></p> </li> 
+      <li style="list-style-type:disc;"> <p style="line-height:1.5;"><span style="line-height:1.5;">ChanceWeigher：随机从过滤出的host中选择一个host</span></p> </li> 
+     </ul>
+     <p style="line-height:1.5;"><span style="line-height:1.5;">经过此步骤，cinder-scheduler将得到一个weighted_hosts列表，它将会选择第一个host做为volume的目的host，把它加到retry_hosts列表中，然后通过RPC调用上面的cinder-volume来创建volume。</span></p> 
+     <p style="line-height:1.5;"><span style="line-height:1.5;">cinder.conf中，scheduler_default_weighers不设置的话，cinder-scheduler默认使用&nbsp;CapacityWeigher。</span></p> 
+     <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.3 cinder-volume</h3> 
+     <div class="O1">
+      该服务运行在存储节点上，管理存储空间，处理cinder数据库的维护状态的读写请求，通过消息队列和直接在块存储设备或软件上与其他进程交互。每个存储节点都有一个Volume Service，若干个这样的存储节点联合起来可以构成一个存储资源池。
+     </div> 
+     <div class="O1">
+      &nbsp;
+     </div> 
+     <div class="O1">
+      cinder-volume会实现一些common操作，比如&nbsp;
+      <span style="line-height:1.5;">copy_volume_data， 在driver.py里面实现先attach source 和 target volume，然后执行拷贝数据。其它操作则需要</span>
+      <span style="line-height:1.5;">调用driver的接口来实现volume的操作。</span> 
+     </div> 
+     <h4 style="font-size:14px;">3.3.1 volume创建失败重试机制</h4> 
+     <p style="line-height:1.5;">用户可以在cinder.conf中使用scheduler_max_attempts来配置volume创建失败时候的重试次数，默认次数为3，值为1则表示不使用重试机制。</p> 
+     <p style="line-height:1.5;"># Maximum number of attempts to schedule an volume (integer&nbsp;value)<br> #scheduler_max_attempts=3&nbsp;</p> 
+     <p style="line-height:1.5;">cinder-sheduler和cinder-volume之间会传递当前是重试次数。如果volume创建失败，cinder-volume会通过RPC重新调用cinder-scheduler去创建volume，cinder-scheduler会检查当前的重试次数是不是超过最大可重试次数。如果没超过，它会选择下一个可以使用的host去重新创建volume。如果在规定的重试次数内仍然无法创建volume，那么会报No valid host was found错误。</p> 
+     <p style="line-height:1.5;">比如下面的重试过程：</p> 
+     <p style="line-height:1.5;">cinder-volume：</p> 
+     <div> 
+      <ol>
+       <li style="list-style-type:decimal;">Insufficient free space for volume creation on host network@lvmdriver-network#lvmbackend (requested / avail): 5/0.0</li> 
+       <li style="list-style-type:decimal;">Insufficient free space for volume creation on host block2@lvmdriver-b2#lvmbackend (requested / avail): 5/4.0</li> 
+       <li style="list-style-type:decimal;">Insufficient free space for volume creation on host block1@lvmdriver-b1#lvmbackend (requested / avail): 5/1.0</li> 
+      </ol>
+      <div>
+       cinder-scheduler：&nbsp;No valid host was found
+      </div> 
+      <h4 style="font-size:14px;">3.3.2 从image创建volume</h4> 
+      <div>
+       a。volume-driver首先尝试去调用driver的clone_image方法。大多数driver没有实现该方法，比如默认的LVM driver。IBM的GPFS Driver有实现该方法，其实现参考其注释：
+      </div> 
+      <div> 
+       <p style="line-height:1.5;">Attempt to create a volume by efficiently copying image to volume.&nbsp;If both source and target are backed by gpfs storage and the source&nbsp;image is in raw format move the image to create a volume using either&nbsp;gpfs clone operation or with a file copy. If the image format is not&nbsp;raw, convert it to raw at the volume path.</p> 
+       <p style="line-height:1.5;">b。若driver的clone-image方法不成功，则执行Cinder的默认方法：（1）创建一个raw的volume，设置其状态为downloading （2）将image下载并拷贝到该volume。具体方法每个driver可以自行实现，Cinder也提供默认实现。</p> 
+       <p style="line-height:1.5;">c。拷贝image的metadata到volume的metadata。</p> 
+       <h4 style="font-size:14px;">3.3.3 从snapshot创建volume</h4> 
+       <p style="line-height:1.5;">a。获取snapshot</p> 
+       <p style="line-height:1.5;">b。Cinder不提供默认实现方式，它调用各driver的create_volume_from_snapshot方法创建volume。以IBM SVC为例，它会在SVC存储上创建snapshot的一个拷贝。</p> 
+       <p style="line-height:1.5;">c。如果snapshot是bootable的话，需要拷贝它的metadata到新的volume上。</p> 
+       <h4 style="font-size:14px;">3.3.4 从volume创建volume</h4> 
+       <p style="line-height:1.5;">a。获取源volume</p> 
+       <p style="line-height:1.5;">b。Cinder不提供默认实现方式，它需要调用各driver的create_cloned_volume方法来创建volume。以IBM SVC为例，它会在存储上创建源volume的一个拷贝。</p> 
+       <p style="line-height:1.5;">c。如果源volume是bootable的话，需要拷贝它的metadata到新的volume上。</p> 
+       <h4 style="font-size:14px;">3.3.5 创建原始volume</h4> 
+       <p style="line-height:1.5;">默认的话，cinder-volume会调用各driver创建一个原始的volume。</p> 
+      </div> 
+     </div> 
+     <div class="O1">
+      Cinder的研究基本到这里。
+     </div> 
+     <div class="O1">
+      &nbsp;
+     </div> 
+    </div> 
+    <div class="O1">
+     <br>
+    </div> 
+    <div class="O1"> 
+     <div class="O1">
+      &nbsp; &nbsp;本文转自SammyLiu博客园博客，原文链接：http://www.cnblogs.com/sammyliu/p/4219974.html，如需转载请自行联系原作者
+     </div> 
+     <div>
+      <br>
+     </div> 
+    </div> 
+    <div class="O1">
+     <br>
+    </div> 
+    <div class="O1">
+     <br>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

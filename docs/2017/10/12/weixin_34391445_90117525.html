@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Redis性能调优：保存SNAPSHOT对性能的影响 « NotBeCN</title>
+  <meta name="description" content="             前一段时间。开发环境反馈，Redisserver訪问很慢，每一个请求要数秒时间，重新启动之后2~3天又会这样。    我查看了一下Linux的性能，没有什么问题。    通过    # redis-cli --latency    发现訪问Redis确实非常慢，运行info要几秒时间。里...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/12/weixin_34391445_90117525.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Redis性能调优：保存SNAPSHOT对性能的影响</h1>
+    <p class="post-meta">Oct 12, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">前一段时间。开发环境反馈，Redisserver訪问很慢，每一个请求要数秒时间，重新启动之后2~3天又会这样。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">我查看了一下Linux的性能，没有什么问题。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">通过</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"># redis-cli --latency</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">发现訪问Redis确实非常慢，运行info要几秒时间。里面有个參数已连接的client几万个，通过</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">Redis&gt;client list</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">查看到非常多client的age都非常大，一直没有释放。于是怀疑是不是和这个有关。由于版本号是2.8.6，无法通过client一次性kill掉全部的连接，仅仅能写一个程序，一个一个地kill掉(</p> 
+   <pre><code>CLIENT KILL addr:port</code>)。但问题依旧存在。</pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">于是进一步查看配置文件，发现SHNAPSHOT是默认打开状态。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(192,0,0);">&nbsp;save 900 1</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(192,0,0);">&nbsp;save 300 10</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(192,0,0);">&nbsp;save 60 10000</span></p> 
+   <strong style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">由于我们缓存是用于Session保存，不推荐快照保存。特别是在Redis是VM机器上，对总体的性能影响会非常大。</strong>
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">于是參考我们的手冊凝视：</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">################################&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">快照</span><span style="line-height:1.8;color:rgb(0,176,80);">&nbsp;</span>#################################</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">保存数据到磁盘，格式例如以下</span><span style="line-height:1.8;color:rgb(0,176,80);">:</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;&nbsp;</span>save &lt;seconds&gt; &lt;changes&gt;</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;&nbsp;&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">指出在多长时间内，有多少次更新操作。就将数据同步到数据文件</span><span style="line-height:1.8;color:rgb(0,176,80);">rdb</span><span style="line-height:1.8;color:rgb(0,176,80);">。</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;&nbsp;&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">相当于条件触发抓取快照，这个能够多个条件配合</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;&nbsp;&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">比方默认配置文件里的设置，就设置了三个条件</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;&nbsp;</span>save 900 1&nbsp; 900<span style="line-height:1.8;color:rgb(0,176,80);">秒内至少有</span><span style="line-height:1.8;color:rgb(0,176,80);">1</span><span style="line-height:1.8;color:rgb(0,176,80);">个</span><span style="line-height:1.8;color:rgb(0,176,80);">key</span><span style="line-height:1.8;color:rgb(0,176,80);">被改变</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;&nbsp;</span>save 300 10&nbsp; 300<span style="line-height:1.8;color:rgb(0,176,80);">秒内至少有</span><span style="line-height:1.8;color:rgb(0,176,80);">300</span><span style="line-height:1.8;color:rgb(0,176,80);">个</span><span style="line-height:1.8;color:rgb(0,176,80);">key</span><span style="line-height:1.8;color:rgb(0,176,80);">被改变</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;&nbsp;</span>save 60 10000&nbsp; 60<span style="line-height:1.8;color:rgb(0,176,80);">秒内至少有</span><span style="line-height:1.8;color:rgb(0,176,80);">10000</span><span style="line-height:1.8;color:rgb(0,176,80);">个</span><span style="line-height:1.8;color:rgb(0,176,80);">key</span><span style="line-height:1.8;color:rgb(0,176,80);">被改变</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);"># Session</span><span style="line-height:1.8;color:rgb(0,176,80);">缓存server不使用快照，都凝视</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(192,0,0);"># save 900 1</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(192,0,0);"># save 300 10</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(192,0,0);"># save 60 10000</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">重新启动Redis之后。观察了一个月时间。再没有反馈到性能问题了。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">另外在没有使用client的PUB/SUB的情况下，建议參考以下的參数。设置client的连接超时，在300毫秒后，假设不用，服务端会自己主动关闭连接，释放资源。默认是关闭的。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">设置client连接时的超时时间，单位为秒。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">当client在这段时间内没有发出不论什么指令。那么关闭该连接</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);"># 0</span><span style="line-height:1.8;color:rgb(0,176,80);">是关闭此设置</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">推荐</span><span style="line-height:1.8;color:rgb(0,176,80);">5</span><span style="line-height:1.8;color:rgb(0,176,80);">分钟。</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(192,0,0);">timeout 300</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);"># TCP keepalive</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">在</span><span style="line-height:1.8;color:rgb(0,176,80);">Linux</span><span style="line-height:1.8;color:rgb(0,176,80);">上，指定值（秒）用于发送</span><span style="line-height:1.8;color:rgb(0,176,80);">ACKs</span><span style="line-height:1.8;color:rgb(0,176,80);">的时间。注意关闭连接须要双倍的时间。</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">默觉得<span style="line-height:1.8;color:rgb(0,176,80);">0</span><span style="line-height:1.8;color:rgb(0,176,80);">。</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(0,176,80);">#&nbsp;</span><span style="line-height:1.8;color:rgb(0,176,80);">推荐</span><span style="line-height:1.8;color:rgb(0,176,80);">60</span><span style="line-height:1.8;color:rgb(0,176,80);">。</span></p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><span style="line-height:1.8;color:rgb(192,0,0);">tcp-keepalive 60</span></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">注：</p> 
+   <pre>Redis 2.8.12已经能够通过client类型，一次性kill到全部相关的连接。
+</pre> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/5173677.html，如需转载请自行联系原作者
+    <br>
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

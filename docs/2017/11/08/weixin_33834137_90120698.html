@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>基于Solr的空间搜索 « NotBeCN</title>
+  <meta name="description" content="             如果需要对带经纬度的数据进行检索，比如查找当前所在位置附近1000米的酒店，一种简单的方法就是：获取数据库中的所有酒店数据，按经纬度计算距离，返回距离小于1000米的数据。    这种方式在数据量小的时候比较有效，但是当数据量大的时候，检索的效率是很低的，本文介绍使用Solr的Spati...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/08/weixin_33834137_90120698.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">基于Solr的空间搜索</h1>
+    <p class="post-meta">Nov 8, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">如果需要对带经纬度的数据进行检索，比如查找当前所在位置附近1000米的酒店，一种简单的方法就是：获取数据库中的所有酒店数据，按经纬度计算距离，返回距离小于1000米的数据。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这种方式在数据量小的时候比较有效，但是当数据量大的时候，检索的效率是很低的，本文介绍使用Solr的Spatial Query进行空间搜索。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><strong>空间搜索原理</strong></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">空间搜索，又名Spatial Search(Spatial Query)，基于空间搜索技术，可以做到：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">1）对Point（经纬度）和其他的几何图形建索引</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">2）根据距离排序</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">3）根据矩形，圆形或者其他的几何形状过滤搜索结果</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在Solr中，空间搜索主要基于GeoHash和Cartesian Tiers 2个概念来实现：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><strong>GeoHash算法</strong></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">通过GeoHash算法，可以将经纬度的二维坐标变成一个可排序、可比较的的字符串编码。<br> 在编码中的每个字符代表一个区域，并且前面的字符是后面字符的父区域。其算法的过程如下：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">根据经纬度计算GeoHash二进制编码</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">地球纬度区间是[-90,90]， 如某纬度是39.92324，可以通过下面算法对39.92324进行逼近编码:</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">1）区间[-90,90]进行二分为[-90,0),[0,90]，称为左右区间，可以确定39.92324属于右区间[0,90]，给标记为1；</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">2）接着将区间[0,90]进行二分为 [0,45),[45,90]，可以确定39.92324属于左区间 [0,45)，给标记为0；</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">3）递归上述过程39.92324总是属于某个区间[a,b]。随着每次迭代区间[a,b]总在缩小，并越来越逼近39.928167；</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">4）如果给定的纬度（39.92324）属于左区间，则记录0，如果属于右区间则记录1，这样随着算法的进行会产生一个序列1011 1000 1100 0111 1001，序列的长度跟给定的区间划分次数有关。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog2015/434101/201505/042059125792256.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">同理，地球经度区间是[-180,180]，对经度116.3906进行编码的过程也类似：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog2015/434101/201505/042059408133663.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">组码</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">通过上述计算，纬度产生的编码为1011 1000 1100 0111 1001，经度产生的编码为1101 0010 1100 0100 0100。偶数位放经度，奇数位放纬度，把2串编码组合生成新串：11100 11101 00100 01111 00000 01101 01011 00001。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">最后使用用0-9、b-z（去掉a, i, l, o）这32个字母进行base32编码，首先将11100 11101 00100 01111 00000 01101 01011 00001转成十进制 28，29，4，15，0，13，11，1，十进制对应的编码就是wx4g0ec1。同理，将编码转换成经纬度的解码算法与之相反，具体不再赘述。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog2015/434101/201505/042100435486831.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">由上可知，字符串越长，表示的范围越精确。当GeoHash base32编码长度为8时，精度在19米左右，而当编码长度为9时，精度在2米左右，编码长度需要根据数据情况进行选择。不过从GeoHash的编码算法中可以看出它的一个缺点，位于边界两侧的两点，虽然十分接近，但编码会完全不同。实际应用中，可以同时搜索该点所在区域的其他八个区域的点，即可解决这个问题。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><strong>Cartesian Tiers 笛卡尔层</strong></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">笛卡尔分层模型的思想是将经纬度转换成更大粒度的分层网格，该模型创建了很多的地理层，每一层在前一层的基础上细化切分粒度，每一个网格被分配一个ID，代表一个地理位置。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog2015/434101/201505/042101556884691.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">每层以2的平方递增，所以第一层为4个网格，第二层为16 个，所以整个地图的经纬度将在每层的网格中体现：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog2015/434101/201505/042102266574597.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">那么如何构建这样的索引结构呢，其实很简单，只需要对应笛卡尔层的层数来构建域即可,一个域或坐标对应多个tiers层次。也即是tiers0-&gt;field_0，tiers1-&gt;field_1,tiers2-&gt;field_2,……,tiers19-&gt;field_19。（一般20层即可）。每个对应笛卡尔层次的域将根据当前这条记录的经纬度通过笛卡尔算法计算出归属于当前层的网格，然后将gridId（网格唯一标示）以term的方式存入索引。这样每条记录关于笛卡尔0-19的域将都会有一个gridId对应起来。但是查询的时候一般是需要查周边的地址，那么可能周边的范围超过一个网格的范围，那么实际操作过程是根据经纬度和一个距离确定出需要涉及查询的从19-0（从高往低查）若干层对应的若干网格的数据。那么一个经纬度周边地址的查询只需要如下图圆圈内的数据：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog2015/434101/201505/042103210635242.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">由上可知，基于Cartesian Tier的搜索步骤为：<br> 1、根据Cartesian Tier层获得坐标点的地理位置gridId<br> 2、与系统索引gridId匹配计算<br> 3、计算结果集与目标坐标点的距离返回特定范围内的结果集合</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">使用笛卡尔层，能有效缩减少过滤范围，快速定位坐标点。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><strong>基于Solr的空间搜索实战</strong></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Solr已经提供了3种filedType来进行空间搜索：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">1）&nbsp; LatLonType（用于平面坐标，而不是大地坐标）</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">2）&nbsp; SpatialRecursivePrefixTreeFieldType（缩写为RPT）</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">3）&nbsp; BBoxField（用于边界索引查询）</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">本文重点介绍使用SpatialRecursivePrefixTreeFieldType，不仅可以用点，也可以用于多边形的查询。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">1、配置Solr</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">首先看下数据：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;"><img src="https://images0.cnblogs.com/blog2015/434101/201505/042108057517202.png" alt="" style="border:none;"></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Solr的schema.xml配置：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">field </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="station_id"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> type</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="long"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> indexed</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> stored</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> required</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> multiValued</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="false"</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">field </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="station_address"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> type</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="text_general"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> indexed</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> stored</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">field </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="station_position"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> type</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="location_rpt"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> indexed</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> stored</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">uniqueKey</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>station_id<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;/</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">uniqueKey</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这里重点是station_position，它的type是location_rpt，它在Solr中的定义如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">&lt;!--</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> A specialized field for geospatial search. If indexed, this fieldType must not be multivalued. </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">--&gt;</span>
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldType </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="location"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="solr.LatLonType"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> subFieldSuffix</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="_coordinate"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+
+<span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">&lt;!--</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> An alternative geospatial field type new to Solr 4.  It supports multiValued and polygon shapes.
+      For more information about this and other Spatial fields new to Solr 4, see:
+      http://wiki.apache.org/solr/SolrAdaptersForLuceneSpatial4
+    </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">--&gt;</span>
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldType </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="location_rpt"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="solr.SpatialRecursivePrefixTreeFieldType"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">
+geo</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> distErrPct</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="0.025"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> maxDistErr</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="0.000009"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> units</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="degrees"</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+
+<span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">&lt;!--</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> Spatial rectangle (bounding box) field. It supports most spatial predicates, and has
+     special relevancy modes: score=overlapRatio|area|area2D (local-param to the query).  DocValues is required for
+     relevancy. </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">--&gt;</span>
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldType </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="bbox"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="solr.BBoxField"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">
+        geo</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> units</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="degrees"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> numberType</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="_bbox_coord"</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldType </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="_bbox_coord"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="solr.TrieDoubleField"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> precisionStep</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="8"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> docValues</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> stored</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="false"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">对solr.SpatialRecursivePrefixTreeFieldType的配置说明：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SpatialRecursivePrefixTreeFieldType</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">用于深度遍历前缀树的FieldType，主要用于获得基于Lucene中的RecursivePrefixTreeStrategy。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">geo</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">默认为true，值为true的情况下坐标基于球面坐标系，采用Geohash的方式；值为false的情况下坐标基于2D平面的坐标系，采用Euclidean/Cartesian的方式。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">distErrPct</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">定义非Point图形的精度，范围在0-0.5之间。该值决定了非Point的图形索引或查询时的level(如geohash模式时就是geohash编码的长度)。当为0时取maxLevels，即精度最大,精度越大将花费更多的空间和时间去建索引。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">maxDistErr/maxLevels:maxDistErr</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">定义了索引数据的最高层maxLevels，上述定义为0.000009，根据GeohashUtils.lookupHashLenForWidthHeight(0.000009, 0.000009)算出编码长度为11位，精度在1米左右，直接决定了Point索引的term数。maxLevels优先级高于maxDistErr,即有maxLevels的话maxDistErr失效。详见SpatialPrefixTreeFactory.init()方法。不过一般使用maxDistErr。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">units</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">单位是degrees。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">worldBounds<br> 世界坐标值：”minX minY maxX maxY”。 geo=true即geohash模式时，该值默认为”-180 -90 180 90”。geo=false即quad时，该值为Java double类型的正负边界，此时需要指定该值，设置成”-180 -90 180 90”。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">2、建立索引</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这里使用Solrj来建立索引：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">    //</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">Index some base station data for test</span>
+    <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">public</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">void</span><span style="font-size:12px;line-height:1.5;"> IndexBaseStation(){
+        BaseStationDb baseStationDb </span>= <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> BaseStationDb();
+        List</span>&lt;BaseStation&gt; stations =<span style="font-size:12px;line-height:1.5;"> baseStationDb.getAllBaseStations();
+        Collection</span>&lt;SolrInputDocument&gt; docList = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span> ArrayList&lt;SolrInputDocument&gt;<span style="font-size:12px;line-height:1.5;">();
+        </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">for</span><span style="font-size:12px;line-height:1.5;"> (BaseStation baseStation : stations) {
+            </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">添加基站数据到Solr索引中</span>
+            SolrInputDocument doc = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> SolrInputDocument();  
+            doc.addField(</span>"station_id"<span style="font-size:12px;line-height:1.5;">, baseStation.getBaseStationId());  
+            doc.addField(</span>"station_address"<span style="font-size:12px;line-height:1.5;">, baseStation.getAddress());
+            String posString </span>= baseStation.getLongitude()+" "+<span style="font-size:12px;line-height:1.5;">baseStation.getLatitude() ;
+            doc.addField(</span>"station_position"<span style="font-size:12px;line-height:1.5;">, posString);
+            docList.add(doc);
+        }
+        </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">try</span><span style="font-size:12px;line-height:1.5;"> {
+            server.add(docList);
+            server.commit();
+        } </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">catch</span><span style="font-size:12px;line-height:1.5;"> (SolrServerException e) {
+            e.printStackTrace();
+        } </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">catch</span><span style="font-size:12px;line-height:1.5;"> (IOException e) {
+            e.printStackTrace();
+        }
+        
+        System.out.println(</span>"Index base station data done!"<span style="font-size:12px;line-height:1.5;">);
+    }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这里使用“经度 纬度”这样的字符串格式将经纬度索引到station_position字段中。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">3、查询</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">查询语法示例：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">q={!geofilt pt=45.15,-93.85 sfield=poi_location_p d=5 score=distance}</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">q={!bbox pt=45.15,-93.85 sfield=poi_location_p d=5 score=distance}</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">q=poi_location_p:"Intersects(-74.093 41.042 -69.347 44.558)" //a bounding box (not in WKT)</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">q=poi_location_p:"Intersects(POLYGON((-10 30, -40 40, -10 -20, 40 20, 0 0, -10 30)))" //a WKT example</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">涉及到的字段说明：</p> 
+   <table border="0" style="border-collapse:collapse;border-spacing:0px;border:1px solid #C0C0C0;color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">
+    <thead>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>字段</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>含义</p> </td> 
+     </tr>
+    </thead>
+    <tbody>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>q</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>查询条件，如 q=poi_id:134567</p> </td> 
+     </tr>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>fq</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>过滤条件，如 fq=store_name:农业</p> </td> 
+     </tr>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>fl</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>返回字段，如fl=poi_id，store_name</p> </td> 
+     </tr>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>pt</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>坐标点，如pt=54.729696,-98.525391</p> </td> 
+     </tr>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>d</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>搜索半径，如 d=10表示10km范围内</p> </td> 
+     </tr>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>sfield</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>指定坐标索引字段，如sfield=geo</p> </td> 
+     </tr>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>defType</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>指定查询类型可以取 dismax和edismax，edismax支持boost函数相乘作用，dismax是通过累加方式计算最后的score.</p> </td> 
+     </tr>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>qf</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>指定权重字段：qf=store_name^10+poi_location_p^5</p> </td> 
+     </tr>
+     <tr>
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>score</p> </td> 
+      <td style="border:1px solid #C0C0C0;border-collapse:collapse;"> <p>排序字段根据qf定义的字段defType定义的方式计算得到score排序输出</p> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">其中有几种常见的Solr支持的几何操作：<br> WITHIN：在内部<br> CONTAINS：包含关系<br> DISJOINT：不相交<br> Intersects：相交（存在交集）</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">1）点查询</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">测试代码：查询距离某个点pt距离为d的集合</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>SolrQuery params = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> SolrQuery();   
+params.set(</span>"q", "*:*"<span style="font-size:12px;line-height:1.5;">);    
+params.set(</span>"fq", "{!geofilt}");           <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">距离过滤函数</span>
+params.set("pt", "118.227985 39.410722"); <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">当前经纬度</span>
+params.set("sfield", "station_position"); <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">经纬度的字段</span>
+params.set("d", "50"); <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">就近 d km的所有数据
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">params.set("score", "kilometers"); </span>
+params.set("sort", "geodist() asc");  <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">根据距离排序：由近到远</span>
+params.set("start", "0");  <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">记录开始位置</span>
+params.set("rows", "100");  <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">查询的行数</span>
+params.set("fl", "*,_dist_:geodist(),score");<span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">查询的结果中添加距离和score</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">返回结果集：</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SolrDocument{station_id=12003, station_address=江苏南京1, station_position=118.227996 39.410733, _version_=1499776366043725838, _dist_=0.001559071, score=1.0}</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SolrDocument{station_id=12004, station_address=江苏南京2, station_position=118.228996 39.411733, _version_=1499776366044774400, _dist_=0.14214091, score=1.0}</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SolrDocument{station_id=12005, station_address=江苏南京3, station_position=118.238996 39.421733, _version_=1499776366044774401, _dist_=1.5471642, score=1.0}</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SolrDocument{station_id=7583, station_address=河北省唐山市于唐线, station_position=118.399614 39.269098, _version_=1499776365690355717, _dist_=21.583544, score=1.0}</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">从这部分结果集中可以看出，前3条数据是离目标点"118.227985 39.410722"最近的（这3条数据是我伪造的，仅仅用于测试）。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">2）多边形查询：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">修改schema.xml配置文件：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">field </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="station_position"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> type</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="location_jts"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> indexed</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> stored</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldType </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="location_jts"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="solr.SpatialRecursivePrefixTreeFieldType"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> 
+    spatialContextFactory</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="com.spatial4j.core.context.jts.JtsSpatialContextFactory"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> distErrPct</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="0.025"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> maxDistErr</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="0.000009"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> units</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="degrees"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">JtsSpatialContextFactory<br> 当有Polygon多边形时会使用jts(需要把jts.jar放到solr webapp服务的lib下)。基本形状使用SpatialContext (spatial4j的类)。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Jts下载：<a href="http://sourceforge.net/projects/jts-topo-suite/" rel="nofollow" style="color:rgb(0,0,0);">http://sourceforge.net/projects/jts-topo-suite/</a></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">测试代码：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>        SolrQuery params = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> SolrQuery();   
+        </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">q=geo:"Intersects(POLYGON((-10 30, -40 40, -10 -20, 40 20, 0 0, -10 30)))"</span>
+        params.set("q", "station_position:\"Intersects(POLYGON((118 40, 118.5 40, 118.5 38, 118.3 35, 118 38,118 40)))\""<span style="font-size:12px;line-height:1.5;">);    
+        params.set(</span>"start", "0");  <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">记录开始位置</span>
+        params.set("rows", "100");  <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">查询的行数</span>
+        params.set("fl", "*");</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">返回在这个POLYGON内的所有结果集。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">3）&nbsp; 地址分词搜索</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">在“点查询”的基础上加上一些地址信息，就可以做一些地理位置+地址信息的LBS应用。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Solr分词配置</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这里使用了mmseg4j分词器：https://github.com/chenlb/mmseg4j-solr</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Schema.xml配置：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">field </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="station_address"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> type</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="textComplex"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> indexed</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> stored</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> multiValued</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="true"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldtype </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="textComplex"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="solr.TextField"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> positionIncrementGap</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="100"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+        <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">analyzer</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+            <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">tokenizer </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="com.chenlb.mmseg4j.solr.MMSegTokenizerFactory"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> mode</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="complex"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> dicPath</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="dic"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+        <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;/</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">analyzer</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+    <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;/</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldtype</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+    <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldtype </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="textMaxWord"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="solr.TextField"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> positionIncrementGap</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="100"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+        <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">analyzer</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+            <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">tokenizer </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="com.chenlb.mmseg4j.solr.MMSegTokenizerFactory"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> mode</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="max-word"</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+        <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;/</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">analyzer</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+    <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;/</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldtype</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+    <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldtype </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">name</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="textSimple"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="solr.TextField"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> positionIncrementGap</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="100"</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+        <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">analyzer</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+            <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">tokenizer </span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;">class</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="com.chenlb.mmseg4j.solr.MMSegTokenizerFactory"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> mode</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="simple"</span><span style="color:rgb(255,0,0);font-size:12px;line-height:1.5;"> dicPath</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">="D:/my_dic"</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">/&gt;</span>
+        <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;/</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">analyzer</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span>
+    <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&lt;/</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">fieldtype</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">&gt;</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">这里对“station_address”这个字段进行中文分词。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">下载mmseg4j-core-1.10.0.jar和mmseg4j-solr-2.2.0.jar放到solr webapp服务的lib下。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">测试代码：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>    <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">public</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">static</span><span style="font-size:12px;line-height:1.5;"> SolrQuery getPointAddressQuery(String address){
+        SolrQuery params </span>= <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> SolrQuery();
+        String q_params </span>= "station_address:"+<span style="font-size:12px;line-height:1.5;">address;
+        params.set(</span>"q"<span style="font-size:12px;line-height:1.5;">, q_params);
+        params.set(</span>"fq", "{!geofilt}");        <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">距离过滤函数
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">        //</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">params.set("fq","{!bbox}");          </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">距离过滤函数：圆的外接矩形</span>
+        params.set("pt", "118.227985 39.410722"); <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">当前经纬度</span>
+        params.set("sfield", "station_position"); <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">经纬度的字段</span>
+        params.set("d", "50"); <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">就近 d km的所有数据
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">        //</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">params.set("score", "distance"); </span>
+        params.set("sort", "geodist() asc");  <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">根据距离排序：由近到远</span>
+        params.set("start", "0");  <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">记录开始位置</span>
+        params.set("rows", "100");  <span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">查询的行数</span>
+        params.set("fl", "*,_dist_:geodist(),score"<span style="font-size:12px;line-height:1.5;">);
+
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">        return</span><span style="font-size:12px;line-height:1.5;"> params; 
+    }
+
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">public</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">static</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">void</span><span style="font-size:12px;line-height:1.5;"> main(String[] args) {
+
+        BaseStationSearch baseStationSearch </span>= <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">new</span><span style="font-size:12px;line-height:1.5;"> BaseStationSearch();
+        baseStationSearch.IndexBaseStation();  </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">执行一次索引
+        
+        </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">SolrQuery params = getPointQuery();
+        </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">SolrQuery params = getPolygonQuery();</span>
+        SolrQuery params = getPointAddressQuery("鼓楼"<span style="font-size:12px;line-height:1.5;">);
+        baseStationSearch.getAndPrintResult(params);
+    }
+        </span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p align="left" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">Search Results Count: 2</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SolrDocument{station_id=12003, station_address=[江苏南京鼓楼东南大学], station_position=[118.227996 39.410733], _version_=1500226229258682377, _dist_=0.001559071, score=4.0452886}</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">SolrDocument{station_id=12004, station_address=[江苏南京鼓楼南京大学], station_position=[118.228996 39.411733], _version_=1500226229258682378, _dist_=0.14214091, score=4.0452886}</p> 
+   <p align="left" style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">上面是测试的结果。</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">代码托管在GitHub上：<a href="https://github.com/luxiaoxun/Code4Java" rel="nofollow" style="color:rgb(0,0,0);">https://github.com/luxiaoxun/Code4Java</a></p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">参考：</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">http://wiki.apache.org/solr/SpatialSearch</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">https://cwiki.apache.org/confluence/display/solr/Spatial+Search</p> 
+   <p style="color:rgb(51,51,51);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:15px;">http://tech.meituan.com/solr-spatial-search.html</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>如何优雅地实现Python通用多线程/进程并行模块 « NotBeCN</title>
+  <meta name="description" content="                  当单线程性能不足时，我们通常会使用多线程/多进程去加速运行。而这些代码往往多得令人绝望，需要考虑：          如何创建线程执行的函数？      如何收集结果？若希望结果从子线程返回主线程，则还要使用队列      如何取消执行？ 直接kill掉所有线程？信号如何传递？...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/01/02/weixin_34112030_90121368.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">如何优雅地实现Python通用多线程/进程并行模块</h1>
+    <p class="post-meta">Jan 2, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="blogpost-body cnblogs-markdown"> 
+    <p>当单线程性能不足时，我们通常会使用多线程/多进程去加速运行。而这些代码往往多得令人绝望，需要考虑：</p> 
+    <ul>
+     <li>如何创建线程执行的函数？</li> 
+     <li>如何收集结果？若希望结果从子线程返回主线程，则还要使用队列</li> 
+     <li>如何取消执行？ 直接kill掉所有线程？信号如何传递？</li> 
+     <li>是否需要线程池？ 否则反复创建线程的成本过高了</li> 
+    </ul>
+    <p>不仅如此，若改为多进程或协程，代码还要继续修改。若多处使用并行，则这些代码还会重复很多遍，非常痛苦。</p> 
+    <p>于是，我们考虑将并行的所有逻辑封装到一个模块之内，向外部提供像串行执行一样的编程体验，还能彻底解决上面所述的疑难问题。所有代码不足180行。</p> 
+    <p>GitHub地址：</p> 
+    <blockquote> 
+     <p><a class="uri" href="https://github.com/ferventdesert/multi_yielder" rel="nofollow">https://github.com/ferventdesert/multi_yielder</a></p> 
+    </blockquote> 
+    <p>使用时非常简洁：</p> 
+    <pre><code class="hljs python"><span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">xprint</span><span class="hljs-params">(x)</span>:</span> 
+    time.sleep(<span class="hljs-number">1</span>)  <span class="hljs-comment"># mock a long time task </span>
+    <span class="hljs-keyword">yield</span> x*x   
+i=<span class="hljs-number">0</span>
+<span class="hljs-keyword">for</span> item <span class="hljs-keyword">in</span> multi_yield(xrange(<span class="hljs-number">100</span>)),xprint, process_mode,<span class="hljs-number">3</span>:
+    i+=<span class="hljs-number">1</span>
+    print(item)
+    <span class="hljs-keyword">if</span> i&gt;<span class="hljs-number">10</span>:
+        <span class="hljs-keyword">break</span></code></pre> 
+    <p>上面的代码会使用三个进程，并行地打印1-10的平方。当打印完10之后，进程自动回收释放。就像串行程序一样简单。</p> 
+    <h2>1. 先实现串行任务</h2> 
+    <p>我们通常会将任务分割为很多个子块，从而方便并行。因此可以将任务抽象为生成器。类似下面的操作，每个seed都是任务的种子。</p> 
+    <pre><code class="hljs python"><span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">get_generator</span><span class="hljs-params">()</span>:</span>
+    <span class="hljs-keyword">for</span> seed <span class="hljs-keyword">in</span> <span class="hljs-number">100</span>:
+        <span class="hljs-keyword">yield</span> seed</code></pre> 
+    <p>任务本身的定义，则可以通过一个接受种子的函数来实现：</p> 
+    <pre><code class="hljs python"><span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">worker</span><span class="hljs-params">(seed)</span>:</span>
+    <span class="hljs-comment"># some long time task</span>
+    <span class="hljs-keyword">return</span> seed*seed <span class="hljs-comment"># just example</span></code></pre> 
+    <p>那么实现串行任务就像这样：</p> 
+    <pre><code class="hljs swift"><span class="hljs-keyword">for</span> seed <span class="hljs-keyword">in</span> get_generator(n):
+    <span class="hljs-built_in">print</span> worker(seed)</code></pre> 
+    <p>进一步地，可以将其抽象为下面的函数：</p> 
+    <pre><code class="hljs python"><span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">serial_yield</span><span class="hljs-params">(genenator,worker)</span>:</span>
+    <span class="hljs-keyword">for</span> seed <span class="hljs-keyword">in</span> generator():
+        <span class="hljs-keyword">yield</span> worker(seed)</code></pre> 
+    <p>该函数通过传入生成器函数（generator）和任务的定义(worker函数)，即可再返回一个生成器。消费时：</p> 
+    <pre><code class="hljs swift"><span class="hljs-keyword">for</span> result <span class="hljs-keyword">in</span> serial_yield(your_genenator, your_worker):
+    <span class="hljs-built_in">print</span>(result)</code></pre> 
+    <p>我们看到，通过定义高阶函数，serial_yield就像map函数，对seed进行加工后输出。</p> 
+    <h2>2. 定义并行任务</h2> 
+    <p>考虑如下场景： boss负责分发任务到任务队列，多个worker从任务队列捞数据，处理完之后，再写入结果队列。主线程从结果队列中取结果即可。</p> 
+    <p>我们定义如下几种执行模式：</p> 
+    <ul>
+     <li>async: 异步/多协程</li> 
+     <li>thread: 多线程</li> 
+     <li>process: 多进程</li> 
+    </ul>
+    <p>使用Python创建worker的代码如下,func是任务的定义（是个函数）</p> 
+    <pre><code class="hljs python">    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">factory</span><span class="hljs-params">(func, args=None, name=<span class="hljs-string">'task'</span>)</span>:</span>
+        <span class="hljs-keyword">if</span> args <span class="hljs-keyword">is</span> <span class="hljs-keyword">None</span>:
+            args = ()
+        <span class="hljs-keyword">if</span> mode == process_mode:
+            <span class="hljs-keyword">return</span> multiprocessing.Process(name=name, target=func, args=args)
+        <span class="hljs-keyword">if</span> mode == thread_mode:
+            <span class="hljs-keyword">import</span> threading
+            t = threading.Thread(name=name, target=func, args=args)
+            t.daemon = <span class="hljs-keyword">True</span>
+            <span class="hljs-keyword">return</span> t
+        <span class="hljs-keyword">if</span> mode == async_mode:
+            <span class="hljs-keyword">import</span> gevent
+            <span class="hljs-keyword">return</span> gevent.spawn(func, *args)</code></pre> 
+    <p>创建队列的代码如下，注意seeds可能是无穷流，因此需要限定队列的长度，当入队列发现队列已满时，则任务需要阻塞。</p> 
+    <pre><code class="hljs python">  <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">queue_factory</span><span class="hljs-params">(size)</span>:</span>
+        <span class="hljs-keyword">if</span> mode == process_mode:
+            <span class="hljs-keyword">return</span> multiprocessing.Queue(size)
+        <span class="hljs-keyword">elif</span> mode == thread_mode:
+            <span class="hljs-keyword">return</span> Queue(size)
+        <span class="hljs-keyword">elif</span> mode == async_mode:
+            <span class="hljs-keyword">from</span> gevent <span class="hljs-keyword">import</span> queue
+            <span class="hljs-keyword">return</span> queue.Queue(size)</code></pre> 
+    <p>什么时候任务可以终止？ 我们罗列如下几种情况：</p> 
+    <ul>
+     <li>所有的seed都已经被消费完了</li> 
+     <li>外部传入了结束请求</li> 
+    </ul>
+    <p>对第一种情况，我们让boss在seed消费完之后，在队列里放入多个Empty标志，worker收到Empty之后，就会自动退出，下面是boss的实现逻辑：</p> 
+    <pre><code class="hljs python">    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">_boss</span><span class="hljs-params">(task_generator, task_queue, worker_count)</span>:</span>
+        <span class="hljs-keyword">for</span> task <span class="hljs-keyword">in</span> task_generator:
+            task_queue.put(task)
+        <span class="hljs-keyword">for</span> i <span class="hljs-keyword">in</span> range(worker_count):
+            task_queue.put(Empty)
+        print(<span class="hljs-string">'worker boss finished'</span>)</code></pre> 
+    <p>再定义worker的逻辑：</p> 
+    <pre><code class="hljs python">    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">_worker</span><span class="hljs-params">(task_queue, result_queue, gene_func)</span>:</span>
+        <span class="hljs-keyword">import</span> time
+        <span class="hljs-keyword">try</span>:
+            <span class="hljs-keyword">while</span> <span class="hljs-keyword">not</span> stop_wrapper.is_stop():
+                <span class="hljs-keyword">if</span> task_queue.empty():
+                    time.sleep(<span class="hljs-number">0.01</span>)
+                    <span class="hljs-keyword">continue</span>
+                task = task.get()
+                <span class="hljs-keyword">if</span> task == Empty:
+                    result_queue.put(Empty)
+                    <span class="hljs-keyword">break</span>
+                <span class="hljs-keyword">if</span> task == Stop:
+                    <span class="hljs-keyword">break</span>
+                <span class="hljs-keyword">for</span> item <span class="hljs-keyword">in</span> gene_func(task):
+                    result_queue.put(item)
+            <span class="hljs-keyword">print</span> (<span class="hljs-string">'worker worker is stop'</span>)
+        <span class="hljs-keyword">except</span> Exception <span class="hljs-keyword">as</span> e:
+            logging.exception(e)
+            <span class="hljs-keyword">print</span> (<span class="hljs-string">'worker exception, quit'</span>)</code></pre> 
+    <p>简单吧？但是这样会有问题，这个后面再说，我们把剩余的代码写完。</p> 
+    <p>再定义multi_yield的主要代码。 代码非常好理解，创建任务和结果队列，再创建boss和worker线程(或进程/协程)并启动，之后不停地从结果队列里取数据就可以了。</p> 
+    <pre><code class="hljs python"> <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">multi_yield</span><span class="hljs-params">(customer_func, mode=thread_mode, worker_count=<span class="hljs-number">1</span>, generator=None, queue_size=<span class="hljs-number">10</span>)</span>:</span>
+        workers = []
+        result_queue = queue_factory(queue_size)
+        task_queue = queue_factory(queue_size)
+
+        main = factory(_boss, args=(generator, task_queue, worker_count), name=<span class="hljs-string">'_boss'</span>)
+        <span class="hljs-keyword">for</span> process_id <span class="hljs-keyword">in</span> range(<span class="hljs-number">0</span>, worker_count):
+            name = <span class="hljs-string">'worker_%s'</span> % (process_id)
+            p = factory(_worker, args=(task_queue, result_queue, customer_func), name=name)
+            workers.append(p)
+        main.start()
+
+        <span class="hljs-keyword">for</span> r <span class="hljs-keyword">in</span> workers:
+            r.start()
+        count = <span class="hljs-number">0</span>
+        <span class="hljs-keyword">while</span> <span class="hljs-keyword">not</span> should_stop():
+            data = result_queue.get()
+            <span class="hljs-keyword">if</span> data <span class="hljs-keyword">is</span> Empty:
+                count += <span class="hljs-number">1</span>
+                <span class="hljs-keyword">if</span> count == worker_count:
+                    <span class="hljs-keyword">break</span>
+                <span class="hljs-keyword">continue</span>
+            <span class="hljs-keyword">if</span> data <span class="hljs-keyword">is</span> Stop:
+                <span class="hljs-keyword">break</span>
+            <span class="hljs-keyword">else</span>:
+                <span class="hljs-keyword">yield</span> data</code></pre> 
+    <p>这样从外部消费时，即可：</p> 
+    <pre><code class="hljs python"><span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">xprint</span><span class="hljs-params">(x)</span>:</span>
+    time.sleep(<span class="hljs-number">1</span>)
+    <span class="hljs-keyword">yield</span> x
+
+i=<span class="hljs-number">0</span>
+<span class="hljs-keyword">for</span> item <span class="hljs-keyword">in</span> multi_yield(xprint, process_mode,<span class="hljs-number">3</span>,xrange(<span class="hljs-number">100</span>)):
+    i+=<span class="hljs-number">1</span>
+    print(item)
+    <span class="hljs-keyword">if</span> i&gt;<span class="hljs-number">10</span>:
+        <span class="hljs-keyword">break</span></code></pre> 
+    <p>这样我们就实现了一个与<code>serial_yield</code>功能类似的<code>multi_yield</code>。可以定义多个worker，从队列中领任务，而不需重复地创建和销毁，更不需要线程池。当然，代码不完全，运行时可能出问题。但以上代码已经说明了核心的功能。完整的代码可以在文末找到。</p> 
+    <p>但是你也会发现很严重的问题：</p> 
+    <ul>
+     <li>当从外部break时，内部的线程并不会自动停止</li> 
+     <li>我们无法判断队列的长度，若队列满，那么put操作会永远卡死在那里，任务都不会结束。</li> 
+    </ul>
+    <h2>3. 改进任务停止逻辑</h2> 
+    <p>最开始想到的，是通过在<code>multi_yield</code>函数参数中添加一个返回bool的函数，这样当外部break时，同时将该函数的返回值置为True，内部检测到该标志位后强制退出。伪代码如下:</p> 
+    <pre><code class="hljs python">_stop=<span class="hljs-keyword">False</span>
+<span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">can_stop</span><span class="hljs-params">()</span>:</span>
+    <span class="hljs-keyword">return</span> _stop
+
+<span class="hljs-keyword">for</span> item <span class="hljs-keyword">in</span> multi_yield(xprint, process_mode,<span class="hljs-number">3</span>,xrange(<span class="hljs-number">100</span>),can_stop):
+    i+=<span class="hljs-number">1</span>
+    print(item)
+    <span class="hljs-keyword">if</span> i&gt;<span class="hljs-number">10</span>:
+        _stop=<span class="hljs-keyword">True</span>
+        <span class="hljs-keyword">break</span>
+</code></pre> 
+    <p>但这样并不优雅，引入了更多的函数作为参数，还必须手工控制变量值，非常繁琐。在多进程模式下，stop标志位还如何解决？</p> 
+    <p>我们希望外部在循环时执行了break后，会自动通知内部的生成器。实现方法似乎就是with语句，即contextmanager.</p> 
+    <p>我们实现以下的包装类：</p> 
+    <pre><code class="hljs python"><span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">Yielder</span><span class="hljs-params">(object)</span>:</span>
+    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">__init__</span><span class="hljs-params">(self, dispose)</span>:</span>
+        self.dispose = dispose
+
+    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">__enter__</span><span class="hljs-params">(self)</span>:</span>
+        <span class="hljs-keyword">pass</span>
+
+    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">__exit__</span><span class="hljs-params">(self, exc_type, exc_val, exc_tb)</span>:</span>
+        self.dispose()</code></pre> 
+    <p>它实现了with的原语，参数是dispose函数，作用是退出with代码块后的回收逻辑。</p> 
+    <p>由于值类型的标志位无法在多进程环境中传递，我们再创建StopWrapper类，用于管理停止标志和回收资源:</p> 
+    <pre><code class="hljs python">   <span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">Stop_Wrapper</span><span class="hljs-params">()</span>:</span>
+        <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">__init__</span><span class="hljs-params">(self)</span>:</span>
+            self.stop_flag = <span class="hljs-keyword">False</span>
+            self.workers=[]
+
+        <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">is_stop</span><span class="hljs-params">(self)</span>:</span>
+            <span class="hljs-keyword">return</span> self.stop_flag
+
+        <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">stop</span><span class="hljs-params">(self)</span>:</span>
+            self.stop_flag = <span class="hljs-keyword">True</span>
+            <span class="hljs-keyword">for</span> process <span class="hljs-keyword">in</span> self.workers:
+                <span class="hljs-keyword">if</span> isinstance(process,multiprocessing.Process):
+                    process.terminate()
+                    </code></pre> 
+    <p>最后的问题是，如何解决队列满或空时，put/get的无限等待问题呢？考虑包装一下put/get：包装在<code>while True</code>之中，每隔两秒get/put，这样即使阻塞时，也能保证可以检查退出标志位。所有线程在主线程结束后，最迟也能在2s内自动退出。</p> 
+    <pre><code class="hljs python"><span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">safe_queue_get</span><span class="hljs-params">(queue, is_stop_func=None, timeout=<span class="hljs-number">2</span>)</span>:</span>
+    <span class="hljs-keyword">while</span> <span class="hljs-keyword">True</span>:
+        <span class="hljs-keyword">if</span> is_stop_func <span class="hljs-keyword">is</span> <span class="hljs-keyword">not</span> <span class="hljs-keyword">None</span> <span class="hljs-keyword">and</span> is_stop_func():
+            <span class="hljs-keyword">return</span> Stop
+        <span class="hljs-keyword">try</span>:
+            data = queue.get(timeout=timeout)
+            <span class="hljs-keyword">return</span> data
+        <span class="hljs-keyword">except</span>:
+            <span class="hljs-keyword">continue</span>
+
+
+<span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">safe_queue_put</span><span class="hljs-params">(queue, item, is_stop_func=None, timeout=<span class="hljs-number">2</span>)</span>:</span>
+    <span class="hljs-keyword">while</span> <span class="hljs-keyword">True</span>:
+        <span class="hljs-keyword">if</span> is_stop_func <span class="hljs-keyword">is</span> <span class="hljs-keyword">not</span> <span class="hljs-keyword">None</span> <span class="hljs-keyword">and</span> is_stop_func():
+            <span class="hljs-keyword">return</span> Stop
+        <span class="hljs-keyword">try</span>:
+            queue.put(item, timeout=timeout)
+            <span class="hljs-keyword">return</span> item
+        <span class="hljs-keyword">except</span>:
+            <span class="hljs-keyword">continue</span>
+            </code></pre> 
+    <p>如何使用呢？我们只需在multi_yield的yield语句之外加上一行就可以了：</p> 
+    <pre><code class="hljs sql">    with Yielder(stop_wrapper.stop):
+        # <span class="hljs-keyword">create</span> queue,boss,worker, <span class="hljs-keyword">then</span> <span class="hljs-keyword">start</span> all
+        # <span class="hljs-keyword">ignore</span> <span class="hljs-keyword">repeat</span> code
+        <span class="hljs-keyword">while</span> <span class="hljs-keyword">not</span> should_stop():
+            <span class="hljs-keyword">data</span> = safe_queue_get(result_queue, should_stop)
+            <span class="hljs-keyword">if</span> <span class="hljs-keyword">data</span> <span class="hljs-keyword">is</span> <span class="hljs-keyword">Empty</span>:
+                <span class="hljs-keyword">count</span> += <span class="hljs-number">1</span>
+                <span class="hljs-keyword">if</span> <span class="hljs-keyword">count</span> == worker_count:
+                    break
+                continue
+            <span class="hljs-keyword">if</span> <span class="hljs-keyword">data</span> <span class="hljs-keyword">is</span> <span class="hljs-keyword">Stop</span>:
+                break
+            <span class="hljs-keyword">else</span>:
+                yield <span class="hljs-keyword">data</span></code></pre> 
+    <p><strong>仔细阅读上面的代码</strong>， 外部循环时退出循环，则会自动触发stop_wrapper的stop操作，回收全部资源，而不需通过外部的标志位传递！这样调用方在心智完全不需有额外的负担。</p> 
+    <p>实现生成器和上下文管理器的编程语言，都可以通过上述方式实现自动协程资源回收。笔者也实现了一个C#版本的，有兴趣欢迎交流。</p> 
+    <p>这样，我们就能像文章开头那样，实现并行的迭代器操作了。</p> 
+    <h2>4. 结语</h2> 
+    <p>完整代码在：</p> 
+    <blockquote> 
+     <p><a class="uri" href="https://github.com/ferventdesert/multi_yielder/blob/master/src/multi_yielder.py" rel="nofollow">https://github.com/ferventdesert/multi_yielder/blob/master/src/multi_yielder.py</a></p> 
+    </blockquote> 
+    <p>一些实现的细节很有趣，我们借助在函数中定义函数，可以不用复杂的类去承担职责，而仅仅只需函数。而类似的思想，在函数式编程中非常常见。</p> 
+    <p>该工具已经被笔者的流式语言<code>etlpy</code>所集成。但是依然有较多改进的空间，如没有集成分布式执行模式。</p> 
+    <p>欢迎留言交流。</p> 
+   </div> 
+   <div> 
+    <div> 
+     <p style="border-top:#e0e0e0 1px dashed;border-right:#e0e0e0 1px dashed;border-bottom:#e0e0e0 1px dashed;border-left:#e0e0e0 1px dashed;background:#e5f1f4 url(&quot;https://images.cnblogs.com/cnblogs_com/lloydsheng/239039/o_copyright.gif&quot;) no-repeat 1% 50%;font-family:'微软雅黑';font-size:11px;"><br> 作者：<a href="http://www.cnblogs.com/buptzym/" rel="nofollow">热情的沙漠</a> <br> 出处：<a href="http://www.cnblogs.com/buptzym/" rel="nofollow">http://www.cnblogs.com/buptzym/</a> <br> 本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利。 <br></p> 
+    </div> 
+   </div> 
+   <div class="clear"></div> 
+   <div> 
+    <div>
+     分类: 
+     <a href="http://www.cnblogs.com/buptzym/category/809619.html" rel="nofollow">开源项目</a> 
+    </div> 
+    <div>
+     <br>
+    </div> 
+    <div>
+     <br>
+    </div> 
+    <div></div> 
+    <div> 
+     <div>
+      本文转自FerventDesert博客园博客，原文链接：http://www.cnblogs.com/buptzym/p/6933868.html，如需转载请自行联系原作者
+      <br>
+     </div> 
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

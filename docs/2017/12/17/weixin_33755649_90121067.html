@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>HDFS小文件问题及解决方案 « NotBeCN</title>
+  <meta name="description" content="             1、&nbsp; 概述    小文件是指文件size小于HDFS上block大小的文件。这样的文件会给hadoop的扩展性和性能带来严重问题。首先，在HDFS中，任何block，文件或者目录在内存中均以对象的形式存储，每个对象约占150byte，如果有1000 0000个小文件，每个文件...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/17/weixin_33755649_90121067.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">HDFS小文件问题及解决方案</h1>
+    <p class="post-meta">Dec 17, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><strong>1、&nbsp; 概述</strong></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">小文件是指文件size小于HDFS上block大小的文件。这样的文件会给hadoop的扩展性和性能带来严重问题。首先，在HDFS中，任何block，文件或者目录在内存中均以对象的形式存储，每个对象约占150byte，如果有1000 0000个小文件，每个文件占用一个block，则namenode大约需要2G空间。如果存储1亿个文件，则namenode需要20G空间（见参考资料[1][4][5]）。这样namenode内存容量严重制约了集群的扩展。 其次，访问大量小文件速度远远小于访问几个大文件。HDFS最初是为流式访问大文件开发的，如果访问大量小文件，需要不断的从一个datanode跳到另一个datanode，严重影响性能。最后，处理大量小文件速度远远小于处理同等大小的大文件的速度。每一个小文件要占用一个slot，而task启动将耗费大量时间甚至大部分时间都耗费在启动task和释放task上。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">本文首先介绍了hadoop自带的解决小文件问题的方案（以工具的形式提供），包括Hadoop Archive，Sequence file和CombineFileInputFormat；然后介绍了两篇从系统层面解决HDFS小文件的论文，一篇是中科院计算所2009年发表的，用以解决HDFS上存储地理信息小文件的方案；另一篇是IBM于2009年发表的，用以解决HDFS上存储ppt小文件的方案。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><strong>2、&nbsp; HDFS文件读写流程</strong></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">在正式介绍HDFS小文件存储方案之前，我们先介绍一下当前HDFS上文件存取的基本流程。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><strong>(1)&nbsp; 读文件流程</strong></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">1）client端发送读文件请求给namenode，如果文件不存在，返回错误信息，否则，将该文件对应的block及其所在datanode位置发送给client</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">2） client收到文件位置信息后，与不同datanode建立socket连接并行获取数据。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><strong>(2) 写文件流程</strong></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">1） client端发送写文件请求，namenode检查文件是否存在，如果已存在，直接返回错误信息，否则，发送给client一些可用namenode节点</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">2） client将文件分块，并行存储到不同节点上datanode上，发送完成后，client同时发送信息给namenode和datanode</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">3）&nbsp; namenode收到的client信息后，发送确信信息给datanode</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">4）&nbsp; datanode同时收到namenode和datanode的确认信息后，提交写操作。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><strong>3、&nbsp; Hadoop自带的解决方案</strong></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">对于小文件问题，Hadoop本身也提供了几个解决方案，分别为：Hadoop Archive，Sequence file和CombineFileInputFormat。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">（1） Hadoop Archive</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">Hadoop Archive或者HAR，是一个高效地将小文件放入HDFS块中的文件存档工具，它能够将多个小文件打包成一个HAR文件，这样在减少namenode内存使用的同时，仍然允许对文件进行透明的访问。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">对某个目录/foo/bar下的所有小文件存档成/outputdir/ zoo.har：</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">hadoop archive -archiveName zoo.har -p /foo/bar /outputdir</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">当然，也可以指定HAR的大小(使用-Dhar.block.size)。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">HAR是在Hadoop file system之上的一个文件系统，因此所有fs shell命令对HAR文件均可用，只不过是文件路径格式不一样，HAR的访问路径可以是以下两种格式：</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">har://scheme-hostname:port/archivepath/fileinarchive</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">har:///archivepath/fileinarchive(本节点)</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">可以这样查看HAR文件存档中的文件：</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">hadoop dfs -ls har:///user/zoo/foo.har</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">输出：</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">har:///user/zoo/foo.har/hadoop/dir1</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">har:///user/zoo/foo.har/hadoop/dir2</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">使用HAR时需要两点，第一，对小文件进行存档后，原文件并不会自动被删除，需要用户自己删除；第二，创建HAR文件的过程实际上是在运行一个mapreduce作业，因而需要有一个hadoop集群运行此命令。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">此外，HAR还有一些缺陷：第一，一旦创建，Archives便不可改变。要增加或移除里面的文件，必须重新创建归档文件。第二，要归档的文件名中不能有空格，否则会抛出异常，可以将空格用其他符号替换(使用-Dhar.space.replacement.enable=true 和-Dhar.space.replacement参数)。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">（2） Sequence file</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">sequence file由一系列的二进制key/value组成，如果为key小文件名，value为文件内容，则可以将大批小文件合并成一个大文件。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">Hadoop-0.21.0中提供了SequenceFile，包括Writer，Reader和SequenceFileSorter类进行写，读和排序操作。如果hadoop版本低于0.21.0的版本，实现方法可参见[3]。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">（3）CombineFileInputFormat</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">CombineFileInputFormat是一种新的inputformat，用于将多个文件合并成一个单独的split，另外，它会考虑数据的存储位置。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><strong>4、&nbsp; 小文件问题解决方案</strong></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">上一节中提到的方案均需要用户自己编写程序，每隔一段时间对小文件进行merge以便减少小文件数量。那么能不能直接将小文件处理模块嵌到HDFS中，以便自动识别用户上传的小文件，然后自动对它们进行merge呢？</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">本节介绍了两篇论文针试图在系统层面解决HDFS小文件问题。这两篇论文对不同的应用提出了解决方案，实际上思路类似：在原有HDFS基础上添加一个小文件处理模块，当一个文件到达时，判断该文件是否属于小文件，如果是，则交给小文件处理模块处理，否则，交给通用文件处理模块处理。小文件处理模块的设计思想是，先将很多小文件合并成一个大文件，然后为这些小文件建立索引，以便进行快速存取和访问。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">论文[4]针对WebGIS系统的特点提出了解决HDFS小文件存储的方案。WebGIS是结合web和地理信息系统(GIS)而诞生的一种新系统。在WebGIS中，为了使浏览器和服务器之间传输的数据量尽可能地少，数据通常被切分成KB的小文件存储在分布式文件系统中。论文结合WebGIS中数据相关性特征，将保存相邻地理位置信息的小文件合并成一个大的文件，并为这些小文件建立索引以便对小文件进行存取。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><img class="aligncenter size-full wp-image-476" title="WebGIS-small-file" src="http://dongxicheng.org/wp-content/uploads/2011/04/WebGIS-small-file.jpg" alt="" width="462" height="235" style="border:0px;"></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">该论文将size小于16MB的文件当做小文件，需将它们合并成64MB(默认的block size)，并建立索引，索引结构和文件存储方式见上图。索引方式是一般的定长hash索引。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">论文[5]针对Bluesky系统(http://www.bluesky.cn/)的特点提出了解决HDFS小文件存储的方案。Bluesky是中国电子教学共享系统，里面的ppt文件和视频均存放在HDFS上。该系统的每个课件由一个ppt文件和几张该ppt文件的预览快照组成。当用户请求某页ppt时，其他相关的ppt可能在接下来的时间内也会被查看，因而文件的访问具有相关性和本地性。本文主要有2个idea：第一，将属于同一个课件的文件合并成一个大文件，以提高小文件存储效率。第二，提出了一种two-level prefetching机制以提高小文件读取效率，即索引文件预取和数据文件预取。索引文件预取是指当用户访问某个文件时，该文件所在的block对应的索引文件被加载到内存中，这样，用户访问这些文件时不必再与namenode交互了。数据文件预取是指用户访问某个文件时，将该文件所在课件中的所有文件加载到内存中，这样，如果用户继续访问其他文件，速度会明显提高。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">下图展示的是在BlueSky中上传文件的过程：</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><img class="aligncenter size-full wp-image-477" title="upload" src="http://dongxicheng.org/wp-content/uploads/2011/04/upload.jpg" alt="" width="482" height="260" style="border:0px;"></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">下图展示的是在BlueSky中阅览文件的过程：</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><img class="aligncenter size-full wp-image-478" title="brown" src="http://dongxicheng.org/wp-content/uploads/2011/04/brown.jpg" alt="" width="486" height="267" style="border:0px;"></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><strong>5、&nbsp; 总结</strong></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">Hadoop目前还没有一个系统级的通用的解决HDFS小文件问题的方案。它自带的三种方案，包括Hadoop Archive，Sequence file和CombineFileInputFormat，需要用户根据自己的需要编写程序解决小文件问题；而第四节提到的论文均是针对特殊应用提出的解决方案，没有形成一个比较通用的技术方案。</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><strong>6、&nbsp; 参考资料</strong></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">（1）有关小文件问题的表述：</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><a href="http://www.cloudera.com/blog/2009/02/the-small-files-problem/" rel="nofollow" style="color:rgb(52,104,164);">http://www.cloudera.com/blog/2009/02/the-small-files-problem/</a></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">（2）Hadoop Sequence file：</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;"><a href="http://hadoop.apache.org/common/docs/current/api/org/apache/hadoop/io/SequenceFile.html" rel="nofollow" style="color:rgb(52,104,164);">http://hadoop.apache.org/common/docs/current/api/org/apache/hadoop/io/SequenceFile.html</a></p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">（3）英文书籍《Hadoop：The Definitive Guide》，第七章190页</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">（4）Xuhui Liu, Jizhong Han, Yunqin Zhong, Chengde Han, Xubin He: Implementing WebGIS on Hadoop: A case study of improving small file I/O performance on HDFS. CLUSTER 2009: 1-8</p> 
+   <p style="color:rgb(75,75,75);font-family:Verdana, Arial, Helvetica, sans-serif;font-size:13px;">（5）Bo Dong, Jie Qiu, Qinghua Zheng, Xiao Zhong, Jingwei Li, Ying Li. A Novel Approach to Improving the Efficiency of Storing and Accessing Small Files on Hadoop: A Case Study by PowerPoint Files. In Proceedings of IEEE SCC’2010. pp.65~72。</p> 
+   <p><font color="#4b4b4b"><span style="font-size:13px;">本文转自博客园知识天地的博客，原文链接：<a href="http://www.cnblogs.com/mfryf/archive/2012/12/14/2817443.html" rel="nofollow">HDFS小文件问题及解决方案</a>，如需转载请自行联系原博主。</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

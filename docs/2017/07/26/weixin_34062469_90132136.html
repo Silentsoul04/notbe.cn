@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>在Linux中使用C语言实现控制流保护（CFG）【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.codesec.net/view/537311.html    一、前言    最近版本的windows有一个新的缓解措施叫做控制流保护(CFG)。在一个非直接调用之前――例如，函数指针和虚函数――针对有效调用地址的表检查目标地址。如果地址不是一个已知函数的入...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/07/26/weixin_34062469_90132136.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">在Linux中使用C语言实现控制流保护（CFG）【转】</h1>
+    <p class="post-meta">Jul 26, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.codesec.net/view/537311.html" rel="nofollow">http://www.codesec.net/view/537311.html</a></p> 
+   <p>一、前言</p> 
+   <p>最近版本的<a href="http://www.codesec.net/list/14/" rel="nofollow">windows</a>有一个新的缓解措施叫做控制流保护(CFG)。在一个非直接调用之前――例如，函数指针和虚函数――针对有效调用地址的表检查目标地址。如果地址不是一个已知函数的入口，程序将会终止运行。</p> 
+   <p>如果一个程序有一个缓冲区溢出漏洞，攻击者可以利用它覆盖一个函数地址，并且通过调用那个指针来控制程序执行流。这是ROP攻击的一种方法，攻击者构建一系列配件地址链，一个配件是一组包含ret指令的指令序列，这些指令都是原始程序中的，可以用来作为非直接调用的起点。执行过程会从一个配件跳到另一个配件中以便做攻击者想做的事，却不需要攻击这提供任何代码。</p> 
+   <p>两种非常广的缓解ROP攻击的技术是地址空间布局随机化(ALSR)和栈保护。前者是随机化模块的加载基址以便达到不可预料的结果。在ROP攻击中的地址依赖实时内存布局，因此攻击者必须找到并利用信息泄漏来绕过ASLR。</p> 
+   <p>关于栈保护，编译器在其他栈分配之上分配一个值，并设置为每个线程的随机值。如果过缓冲区溢出覆盖了函数返回地址，这个值将也被覆盖。在函数返回前，将校验这个值。如果不能与已知值匹配，程序将终止运行。</p> 
+   <p><br><img src="http://qnpic1.codesec.net/201702/23/20170223_425_537311_1.png%21web?imageView2/2/h/300/interlace/1" alt="在Linux中使用C语言实现控制流保护（CFG）"></p> 
+   <p>CFG原理类似，在将控制传送到指针地址前做一个校验，只是不是校验一个值，而是校验目标地址本身。这个非常复杂，不像栈保护，需要平台协调。这个校验必须在所有的可靠的调用目标中被通知，不管是来自主程序还是动态库。</p> 
+   <p>虽然没有广泛部署，但是值得一提的是Clang’s SafeStack。每个线程有两个栈：一个“安全栈”用来保存返回指针和其他可安全访问的值，另一个“非安全栈”保存buffer之类的数据。缓冲区溢出将破环其他缓冲区，但是不会覆盖返回地址，这样限制了破环的影响。</p> 
+   <p> 二、利用例子</p> 
+   <p>使用一个小的C程序，demo.c：</p> 
+   <p> int main(void) { charname[8]; gets(name); printf("Hello,%s.\n",name); return0; }</p> 
+   <p>它读取一个名字存到缓冲区中，并且以换行结尾打印出来。麻雀虽小五脏俱全。原生调用gets()不会校验缓冲区的边界，可以用来缓冲区溢出漏洞利用。很明显编译器和链接器都会抛出警告。</p> 
+   <p>简单起见，假设程序包含危险函数。</p> 
+   <p> void self_destruct(void) { puts("****GOBOOM!****"); }</p> 
+   <p>攻击者用缓冲区溢出来调用这个危险函数。</p> 
+   <p>为了使攻击简单，假设程序不使用ASLR(例如，在GCC/Clang中不使用-fpie和-pie编译选项)。首先，找到self_destruct()函数地址。</p> 
+   <p> $readelf-ademo|grepself_destruct 46:00000000004005c510FUNCGLOBALDEFAULT13self_destruct</p> 
+   <p>因为在64位系统上面，所以是64位的地址。Name缓冲区的大小事8字节，在汇编我看到一个额外的8字节分配上面，所以有16个字节填充，然后8字节覆盖self_destruct的返回指针。</p> 
+   <p> $echo-ne'xxxxxxxxyyyyyyyy\xc5\x05\x40\x00\x00\x00\x00\x00'&gt;boom $./demo&lt;boom Hello,xxxxxxxxyyyyyyyy?@. ****GOBOOM!**** Segmentationfault</p> 
+   <p>使用这个输入我已经成功利用了缓冲区溢出来控制了执行。当main试图回到libc时，它将会跳转到威胁代码，然后崩溃。打开堆栈保护可以阻止这种利用。</p> 
+   <p> $gcc-Os-fstack-protector-odemodemo.c $./demo&lt;boom Hello,xxxxxxxxaaaaaaaa?@. ***stacksmashingdetected***:./demoterminated =======Backtrace:========= ...lotsofbacktracestuff...</p> 
+   <p>栈保护成功阻止了利用。为了绕过过这个，我将不得不猜canary值或者发现可以利用的信息泄漏。</p> 
+   <p>栈保护转化为程序看起来就是如下这样：</p> 
+   <p> int main(void) { long__canary=__get_thread_canary(); charname[8]; gets(name); printf("Hello,%s.\n",name); if(__canary!=__get_thread_canary()) abort(); return0; }</p> 
+   <p>然而，实际上不可能在C中实现堆栈保护，缓冲区溢出是不确定行为，并且canary仅对缓冲区溢出有效，还允许编译器优化它。</p> 
+   <p> 三、函数指针和虚函数</p> 
+   <p>在攻击者成功上述利用后，上层管理加入了密码保护措施。看起来如下：</p> 
+   <p> void self_destruct(char*password) { if(strcmp(password,"12345")==0) puts("****GOBOOM!****"); }</p> 
+   <p>这个密码是硬编码的，它是比较愚蠢，但是假设它不为攻击者所知。上层管理已经要求堆栈保护，因此假设已经开启。</p> 
+   <p>另外，程序也做一点改变，现在用一个函数指针实现多态。</p> 
+   <p> structgreeter{ charname[8]; void(*greet)(structgreeter*); }; void greet_hello(structgreeter*g) { printf("Hello,%s.\n",g-&gt;name); } void greet_aloha(structgreeter*g) { printf("Aloha,%s.\n",g-&gt;name); }</p> 
+   <p>现在有一个greeter对象和函数指针来实现运行时多态。把他想想为手写的C的虚函数。下面是新的main函数：</p> 
+   <p> int main(void) { structgreetergreeter={.greet=greet_hello}; gets(greeter.name); greeter.greet(&amp;greeter); return0; }</p> 
+   <p>(在真实的程序中，其他东西会提供greeter并挑选它自己的函数指针)</p> 
+   <p>而不是覆盖返回指针，攻击者有机会覆盖结构中的函数指针。让我们重新像之前一样利用。</p> 
+   <p> $readelf-ademo|grepself_destruct 54:00000000004006a510FUNCGLOBALDEFAULT13self_destruct</p> 
+   <p>我们不知道密码，但是我们确实知道密码校验是16字节。攻击应该跳过16字节，即跳过校验(0x4006a5+16=0x4006b5)。</p> 
+   <p> $echo-ne'xxxxxxxx\xb5\x06\x40\x00\x00\x00\x00\x00'&gt;boom $./demo&lt;boom ****GOBOOM!****</p> 
+   <p>不管堆栈保护还是密码保护都么有帮助。堆栈保护仅仅保护返回指针，而不保护结构中的函数指针。</p> 
+   <p>这就是CFG起作用的地方。开启了CFG，编译器会在调用greet()之前插入一个校验。它必须指向一个已知函数的开头，否则将想堆栈保护一样终止程序运行。因为self_destruct()不是函数的开头，但是利用后程序还是会终止。</p> 
+   <p>然而，<a href="http://www.codesec.net/list/15/" rel="nofollow">linux</a>还没有CFG机制。因此我打算自己实现它。</p> 
+   <p> 四、函数地址表</p> 
+   <p>正如文中顶端PDF链接中描述的，Windows上面的CFG使用bitmap实现。每个位代表8字节内存。如果过8字节包含了函数开头，这个位设置为1。校验一个指针意味着校验在bitmap中它关联的位。</p> 
+   <p>关于我的CFG，我决定保持相同的8字节解决方案：目标地址的低3位将舍弃。其余24位用来作为bitmap的索引。所有指针中的其他位被忽略。24位的索引意味着bitmap最大只能是2MB。</p> 
+   <p>24位对于32位系统已经足够了，但是在64位系统上面是不够的：一些地址不能代表函数的开头，但是设置他们的位为1.这是可以接受的，尤其是只有已知函数作为非直接调用的目标，降低了不利因素。</p> 
+   <p>注意：根据指针转化为整数的位是未指定的且不可移植，但是这个实现不管在哪里都能工作良好。</p> 
+   <p>下面是CFG的参数。我将他们封装为宏以便编译是方便。这个cfg_bits是支持bitmap数组的整数类型。CFG_RESOLUTION是舍弃的位数，一次“3”是8字节的一个粒度。</p> 
+   <p> typedefunsignedlongcfg_bits; #defineCFG_RESOLUTION3 #defineCFG_BITS24</p> 
+   <p>给一个函数指针f，下面的宏导出bitmap的索引。</p> 
+   <p> #defineCFG_INDEX(f)\ (((uintptr_t)f&gt;&gt;CFG_RESOLUTION)&amp;((1UL&lt;&lt;CFG_BITS)-1))</p> 
+   <p>CFG bitmap只是一个整形数组。初始值为0。</p> 
+   <p> structcfg{ cfg_bitsbitmap[(1UL&lt;&lt;CFG_BITS)/(sizeof(cfg_bits)*CHAR_BIT)]; };</p> 
+   <p>使用cfg_register()在bitmap中手动注册函数。</p> 
+   <p> void cfg_register(structcfg*cfg,void*f) { unsignedlongi=CFG_INDEX(f); size_tz=sizeof(cfg_bits)*CHAR_BIT; cfg-&gt;bitmap[i/z]|=1UL&lt;&lt;(i%z); }</p> 
+   <p>因为在运行时注册函数，需要与ASLR一致。如果ASLR开启了，bitmap每次运行都会不同。将bitmap的每个元素与一个随机数异或是值得的，加大攻击者的难度。在完成注册后，bitmap也需要调整为只读权限(mprotect())。</p> 
+   <p>最后，校验函数被用于非直接调用之前。它确保了f先被传递给cfg_register()。因为它调用频繁，所以需要尽量快和简单。</p> 
+   <p> void cfg_check(structcfg*cfg,void*f) { unsignedlongi=CFG_INDEX(f); size_tz=sizeof(cfg_bits)*CHAR_BIT; if(!((cfg-&gt;bitmap[i/z]&gt;&gt;(i%z))&amp;1)) abort(); }</p> 
+   <p>完成了，现在在main中使用它：</p> 
+   <p> structcfgcfg; int main(void) { cfg_register(&amp;cfg,self_destruct);//toprovethisworks cfg_register(&amp;cfg,greet_hello); cfg_register(&amp;cfg,greet_aloha); structgreetergreeter={.greet=greet_hello}; gets(greeter.name); cfg_check(&amp;cfg,greeter.greet); greeter.greet(&amp;greeter); return0; }</p> 
+   <p>现在再次利用：</p> 
+   <p> $./demo&lt;boom Aborted</p> 
+   <p>正常情况下self_destruct()不会被注册，因为它不是一个非直接调用的合法目标，但是利用依然不能起作用是因为它在self_destruct()中间被调用，在bitmap中它不是一个可靠的地址。校验将在利用前终止程序。</p> 
+   <p>在真实的应用程序中，我将使用一个全局的CFG bitmap，在头文件中使用inline函数定义cfg_check()。</p> 
+   <p>尽管不使用工具直接在C中实现是可能的，但是这将变得更加繁琐和意出错。正确的是该在编译器中实现CFG。</p> 
+   <p>本文系统（linux）相关术语:linux系统 鸟哥的linux私房菜 linux命令大全 linux操作系统 </p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

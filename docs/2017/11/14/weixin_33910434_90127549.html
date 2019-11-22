@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>理解 OpenStack + Ceph （9）： Ceph 的size/min_size/choose/chooseleaf/scrubbing/repair 等概念... « NotBeCN</title>
+  <meta name="description" content="             本系列文章会深入研究 Ceph 以及 Ceph 和 OpenStack 的集成：    （1）安装和部署    （2）Ceph RBD 接口和工具    （3）Ceph 物理和逻辑结构    （4）Ceph 的基础数据结构    （5）Ceph 与 OpenStack 集成的实现    ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/14/weixin_33910434_90127549.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">理解 OpenStack + Ceph （9）： Ceph 的size/min_size/choose/chooseleaf/scrubbing/repair 等概念...</h1>
+    <p class="post-meta">Nov 14, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">本系列文章会深入研究 Ceph 以及 Ceph 和 OpenStack 的集成：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）<a href="http://www.cnblogs.com/sammyliu/p/4804037.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">安装和部署</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）<a href="http://www.cnblogs.com/sammyliu/p/4838139.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph RBD 接口和工具</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（3）<a href="http://www.cnblogs.com/sammyliu/p/4836014.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph 物理和逻辑结构</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（4）<a href="http://www.cnblogs.com/sammyliu/p/4843812.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph 的基础数据结构</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（5）<a href="http://www.cnblogs.com/sammyliu/p/4838138.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph 与 OpenStack 集成的实现</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（6）<a href="http://www.cnblogs.com/sammyliu/p/5066895.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">QEMU-KVM 和 Ceph RBD 的 缓存机制总结</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（7）<a href="http://www.cnblogs.com/sammyliu/p/5555218.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Ceph 的基本操作和常见故障排除方法</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（8）<a href="http://www.cnblogs.com/sammyliu/p/5557666.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">基本的性能测试工具和方法</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（9）&nbsp;<a href="http://www.cnblogs.com/sammyliu/p/5568989.html%20" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">pool 的size 和 min_size，choose 和 chooseleaf，pg scrubbing 和 repair 等概念</a></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;"><span style="line-height:1.5;font-size:1.5em;">1. osd 状态变化引起的PG和集群状态变化</span></h2> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,153,0);">注意：</span></p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;"><span style="line-height:1.5;color:rgb(51,102,255);">蓝色：ceph -w 的输出</span></li> 
+    <li style="list-style-type:disc;"><span style="line-height:1.5;color:rgb(51,153,102);">绿色：while true; do ceph health detail &amp; date +%F:%H:%M:%S.%N; sleep 0.5; done 的输出</span></li> 
+    <li style="list-style-type:disc;"><span style="line-height:1.5;color:rgb(153,51,102);">紫色：while true; do ceph osd map pool1 Evernote_5.8.6.7519.exe &nbsp;&amp; date +%F:%H:%M:%S.%N; sleep 0.5; done 的输出</span></li> 
+    <li style="list-style-type:disc;"><span style="line-height:1.5;color:rgb(255,0,0);">红色：注释</span></li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">- 1:&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;color:rgb(0,0,255);">64 active+clean</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;color:rgb(153,51,102);">osdmap e277 pool 'pool1' (9) object 'Evernote_5.8.6.7519.exe' -&gt; pg 9.6094a41e (9.1e) -&gt; up ([5,3,0], p5) acting ([5,3,0], p5)</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,153,0);">一开始，PG 和 Ceph 集群都是 active + clean 的。pool1 的 size 和 min_size 都是 3，它的一个 pg 9.1e 分布在 OSD [5,0,3] 上。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">0:</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">杀掉 osd.5&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">+ 1：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,51,102);">osdmap e277 pool 'pool1' (9) object 'Evernote_5.8.6.7519.exe' -&gt; pg 9.6094a41e (9.1e) -&gt; up ([5,3,0], p5) acting ([5,3,0], p5)</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);"><span style="line-height:1.5;color:rgb(153,51,102);">杀掉之后 osdmap 并不会立刻更新。</span></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">+ 20：&nbsp; &nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(51,102,255);">14:28:57.634378 mon.0 [INF] pgmap v5610: 64 pgs: 64 active+clean; 97071 kB data, 2379 MB used, 18056 MB / 20435 MB avail</span><br><span style="line-height:1.5;color:rgb(51,102,255);">14:49:18.850232 mon.0 [INF] osd.5 192.168.56.103:6800/11598 failed (3 reports from 3 peers after 20.000173 &gt;= grace 20.000000)</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">经过 20 秒以后，mon 将 osd.5 设置为 down 状态。该时长是由配置项&nbsp;osd&nbsp;<span class="pre" style="line-height:1.5;">heartbeat&nbsp;<span class="pre" style="line-height:1.5;">interval 和&nbsp;osd&nbsp;<span class="pre" style="line-height:1.5;">heartbeat&nbsp;<span class="pre" style="line-height:1.5;">grace 共同决定的。见下文解释。</span></span></span></span></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(51,102,255);">14:49:18.933796 mon.0 [INF] osdmap e290: 4 osds: 3 up, 4 in</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">up 状态的 osd 少了一个，因为 osd.5 down 了。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(51,102,255);">14:49:18.944307 mon.0 [INF] pgmap v5611: 64 pgs: 16 stale+active+clean, 48 active+clean; 97071 kB data, 2379 MB used, 18056 MB / 20435 MB avail</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">注意此时只有16个PG有呈现stale 状态，这 16 个 PG 的主OSD 都是 osd.5， 因为它没法上报 PG 状态给 mon 了，所有mon 将这些PG 设为 stale 状态。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,204,0);">HEALTH_WARN 16 pgs stale; too few pgs per osd (16 &lt; min 20); 1/4 in osds are down</span><br><span style="line-height:1.5;color:rgb(153,204,0);">pg 9.1e is stale+active+clean, acting [5,3,0]</span><br><span style="line-height:1.5;color:rgb(153,204,0);">osd.5 is down since epoch 290, last address 192.168.56.103:6800/11598</span><br><span style="line-height:1.5;color:rgb(153,204,0);">2016-06-06:14:49:19.379867646</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">其中，PG 9.1e 的 acting set 保持不变，但是因为主 OSD down 了，因此 MON 将它标记为 stale 状态。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(51,102,255);">14:49:19.953801 mon.0 [INF] osdmap e291: 4 osds: 3 up, 4 in</span><br><span style="line-height:1.5;color:rgb(51,102,255);">14:49:19.966491 mon.0 [INF] pgmap v5612: 64 pgs: 16 stale+active+clean, 48 active+clean; 97071 kB data, 2379 MB used, 18056 MB / 20435 MB avail</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,204,0);">HEALTH_WARN 52 pgs incomplete; 52 pgs stuck inactive; 52 pgs stuck unclean; too few pgs per osd (16 &lt; min 20); 1/4 in osds are down</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,204,0);">pg 9.1e is stuck inactive for 3135.552554, current state incomplete, last acting [3,0]</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,204,0);">pg 9.1e is incomplete, acting [3,0] (reducing pool pool1 min_size from 3 may help; search ceph.com/docs for 'incomplete')</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,204,0);">osd.5 is down since epoch 290, last address 192.168.56.103:6800/11598</span><br><span style="line-height:1.5;color:rgb(153,204,0);">14:49:25.487264438</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">6 秒钟后，PG 的 acting 由&nbsp;([5,3,0], p5) 变为&nbsp;([3,0], p3)， 该 PG 的状态变为 incomplete，因为它只存在于 2 个OSD 上，这个数目小于规定的副本数3。下面是 pg 9.1e 的状态：</span>&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">root@ceph1:~# ceph pg 9.1e query</span><br><span style="line-height:1.5;color:rgb(255,0,0);">{ "state": "incomplete",</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"snap_trimq": "[]",</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"epoch": 315,</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"up": [5,3],</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"acting": [5,3] }</span>&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,153,0);">为什么 6 秒之后才发生，需要进一步研究。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">+ 302：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">14:54:20.348720 mon.0 [INF] osd.5 out (down for 301.434591)</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">301 秒之后，MON 将 osd.5 标记为 out，该时长是由配置项&nbsp;mon&nbsp;<span class="pre" style="line-height:1.5;">osd&nbsp;<span class="pre" style="line-height:1.5;">down&nbsp;<span class="pre" style="line-height:1.5;">out&nbsp;<span class="pre" style="line-height:1.5;">interval 决定的。见下文分析。</span></span></span></span></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">14:54:20.484881 mon.0 [INF] osdmap e292: 4 osds: 3 up, 3 in</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">in 状态的 osd 数目从 4 变为 3，因为 osd.5 out 了。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">14:54:20.493183 mon.0 [INF] pgmap v5617: 64 pgs: 12 active+clean, 52 incomplete; 97071 kB data, 2247 MB used, 13079 MB / 15326 MB avail</span><br><span style="line-height:1.5;color:rgb(0,0,255);">14:54:21.588324 mon.0 [INF] osdmap e293: 4 osds: 3 up, 3 in</span><br><span style="line-height:1.5;color:rgb(0,0,255);">14:54:21.602137 mon.0 [INF] pgmap v5618: 64 pgs: 12 active+clean, 52 incomplete; 97071 kB data, 2247 MB used, 13079 MB / 15326 MB avail</span><br><span style="line-height:1.5;color:rgb(0,0,255);">14:54:26.190982 mon.0 [INF] pgmap v5619: 64 pgs: 50 active+clean, 14 incomplete; 97071 kB data, 2376 MB used, 12950 MB / 15326 MB avail</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">这个时候应该有 osd.2 加入了 acting set，然后有部分对象呈现 degraded 状态，因为此时 osd.2 上还没有副本，因此开始恢复过程。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">{ "state": "active+recovering",</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"snap_trimq": "[]",</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"epoch": 317,</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"up": [5,3,2],</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"acting": [5,3,2],</span><br><span style="line-height:1.5;color:rgb(255,0,0);">"actingbackfill": ["2","3","5"],}</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(0,0,255);">14:54:27.401982 mon.0 [INF] pgmap v5620: 64 pgs: 1 active, 63 active+clean; 97071 kB data, 2377 MB used, 12949 MB / 15326 MB avail; 2/3 objects degraded (66.667%)</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">7 秒之后，数据恢复进行中，此时查看 pg 的话，其状态是 “active+recovering”。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,204,0);">HEALTH_WARN 1 pgs stuck unclean; recovery 2/3 objects degraded (66.667%)</span><br><span style="line-height:1.5;color:rgb(153,204,0);">pg 9.1e is stuck unclean for 3437.937873, current state active, last acting [3,0,2]</span><br><span style="line-height:1.5;color:rgb(153,204,0);">recovery 2/3 objects degraded (66.667%)</span><br><span style="line-height:1.5;color:rgb(153,204,0);">2016-06-06:14:54:27.824171144</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,204,0);">14:54:30.871475369&nbsp;HEALTH_OK</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(51,102,255);">14:54:31.115118 mon.0 [INF] pgmap v5621: 64 pgs: 64 active+clean; 97071 kB data, 2377 MB used, 12949 MB / 15326 MB avail; 19173 kB/s, 0 objects/s recovering</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">3秒之后，恢复完成，之前的数据恢复速度为 19MB/s。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">+60</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(51,102,255);">14:55:10.491940 mon.0 [INF] osd.5 192.168.56.103:6800/11868 boot</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">osd.5 启动回来。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(51,102,255);">14:55:10.492120 mon.0 [INF] osdmap e294: 4 osds: 4 up, 4 in</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">osd map 立刻被更新。为什么启动 osd 会立刻导致 osdmap 被更新，需要研究。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(51,102,255);">14:55:10.499961 mon.0 [INF] pgmap v5622: 64 pgs: 64 active+clean; 97071 kB data, 2377 MB used, 12949 MB / 15326 MB avail</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,51,102);">14:55:10.555947545&nbsp;osdmap e293 pool 'pool1' (9) object 'Evernote_5.8.6.7519.exe' -&gt; pg 9.6094a41e (9.1e) -&gt; up ([3,0,2], p3) acting ([3,0,2], p3)</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(153,51,102);">14:55:11.075660083&nbsp;osdmap e294 pool 'pool1' (9) object 'Evernote_5.8.6.7519.exe' -&gt; pg 9.6094a41e (9.1e) -&gt; up ([5,3,0], p5) acting ([5,3,0], p5)</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;color:rgb(255,0,0);">PG 的主 osd 由 osd.3 切换至 osd.5，同时将之前新加入的 osd.2 踢出去了。为什么 osd.5 回来之后立刻恢复其之前的主OSD位子，需要研究，有可能是因为CRUSH 想保持对同样的 osdmap 所选择的 PG acting set 不变，要维持这个连续性就需要做一些牺牲，包括可能出现的 recovery 或者 backfill。</span>&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">PG 几种状态的说明：</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">stale：当主 OSD fail 了时，MON 将主 OSD 为该 osd 的 PG 的状态标记为 stale。有几种可能的情况： 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">当PG 的主 OSD 正在两个 osd 之间切换时，在切换过程中，PG 会短暂地出现 stale 状态。</li> 
+      <li style="list-style-type:disc;">当 PG 所有 OSD 都 down 了时，PG 会长期性地呈现 stale 状态。</li> 
+     </ul></li> 
+    <li style="list-style-type:disc;">incomplete: 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">PG 的 OSD 数目不够不足以进行数据恢复时，此时往往是 PG 的 OSD 的数目不够预设的副本数目了。</li>
+     </ul></li> 
+    <li style="list-style-type:disc;">recovering 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">PG 处于数据恢复过程中</li>
+     </ul></li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">几个关键步骤：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（1）MON 将 osd.5 设置为 down 状态：从上面<span style="line-height:1.5;">能看出来 MON &nbsp;从 osd.5 的 3 个peers 上收到了 3 个 reports，持续了 25 秒。一个 osd 可以有多个 peers，因为它可能会出现多个 pg 的 acting set 中。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">文章&nbsp;<a href="http://docs.ceph.com/docs/jewel/rados/configuration/mon-osd-interaction/" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">CONFIGURING MONITOR/OSD INTERACTION</a>&nbsp;解释了OSD心跳检测原理。同一个 PG 内的 osd 互相通过心跳机制检测对方的状态，检测间隔是 6s，由配置项&nbsp;<span class="pre" style="line-height:1.5;">osd&nbsp;<span class="pre" style="line-height:1.5;">heartbeat&nbsp;<span class="pre" style="line-height:1.5;">interval 确定。如果在由&nbsp;<span class="pre" style="line-height:1.5;">osd&nbsp;<span class="pre" style="line-height:1.5;">heartbeat&nbsp;<span class="pre" style="line-height:1.5;">grace 规定的时间内（20s）某个 OSD 都没有回复心跳，做检测的 osd 将判断这个osd为 down 并向 MON 报告，然后 MON 会更新 osd map 将其设置为 down。</span></span></span></span></span></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">（2）MON 将 osd.5 设置为 out 状态：MON 在由配置项&nbsp;<span class="pre" style="line-height:1.5;">mon&nbsp;<span class="pre" style="line-height:1.5;">osd&nbsp;<span class="pre" style="line-height:1.5;">down&nbsp;<span class="pre" style="line-height:1.5;">out&nbsp;<span class="pre" style="line-height:1.5;">interval （默认 300s）确定的时间区间内如果发现 osd 没有回复 up 状态，则将其状态从 in 改为 out。这会导致有新的 osd 被加入 PG，并开始数据恢复过程。恢复过程结束后，集群回到&nbsp;active+clean 状态。</span></span></span></span></span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span class="pre" style="line-height:1.5;">（3）在 osd.5 重启后，osd map 立刻被更新，其状态变为 up，然后 PG 的主 OSD 立刻有之前的 osd.3 变为 osd.5，并将之前加入的 osd.2 踢出去了。因为该过程中没有数据变化，osd.5 上的数据不需要被更新，因此并没有发生数据移动。</span></p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">2. pool 的 size 和 min_size 对对象访问性的影响</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.1 解释</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">pool 的 size 设置的是一个对象包括它自身在内的目标副本数，默认为 3，表示一个对象有另外两个副本；min_size 设置的是处于 degraded 模式下的对象还能接受IO时的最小副本数。当实际副本数低于 min_size 时，该对象将是只读的。&nbsp;</p> 
+   <table border="0" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>pool size</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>pool min_size</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>对象实际副本数</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>PG/对象 状态</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">3</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">N/A</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">3</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">PG：active + clean</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">3</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">3</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">2</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">对象不能接受 IO</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">3</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">2</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">2</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">PG：active + degraded</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">3</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">2</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">1</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">对象不能接受 IO</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">3</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">2</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">0</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">PG：stale<br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">2.2 实验</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">0：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">集群有4个 osd （0,2,5,3），pool 的 size 和 min_size 都是3，pg 9.1e 的 acting set 为 [5,3,0]</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">1：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">将 osd.0 停掉。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">经过上面第二部分描述的过程，在几分钟后，系统恢复 OK 状态，pg 9.1e 的 acting set 变为 [5,3,2]</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">2：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">将 osd.5 停掉。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">在其变为 out 状态后，pg 9.1e 保持在&nbsp;incomplete 状态。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">运行&nbsp;rados ls -p pool1 命令，此时已经无法返回了，也就是说此时整个存储池都不接受 IO 了</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><strong>&nbsp; &nbsp; &nbsp; 结论</strong>：对于一个 PG 来说，其状态（可以是多个状态的组合）必须包括 active + clean 时它才能接受 IO。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">3：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">将 pool 的 min_size 从 3 修改为 2。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">此时 pg 状态为&nbsp;active+degraded， 有对象总数 1/3 的部分对象处于降级状态（&nbsp;1/3 objects degraded (33.333%)）。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">此时 IO 可以正常进行。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><strong>结论</strong>：PG 处于 degraded 状态不影响其 IO 能力，因此，min_size 是一个 PG 能接受IO的最小副本数。&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">3. PG scrubbing 和 repair</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.1 实验1：验证 scrubbing 和 repair 机制</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">Scrubbing 是 Ceph 保持数据完整性的一个机制，类似于文件系统中的 fsck，它会发现存在的数据不一致。scrubbing 会影响集群性能。它分为两类：</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">一类是默认每天进行的，称为 light scrubbing，其周期由配置项&nbsp;<span class="pre" style="line-height:1.5;">osd&nbsp;<span class="pre" style="line-height:1.5;">scrub&nbsp;<span class="pre" style="line-height:1.5;">min&nbsp;<span class="pre" style="line-height:1.5;">interval （默认24小时）和&nbsp;<span class="pre" style="line-height:1.5;">osd&nbsp;<span class="pre" style="line-height:1.5;">scrub&nbsp;<span class="pre" style="line-height:1.5;">max&nbsp;<span class="pre" style="line-height:1.5;">interval （默认7天）决定。它通过检查对象的大小和属性来发现数据轻度不一致性问题。</span></span></span></span></span></span></span></span> </li> 
+    <li style="list-style-type:disc;">另一种是默认每周进行的，称为 deep scrubbing，其周期由配置项&nbsp;<span class="pre" style="line-height:1.5;">osd&nbsp;<span class="pre" style="line-height:1.5;">deep&nbsp;<span class="pre" style="line-height:1.5;">scrub&nbsp;<span class="pre" style="line-height:1.5;">interval （默认一周）决定</span></span></span></span>。它通过读取数据并做 checksum 检查数据来发现数据深度不一致性问题。</li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">下面是默认的 osd scrub 的配置项：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>root@ceph2:~# ceph --admin-daemon  /<span style="color:rgb(0,0,255);line-height:1.5;">var</span>/run/ceph/ceph-osd.<span style="color:rgb(128,0,128);line-height:1.5;">5</span>.asok config show |<span style="line-height:1.5;"> grep scrub
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_thread_timeout</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">60</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_thread_suicide_timeout</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">60</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_finalize_thread_timeout</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">600</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_finalize_thread_suicide_timeout</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">6000</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_invalid_stats</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">true</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_max_scrubs</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_load_threshold</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0.5</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_min_interval</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">86400</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_max_interval</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">604800</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_chunk_min</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">5</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_chunk_max</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">25</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_scrub_sleep</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_deep_scrub_interval</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">604800</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">,
+  </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">osd_deep_scrub_stride</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>: <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">524288</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>,</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">实验过程：</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">0：找到对象的 PG acting set</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">osdmap e334 pool 'pool1' (9) object 'Evernote_5.8.6.7519.exe' -&gt; pg 9.6094a41e (9.1e) -&gt; up ([5,3,0], p5) acting ([5,3,0], p5)</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">1：删除对象的文件</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">根据 pg id，osd id 以及 object name，找到 osd.5 上文件路径为&nbsp;</span><span style="line-height:1.5;">/var/lib/ceph/osd/ceph-5/current/9.1e_head/Evernote\u5.8.6.7519.exe__head_6094A41E__9，将它删除</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;2：设置 light scrub 周期</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">为了不等一天，将osd_scrub_min_interval 和&nbsp;osd_scrub_max_interval 都设为4分钟：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <p style="line-height:1.5;">root@ceph2:/var/run/ceph# ceph --admin-daemon ceph-osd.5.asok config set osd_scrub_max_interval 240<br> { "success": "osd_scrub_max_interval = '240' "}<br> root@ceph2:/var/run/ceph# ceph --admin-daemon ceph-osd.5.asok config get osd_scrub_max_interval<br> { "osd_scrub_max_interval": "240"}<br> root@ceph2:/var/run/ceph# ceph --admin-daemon ceph-osd.5.asok config set osd_scrub_min_interval 240<br> { "success": "osd_scrub_min_interval = '240' "}<br> root@ceph2:/var/run/ceph# ceph --admin-daemon ceph-osd.5.asok config get osd_scrub_min_interval<br> { "osd_scrub_min_interval": "240"}</p> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;font-size:12px;"><a title="复制代码" style="color:rgb(26,139,200);border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">3：尝试 light scrub，发现问题</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">能看到 light scrub 按计划进行了，而且发现了 pg 9.1e 的问题，即有文件丢失了：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="color:rgb(128,0,128);line-height:1.5;">2016</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span> <span style="color:rgb(128,0,128);line-height:1.5;">18</span>:<span style="color:rgb(128,0,128);line-height:1.5;">15</span>:<span style="color:rgb(128,0,128);line-height:1.5;">49.798236</span> osd.<span style="color:rgb(128,0,128);line-height:1.5;">5</span> [INF] <span style="color:rgb(128,0,128);line-height:1.5;">9.1d</span><span style="line-height:1.5;"> scrub ok
+</span><span style="color:rgb(128,0,128);line-height:1.5;">2016</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span> <span style="color:rgb(128,0,128);line-height:1.5;">18</span>:<span style="color:rgb(128,0,128);line-height:1.5;">15</span>:<span style="color:rgb(128,0,128);line-height:1.5;">50.799835</span> osd.<span style="color:rgb(128,0,128);line-height:1.5;">5</span> [ERR] <span style="color:rgb(128,0,128);line-height:1.5;">9</span>.1e shard <span style="color:rgb(128,0,128);line-height:1.5;">5</span> missing 6094a41e/Evernote_5.<span style="color:rgb(128,0,128);line-height:1.5;">8.6</span>.<span style="color:rgb(128,0,128);line-height:1.5;">7519</span>.exe/head<span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">9</span>
+<span style="color:rgb(128,0,128);line-height:1.5;">2016</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span> <span style="color:rgb(128,0,128);line-height:1.5;">18</span>:<span style="color:rgb(128,0,128);line-height:1.5;">15</span>:<span style="color:rgb(128,0,128);line-height:1.5;">50.799863</span> osd.<span style="color:rgb(128,0,128);line-height:1.5;">5</span> [ERR] <span style="color:rgb(128,0,128);line-height:1.5;">9</span>.1e scrub <span style="color:rgb(128,0,128);line-height:1.5;">1</span> missing, <span style="color:rgb(128,0,128);line-height:1.5;">0</span><span style="line-height:1.5;"> inconsistent objects
+</span><span style="color:rgb(128,0,128);line-height:1.5;">2016</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span> <span style="color:rgb(128,0,128);line-height:1.5;">18</span>:<span style="color:rgb(128,0,128);line-height:1.5;">15</span>:<span style="color:rgb(128,0,128);line-height:1.5;">50.799866</span> osd.<span style="color:rgb(128,0,128);line-height:1.5;">5</span> [ERR] <span style="color:rgb(128,0,128);line-height:1.5;">9</span>.1e scrub <span style="color:rgb(128,0,128);line-height:1.5;">1</span><span style="line-height:1.5;"> errors
+</span><span style="color:rgb(128,0,128);line-height:1.5;">2016</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span> <span style="color:rgb(128,0,128);line-height:1.5;">18</span>:<span style="color:rgb(128,0,128);line-height:1.5;">15</span>:<span style="color:rgb(128,0,128);line-height:1.5;">52.804444</span> osd.<span style="color:rgb(128,0,128);line-height:1.5;">5</span> [INF] <span style="color:rgb(128,0,128);line-height:1.5;">9.20</span> scrub ok</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">pgmap 呈现 inconsistent 状态：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre><span style="color:rgb(128,0,128);line-height:1.5;">2016</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span>-<span style="color:rgb(128,0,128);line-height:1.5;">06</span> <span style="color:rgb(128,0,128);line-height:1.5;">18</span>:<span style="color:rgb(128,0,128);line-height:1.5;">15</span>:<span style="color:rgb(128,0,128);line-height:1.5;">58.439927</span> mon.<span style="color:rgb(128,0,128);line-height:1.5;">0</span> [INF] pgmap v5752: <span style="color:rgb(128,0,128);line-height:1.5;">64</span> pgs: <span style="color:rgb(128,0,128);line-height:1.5;">63</span> active+clean, <span style="color:rgb(128,0,128);line-height:1.5;">1</span> active+clean+inconsistent; <span style="color:rgb(128,0,128);line-height:1.5;">97071</span> kB data, <span style="color:rgb(128,0,128);line-height:1.5;">2268</span> MB used, <span style="color:rgb(128,0,128);line-height:1.5;">18167</span> MB / <span style="color:rgb(128,0,128);line-height:1.5;">20435</span> MB avail</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">此时集群状态是 ERROR 状态：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>health HEALTH_ERR <span style="color:rgb(128,0,128);line-height:1.5;">1</span> pgs inconsistent; <span style="color:rgb(128,0,128);line-height:1.5;">1</span> scrub errors;</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">除了定时的清理外，管理员也可以通过命令启动清理过程：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-size:15px;font-family:'Courier New';">
+    <pre>root@ceph1:~# ceph pg scrub <span style="color:rgb(128,0,128);line-height:1.5;">9</span><span style="line-height:1.5;">.1e
+instructing pg </span><span style="color:rgb(128,0,128);line-height:1.5;">9</span>.1e on osd.<span style="color:rgb(128,0,128);line-height:1.5;">5</span> to scrub</pre>
+   </div> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">从输出能看出来，scrubbing 是由 PG 的主 OSD 发起的。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">4：尝试 deep scrub，结果相同。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">手工运行命令&nbsp;ceph pg deep-scrub 9.1e，它会启动深度清理，结果相同。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">5：尝试 pg repair，成功</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;">运行 ceph pg repair 9.1e，启动 PG 修复过程，结果修复成功（1 errors, 1 fixed），被删除的文件回来了，集群重新回到 OK 状态。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;"><strong>结论</strong>：</span></p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;"><span style="line-height:1.5;">PG scrubbing 能发现文件丢失的问题</span></li> 
+    <li style="list-style-type:disc;"><span style="line-height:1.5;">PG scrubbing 对集群性能有负面影响，可以适当降低其优先级以及所需要的资源。</span></li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><span style="line-height:1.5;"><strong>注意</strong>：PG repair 目前还有不少问题，根据<a href="http://thread.gmane.org/gmane.comp.file-systems.ceph.user/15185" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">这篇文章</a>，它会将 primary osd 上的数据复制到其它osd上，这可能会导致正确的数据被错误的数据覆盖，因此使用需要谨慎。下面的实验将验证这个问题。</span></p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">3.2 实验2：验证scrubbing 能不能发现内容不一致问题，以及 pg repair 的行为</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">0：创建一个对象，其内容是一个含有字符串 1111 的文本文件，其PG分布在 [2,0,3] 上。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">1：修改 osd.2 上文件内容为 1122</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">2：启动 light scrub，9.2e scrub ok，无法发现问题。<span style="line-height:1.5;color:rgb(255,0,0);">这不是蛮奇怪的么？？light scrub 应该会检查文件属性和大小，属性应该包括修改时间吧，应该能检查出来啊。。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">3. 启动 deep scrub，9.2e deep-scrub ok，无法发现问题。<span style="line-height:1.5;color:rgb(255,0,0);">这不是蛮奇怪的么？？deep scrub 应该会检查对象数据的啊，数据变了，应该能检查出来啊。。。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">4. 启动 pg repair，内容不变。<span style="line-height:1.5;color:rgb(255,0,0);">对不在 inconsistent 状态的 PG 看来做repair 不会做什么。</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">5. 继续修改 osd.2 上的文件，增加内容，致其 size 改变。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">6. 启动 light scrub，终于发现 shard 2: soid b2e6cb6e/text/head//9 size 931 != known size 5，&nbsp;1 inconsistent objects，集群状态也变为&nbsp;HEALTH_ERR。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">7. 启动 deep scrub，它也同样地终于发现了问题。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">8. 运行 rados get 命令，能正确获取原始文件。这说明即使集群处于HEALTH_ERR 状态，处于 active+clean+inconsistent&nbsp;状态的 PG 的 IO 能正常进行。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">9. 启动 pg repari，osd.2 上的文件被覆盖，回到原始内容。这说明 pg repair 也不是从主osd 向别的 osd 拷贝嘛。。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><strong>结论</strong>：</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">两种 scrubbing 只是根据不同的方法来发现数据一致性上的不同类型的问题，修复的事情它不管；不是所有的问题它们都能发现；经过验证，size 的变化会被发现，但是在size不变内容改变的时候不能被发现。</li> 
+    <li style="list-style-type:disc;">pg repair 也不是象&nbsp;<a href="https://www.mail-archive.com/ceph-users@lists.ceph.com/msg19835.html" rel="nofollow" style="color:rgb(26,139,200);text-decoration:none;">Re: [ceph-users] Scrub Error / How does ceph pg repair work?</a>&nbsp;所说的简单地将 primary osd 上的数据拷贝到其它 osd 上，这种做法很明显这可能会导致正确的数据被损坏。文章是写于 2015 年，我的ceph 版本是 0.8.11，也许两者有不一致。</li> 
+   </ul>
+   <h2 style="font-size:21px;line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">4. CRUSH 规则 choose 和 chooseleaf</h2> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">4.1 解释</h3> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp; CRUSH MAP 规则中，有一条是定义选择 bucket 的方式，有 choose 和 chooseleaf 两个动作，其语法为 “step [choose|chooseleaf] [firstn|indep] &lt;N&gt; &lt;bucket-type&gt;”，比较让人费解。&nbsp;&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">step choose firstn {num} type {bucket-type}</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">说明:选择一定数量的指定类型的 bucket。num 通常是 pool 的 size。</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:none;"> 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">如果 num ==0，选择 pool size 个bucket；</li>
+     </ul></li> 
+    <li style="list-style-type:none;"> 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">如果 num &gt; 0 并且 &lt; pool size，则选择 num 个 bucket；</li>
+     </ul></li> 
+    <li style="list-style-type:none;"> 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;">如果 num &lt; 0，则选择 pool-size - num 个 bucket。</li>
+     </ul></li> 
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">step chooseleaf firstn {num} type {bucket-type}</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">说明：首先选择类型为 {bucket-type}的一个 bucket 集合，再从每个 bucket 的子树中选择一个叶子节点。num 通常是 pool size。</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:none;"> 
+     <ul style="list-style:none;font-size:12px;">
+      <li style="list-style-type:disc;"><span style="line-height:1.5;">如果 num ==0，选择 pool size 个bucket；</span></li> 
+      <li style="list-style-type:disc;">如果 num &gt; 0 并且 &lt; pool size，则选择 num 个 bucket；</li> 
+      <li style="list-style-type:disc;">如果 num &lt; 0，则选择 pool-size - num 个 bucket。</li> 
+     </ul></li>
+   </ul>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">两者可以单独使用，也可结合起来使用，比较令人费解。下面通过一系列实验来说明。</p> 
+   <ul style="list-style:none;font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">
+    <li style="list-style-type:disc;">实验环境：9 个 osd，4 个host，第一个 host 有 4 个 osd，第二个 host 有5个osd，第 3 和 4 个host 没有 osd。</li> 
+    <li style="list-style-type:disc;">工具：crushtool，比如&nbsp;crushtool --test -i 10.2 --rule 7 &nbsp;--num-rep 3 --show-utilization --show-mappings。 其中，-i 10.2 是编译好的 cursh map 二进制文件，--rule 7 是执行 cursh rule，--num-rep 是目标 pool size。</li> 
+   </ul>
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">4.1&nbsp;step choose firstn {num} type {bucket-type} 的各种实验</h3> 
+   <table border="0" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">choose n 和 m</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">规则</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">结果</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">说明</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">n = 0，m = 2</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">step choose firstn 0 type host<br> step choose firstn 2 type osd</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">CRUSH rule 4 x 1022 [5,9,7]<br> CRUSH rule 4 x 1023 [0,2,3]<br> rule 4 (replicated_ruleset_choose2) num_rep 3 result size == 3: 1024/1024</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">CRUSH 选择了 3 个host（比如 1，2，3），从第一个 host 上就选了 2 个 osd，从第二host 上再选 1 个，因此 PG 的 3 个osd，头两个在一个 host 上，第三个在另一个host上。</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">n = 0，m = 0</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">step choose firstn 0 type host<br> step choose firstn 0 type osd</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">CRUSH rule 5 x 1021 [7,6,2]<br> CRUSH rule 5 x 1022 [5,9,3]<br> CRUSH rule 5 x 1023 [0,2,7]<br> rule 5 (replicated_ruleset_choose0) num_rep 3 result size == 3: 1024/1024</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">CRUSH 选择了 3 个host（比如 1，2，3），从第一个 host 上就选了 3 个 osd，因此所有 PG 的 osd 全部在一个 host 上。这不符合冗余性要求。</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">n = 0，m = 1</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">step choose firstn 0 type host<br> step choose firstn 1 type osd</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">CRUSH rule 7 x 1022 [5,7]<br> CRUSH rule 7 x 1023 [0,3]<br> rule 7 (replicated_ruleset_choose1) num_rep 3 result size == 2: 1024/1024</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">CRUSH 选择了 3 个host（比如 1，2，3），但是只成功地从第 1 和 2 个host 上分别选了1个 osd （host3 上没有 osd，因此选择失败），结果 PG 只分布在 2 个 OSD 上。</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">n = 0，m = -1</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">step choose firstn 0 type host<br> step choose firstn -1 type osd</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">CRUSH rule 6 x 1022 [5,9,7]<br> CRUSH rule 6 x 1023 [0,2,3]<br> rule 6 (replicated_ruleset_choose-1) num_rep 3 result size == 3: 1024/1024</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">同 n=0，m=2</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">结论：效果其实同 4.3.</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">4.2&nbsp;step chooseleaf firstn {num} type {bucket-type} 的各种实验<span style="line-height:1.5;">&nbsp;</span> </h3> 
+   <table border="0" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>num</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>规则</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>结果</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>说明</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">2</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">step chooseleaf firstn 2 type osd</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">CRUSH rule 8 x 1022 [5,9]<br> CRUSH rule 8 x 1023 [0,2]<br> rule 8 (chooseleaf-2) num_rep 3 result size == 2: 1024/1024</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">选择 2 个osd，任意分布在 2 个 host 上，可能在同一个 host 上，也可能分别在两个host 上</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">0</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">step chooseleaf firstn 0 type osd</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">CRUSH rule 9 x 1022 [5,9,3]<br> CRUSH rule 9 x 1023 [0,2,9]<br> rule 9 (chooseleaf0) num_rep 3 result size == 3: 1024/1024</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">选择 3 个osd，任意分布在 2 个 host 上，可能在同一个 host 上，也可能分别在两个host 上</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">1</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">step chooseleaf firstn 1 type osd</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">CRUSH rule 10 x 1022 [5]<br> CRUSH rule 10 x 1023 [0]<br> rule 10 (chooseleaf1) num_rep 3 result size == 1: 1024/1024</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">选择 1 个osd。&nbsp;</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;-1</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">step chooseleaf firstn -1 type osd</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">CRUSH rule 11 x 1022 [5,9]<br> CRUSH rule 11 x 1023 [0,2]<br> rule 11 (chooseleaf-1) num_rep 3 result size == 2: 1024/1024</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">选择 2 个osd，任意分布在 2 个host 上，可能在同一个 host 上，也可能分别在两个host 上</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">结论：根据 {num}的情形选择若干个 osd。对于 num &lt; 0 的情形，准确地讲，应该是选择 pool-size + num 个。</p> 
+   <h3 style="font-size:16px;color:rgb(102,102,102);background-image:none;background-repeat:no-repeat;font-family:Verdana;line-height:1.5;">4.3 choose 和 chooseleaf 结合</h3> 
+   <table border="0" style="border:1px solid #C0C0C0;border-collapse:collapse;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">
+    <tbody>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>num</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>规则</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>结果</strong></td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"><strong>说明</strong></td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">2</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">step choose firstn 0 type host</p> <p style="line-height:1.5;">step chooseleaf firstn 2 type osd</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">CRUSH rule 14 x 1022 [5,9,7]<br> CRUSH rule 14 x 1023 [0,2,3]<br> rule 14 (twochooseleaf2) num_rep 3 result size == 3: 1024/1024</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">选择 3 个osd，前两个在一个host，另一个在另一个host 上</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">0</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">step choose firstn 0 type host</p> <p style="line-height:1.5;">step chooseleaf firstn 0 type osd</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">CRUSH rule 12 x 1022 [5,9,3]<br> CRUSH rule 12 x 1023 [0,2,7]<br> rule 12 (twochooseleaf0) num_rep 3 result size == 3: 1024/1024</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">选择 3 个osd，都在一个 host 上</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">1</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">step choose firstn 0 type host</p> <p style="line-height:1.5;">step chooseleaf firstn 1 type osd</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">CRUSH rule 13 x 1022 [5,7]<br> CRUSH rule 13 x 1023 [0,3]<br> rule 13 (twochooseleaf1) num_rep 3 result size == 2: 1024/1024</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">选择 2 个osd，分布在 2 个host上，这应该是因为第三个 host 没有osd可供选择</td> 
+     </tr>
+     <tr>
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">&nbsp;-1</td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">step choose firstn 0 type host</p> <p style="line-height:1.5;">step chooseleaf firstn -1 type osd</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;"> <p style="line-height:1.5;">CRUSH rule 15 x 1022 [5,9,7]<br> CRUSH rule 15 x 1023 [0,2,3]<br> rule 15 (twochooseleaf-1) num_rep 3 result size == 3: 1024/1024</p> </td> 
+      <td style="font-size:12px;color:rgb(69,69,69);border:1px solid #C0C0C0;border-collapse:collapse;">选择 3 个osd，前两个在一个host，另一个在另一个host 上</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">结论：因为 choose 语句的 num ==0，因此首选选择 3 个 host，然后从第一个 host 开始从其子树中，按照 chooseleaf 语句中 {num}的情况选择若干个 osd，直到遍历完所有的 host 或者达到 pool size。</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;">&nbsp;</p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="line-height:1.5;"><font color="#4b4b4b"><span style="font-size:15px;">&nbsp; &nbsp; 本文转自SammyLiu博客园博客，原文链接：http://www.cnblogs.com/sammyliu/p/5568989.html</span></font><span style="font-size:15px;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+   <p style="line-height:1.5;color:rgb(75,75,75);font-family:Verdana, Geneva, Arial, Helvetica, sans-serif;font-size:15px;"><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

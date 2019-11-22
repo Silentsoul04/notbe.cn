@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>sun.misc.Unsafe的理解 « NotBeCN</title>
+  <meta name="description" content="             前言    以下sun.misc.Unsafe源码和demo基于jdk1.7；    最近在看J.U.C里的源码，很多都用到了sun.misc.Unsafe这个类，一知半解，看起来总感觉有点不尽兴，所以打算对Unsafe的源码及使用做个分析；    另外，网上找了份c++的源代码natU...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/22/weixin_33963189_90122885.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">sun.misc.Unsafe的理解</h1>
+    <p class="post-meta">Nov 22, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1 style="font-size:18px;line-height:1.5;background:rgb(19,131,213) none repeat scroll 0% 0%;color:rgb(255,255,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">前言</h1> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">以下sun.misc.Unsafe源码和demo基于jdk1.7；</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">最近在看J.U.C里的源码，很多都用到了sun.misc.Unsafe这个类，一知半解，看起来总感觉有点不尽兴，所以打算对Unsafe的源码及使用做个分析；</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">另外，网上找了份c++的源代码natUnsafe.cc(可惜比较老，<span class="pl-c">Copyright (C) 2006, 2007</span>年的，没找到新的)，也就是sun.misc.Unsafe的C++实现，跟Unsafe类中的native方法对照起来看更加容易理解；</p> 
+   <div style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;text-align:right;"> 
+    <a href="http://www.cnblogs.com/chenpi/p/5389254.html#_labelTop" rel="nofollow" style="color:#000000;"></a>
+    <a name="_label1"></a> 
+   </div> 
+   <h1 style="font-size:18px;line-height:1.5;background:rgb(19,131,213) none repeat scroll 0% 0%;color:rgb(255,255,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">Unsafe类的作用</h1> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">可以用来在任意内存地址位置处读写数据，可见，对于普通用户来说，使用起来还是比较危险的；</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">另外，还支持一些CAS原子操作；</p> 
+   <div style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;text-align:right;"> 
+    <a href="http://www.cnblogs.com/chenpi/p/5389254.html#_labelTop" rel="nofollow" style="color:#000000;"></a>
+    <a name="_label2"></a> 
+   </div> 
+   <h1 style="font-size:18px;line-height:1.5;background:rgb(19,131,213) none repeat scroll 0% 0%;color:rgb(255,255,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">获取Unsafe对象</h1> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">遗憾的是，Unsafe对象不能直接通过<code>new Unsafe()</code>或调用<code>Unsafe.getUnsafe()</code>获取，原因如下：</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">*不能直接<code>new Unsafe()</code>，原因是<code>Unsafe</code>被设计成单例模式，构造方法是私有的；</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">*不能通过调用<code>Unsafe.getUnsafe()获取，因为<code>getUnsafe</code>被设计成只能从引导类加载器（bootstrap class loader）加载，从<code>getUnsafe</code>的源码中也可以看出来，如下：</code></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="line-height:1.5;">    @CallerSensitive
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">static</span><span style="line-height:1.5;"> Unsafe getUnsafe() {
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">得到调用该方法的Class对象</span>
+        Class cc =<span style="line-height:1.5;"> Reflection.getCallerClass();
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">判断调用该方法的类是否是引导类加载器（bootstrap class loader）
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">如果不是的话，比如由AppClassLoader调用该方法，则抛出SecurityException异常</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">if</span> (cc.getClassLoader() != <span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">)
+            </span><span style="color:rgb(0,0,255);line-height:1.5;">throw</span> <span style="color:rgb(0,0,255);line-height:1.5;">new</span> SecurityException("Unsafe"<span style="line-height:1.5;">);
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">返回单例对象</span>
+        <span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> theUnsafe;
+    }</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">虽然我们不能通过以上方法得到<span>Unsafe对象，但得<span>Unsafe</span>类中有个私有的静态全局属性<code>theUnsafe（<span>Unsafe实例对象</span>）</code>，通过反射，可以获取到该成员属性theUnsafe对应的Field对象，并将其设置为可访问，从而得到<span>theUnsafe</span>具体对象，如下代码：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">package</span><span style="line-height:1.5;"> concurrency;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> java.lang.reflect.Field;
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> sun.misc.Unsafe;
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> sun.reflect.Reflection;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">class</span><span style="line-height:1.5;"> Test {
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">static</span> <span style="color:rgb(0,0,255);line-height:1.5;">void</span> main(String[] args) <span style="color:rgb(0,0,255);line-height:1.5;">throws</span><span style="line-height:1.5;"> NoSuchFieldException,
+            SecurityException, IllegalArgumentException, IllegalAccessException {
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 通过反射得到theUnsafe对应的Field对象</span>
+        Field field = Unsafe.<span style="color:rgb(0,0,255);line-height:1.5;">class</span>.getDeclaredField("theUnsafe"<span style="line-height:1.5;">);
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 设置该Field为可访问</span>
+        field.setAccessible(<span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">);
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 通过Field得到该Field对应的具体对象，传入null是因为该Field为static的</span>
+        Unsafe unsafe = (Unsafe) field.get(<span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">);
+        System.out.println(unsafe);
+
+    }
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <div style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;text-align:right;"> 
+    <a href="http://www.cnblogs.com/chenpi/p/5389254.html#_labelTop" rel="nofollow" style="color:#000000;"></a>
+    <a name="_label3"></a> 
+   </div> 
+   <h1 style="font-size:18px;line-height:1.5;background:rgb(19,131,213) none repeat scroll 0% 0%;color:rgb(255,255,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">&nbsp;Unsafe类中的API</h1> 
+   <h2 style="font-size:16px;line-height:1.5;color:rgb(0,66,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;"><code>allocateInstance方法，不调用构造方法生成对象</code></h2> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">&nbsp;本地方法，功能是生成一个对象实例，但是不会运行该对象的构造方法；由于natUnsafe.cc版本较老，没找到对应的c++实现；</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>    <span style="color:rgb(0,128,0);line-height:1.5;">/**</span><span style="color:rgb(0,128,0);line-height:1.5;"> Allocate an instance but do not run any constructor. Initializes the class if it has not yet been. </span><span style="color:rgb(0,128,0);line-height:1.5;">*/</span>
+    <span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">native</span><span style="line-height:1.5;"> Object allocateInstance(Class cls)
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">throws</span> InstantiationException;</pre>
+   </div> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">例子，利用Unsafe的allocateInstance方法，在未调用构造方法的情况下生成了对象：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">package</span><span style="line-height:1.5;"> concurrency;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> java.lang.reflect.Field;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> sun.misc.Unsafe;
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> sun.reflect.Reflection;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">class</span><span style="line-height:1.5;"> User {
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">private</span> String name = ""<span style="line-height:1.5;">;
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">private</span> <span style="color:rgb(0,0,255);line-height:1.5;">int</span> age = 0<span style="line-height:1.5;">;
+
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span><span style="line-height:1.5;"> User() {
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">this</span>.name = "test"<span style="line-height:1.5;">;
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">this</span>.age = 22<span style="line-height:1.5;">;
+    }
+    
+    @Override
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span><span style="line-height:1.5;"> String toString() {
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> name + ": " +<span style="line-height:1.5;"> age;
+    }
+}
+
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">class</span><span style="line-height:1.5;"> Test {
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">static</span> <span style="color:rgb(0,0,255);line-height:1.5;">void</span> main(String[] args) <span style="color:rgb(0,0,255);line-height:1.5;">throws</span><span style="line-height:1.5;"> NoSuchFieldException,
+            SecurityException, IllegalArgumentException, IllegalAccessException, InstantiationException {
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 通过反射得到theUnsafe对应的Field对象</span>
+        Field field = Unsafe.<span style="color:rgb(0,0,255);line-height:1.5;">class</span>.getDeclaredField("theUnsafe"<span style="line-height:1.5;">);
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 设置该Field为可访问</span>
+        field.setAccessible(<span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">);
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 通过Field得到该Field对应的具体对象，传入null是因为该Field为static的</span>
+        Unsafe unsafe = (Unsafe) field.get(<span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">);
+
+        User user </span>= (User) unsafe.allocateInstance(User.<span style="color:rgb(0,0,255);line-height:1.5;">class</span><span style="line-height:1.5;">);
+        System.out.println(user); </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">dont invoke constructor, print null: 0</span>
+<span style="line-height:1.5;">        
+        User userFromNormal </span>= <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> User();
+        System.out.println(userFromNormal); </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">print test: 22</span>
+<span style="line-height:1.5;">
+    }
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h2 style="font-size:16px;line-height:1.5;color:rgb(0,66,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">objectFieldOffset方法，返回成员属性在内存中的地址相对于对象内存地址的偏移量</h2> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">比较简单，就是返回成员属性内存地址相对于对象内存地址的偏移量，通过该方法可以计算一个对象在内存中的空间大小，方法是通过反射得到它的所有Field(包括父类继承得到的)，找出Field中偏移量最大值，然后对该最大偏移值填充字节数即为对象大小；</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">关于该方法的使用例子可以看下面的修改内存数据的例子；</p> 
+   <h2 style="font-size:16px;line-height:1.5;color:rgb(0,66,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">putLong，putInt，putDouble，putChar，putObject等方法，直接修改内存数据（可以越过访问权限）</h2> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">这里，还有put对应的get方法，很简单就是直接读取内存地址处的数据，不做举例；</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">&nbsp;我们可以举个putLong(Object, long, long)方法详细看下其具体实现，其它的类似，先看Java的源码，没啥好看的，就声明了一个native本地方法：</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">三个参数说明下：</p> 
+   <pre>Object o//对象引用</pre> 
+   <pre><span>long offset//对象内存地址的偏移量<br></span></pre> 
+   <pre><span>long x//写入的数据</span></pre> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>    <span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">native</span> <span style="color:rgb(0,0,255);line-height:1.5;">void</span>    putLong(Object o, <span style="color:rgb(0,0,255);line-height:1.5;">long</span> offset, <span style="color:rgb(0,0,255);line-height:1.5;">long</span> x);</pre>
+   </div> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">还是看下natUnsafe.cc中的c++实现吧，很简单，就是计算要写入数据的内存地址，然后写入数据，如下：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">void</span><span style="line-height:1.5;">
+sun::misc::Unsafe::putLong (jobject obj, jlong offset, jlong value)
+{
+  jlong </span>*addr = (jlong *) ((<span style="color:rgb(0,0,255);line-height:1.5;">char</span> *) obj + offset);<span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">计算要修改的数据的内存地址=对象地址+成员属性地址偏移量</span>
+  spinlock <span style="color:rgb(0,0,255);line-height:1.5;">lock</span>;<span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">自旋锁，通过循环来获取锁， i386处理器需要加锁访问64位数据，如果是int，则不需要改行代码</span>
+  *addr = value;<span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">往该内存地址位置直接写入数据</span>
+}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">如下例子，即使User类的成员属性是私有的且没有提供对外的public方法，我们还是可以直接在它们的内存地址位置处写入数据，并成功；</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">package</span><span style="line-height:1.5;"> concurrency;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> java.lang.reflect.Field;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> sun.misc.Unsafe;
+</span><span style="color:rgb(0,0,255);line-height:1.5;">import</span><span style="line-height:1.5;"> sun.reflect.Reflection;
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">class</span><span style="line-height:1.5;"> User {
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">private</span> String name = "test"<span style="line-height:1.5;">; 
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">private</span> <span style="color:rgb(0,0,255);line-height:1.5;">long</span> id = 1<span style="line-height:1.5;">;
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">private</span> <span style="color:rgb(0,0,255);line-height:1.5;">int</span> age = 2<span style="line-height:1.5;">;
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">private</span> <span style="color:rgb(0,0,255);line-height:1.5;">double</span> height = 1.72<span style="line-height:1.5;">;
+    
+
+    @Override
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span><span style="line-height:1.5;"> String toString() {
+        </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span> name + "," + id + "," + age + "," +<span style="line-height:1.5;"> height;
+    }
+}
+
+
+</span><span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">class</span><span style="line-height:1.5;"> Test {
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">public</span> <span style="color:rgb(0,0,255);line-height:1.5;">static</span> <span style="color:rgb(0,0,255);line-height:1.5;">void</span> main(String[] args) <span style="color:rgb(0,0,255);line-height:1.5;">throws</span><span style="line-height:1.5;"> NoSuchFieldException,
+            SecurityException, IllegalArgumentException, IllegalAccessException, InstantiationException {
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 通过反射得到theUnsafe对应的Field对象</span>
+        Field field = Unsafe.<span style="color:rgb(0,0,255);line-height:1.5;">class</span>.getDeclaredField("theUnsafe"<span style="line-height:1.5;">);
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 设置该Field为可访问</span>
+        field.setAccessible(<span style="color:rgb(0,0,255);line-height:1.5;">true</span><span style="line-height:1.5;">);
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;"> 通过Field得到该Field对应的具体对象，传入null是因为该Field为static的</span>
+        Unsafe unsafe = (Unsafe) field.get(<span style="color:rgb(0,0,255);line-height:1.5;">null</span><span style="line-height:1.5;">);
+
+        User user </span>= <span style="color:rgb(0,0,255);line-height:1.5;">new</span><span style="line-height:1.5;"> User();
+        System.out.println(user); </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">打印test,1,2,1.72</span>
+<span style="line-height:1.5;">        
+        Class userClass </span>=<span style="line-height:1.5;"> user.getClass();
+        Field name </span>= userClass.getDeclaredField("name"<span style="line-height:1.5;">);
+        Field id </span>= userClass.getDeclaredField("id"<span style="line-height:1.5;">);
+        Field age </span>= userClass.getDeclaredField("age"<span style="line-height:1.5;">);
+        Field height </span>= userClass.getDeclaredField("height"<span style="line-height:1.5;">);
+        </span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">直接往内存地址写数据</span>
+        unsafe.putObject(user, unsafe.objectFieldOffset(name), "midified-name"<span style="line-height:1.5;">);
+        unsafe.putLong(user, unsafe.objectFieldOffset(id),</span>100l<span style="line-height:1.5;">);
+        unsafe.putInt(user, unsafe.objectFieldOffset(age), </span>101<span style="line-height:1.5;">);
+        unsafe.putDouble(user, unsafe.objectFieldOffset(height), </span>100.1<span style="line-height:1.5;">);
+        
+        System.out.println(user);</span><span style="color:rgb(0,128,0);line-height:1.5;">//</span><span style="color:rgb(0,128,0);line-height:1.5;">打印midified-name,100,101,100.1</span>
+<span style="line-height:1.5;">
+    }
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h2 style="font-size:16px;line-height:1.5;color:rgb(0,66,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">&nbsp;copyMemory、freeMemory</h2> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">copyMemory：内存数据拷贝</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">freeMemory：用于释放allocateMemory和reallocateMemory申请的内存</p> 
+   <h2 style="font-size:16px;line-height:1.5;color:rgb(0,66,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">&nbsp;CAS操作的方法，compareAndSwapInt，compareAndSwapLong等</h2> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">看下natUnsafe.cc中的c++实现吧，加深理解，其实就是将内存值与预期值作比较，判断是否相等，相等的话，写入数据，不相等不做操作，返回旧数据；</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);line-height:1.5;">static</span> inline <span style="color:rgb(0,0,255);line-height:1.5;">bool</span><span style="line-height:1.5;">
+compareAndSwap (</span><span style="color:rgb(0,0,255);line-height:1.5;">volatile</span> jint *<span style="line-height:1.5;">addr, jint old, jint new_val)
+{
+  jboolean result </span>= <span style="color:rgb(0,0,255);line-height:1.5;">false</span><span style="line-height:1.5;">;
+  spinlock </span><span style="color:rgb(0,0,255);line-height:1.5;">lock</span><span style="line-height:1.5;">;
+  </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> ((result = (*addr ==<span style="line-height:1.5;"> old)))
+    </span>*addr =<span style="line-height:1.5;"> new_val;
+  </span><span style="color:rgb(0,0,255);line-height:1.5;">return</span><span style="line-height:1.5;"> result;
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">J.U.C里原子类就是基于以上CAS操作实现的；</p> 
+   <h2 style="font-size:16px;line-height:1.5;color:rgb(0,66,255);font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;">getLongVolatile/putLongVolatile等等方法</h2> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">这类方法使用volatile语义去存取数据，我的理解就是各个线程不缓存数据，直接在内存中读取数据；</p> 
+   <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', SimSun, sans-serif;font-size:14px;">&nbsp;本文转自风一样的码农博客园博客，原文链接：http://www.cnblogs.com/chenpi/p/5389254.html，如需转载请自行联系原作者</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

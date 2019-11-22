@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>备胎的养成记KeepAlived实现热备负载 « NotBeCN</title>
+  <meta name="description" content="             在 &nbsp;入坑系列之HAProxy负载均衡&nbsp;中已经详细讲过了怎么将高并发的请求按均衡算法分发到几台服务器上做均衡防止单机崩溃。    　　但这样的话有没有发现所有请求都经过了HAproxy代理，自然当并发量越来越高时HAproxy就成了瓶颈，突发时HAproxy就会挂掉，...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_33935777_90122522.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">备胎的养成记KeepAlived实现热备负载</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">在 &nbsp;<a id="cb_post_title_url" class="postTitle2" href="http://www.cnblogs.com/zhangs1986/p/6517788.html" rel="nofollow" style="color:#000000;">入坑系列之HAProxy负载均衡</a>&nbsp;中已经详细讲过了怎么将高并发的请求按均衡算法分发到几台服务器上做均衡防止单机崩溃。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　但这样的话有没有发现所有请求都经过了HAproxy代理，自然当并发量越来越高时HAproxy就成了瓶颈，突发时HAproxy就会挂掉，或HAproxy服务器出现故障，这时外部唯一的请求入口没有了，怎么办？重启是个办法，但还是需要抢修时间，这期间内客户都无法访问损失的锅又得程序猿来背。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;"><img src="https://images2015.cnblogs.com/blog/273387/201703/273387-20170313204829588-2063621818.png" alt="" width="520" height="274" style="border:0px;"></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　这种情况下备胎出现了，&nbsp;Keepalived登场，他可以解决服务宕机自动无缝切换。</p> 
+   <blockquote style="border:2px solid rgb(239,239,239);line-height:1.6em;color:rgb(51,51,51);font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;background:rgb(255,255,255) none;"> 
+    <p>Keepalived采用VRRP(virtual router redundancy protocol，虚拟路由冗余协议)热备份协议，以软件的方式实现linux服务器的多机热备功能。VRRP是针对路由器的一种备份解决方案——由多台路由器组成一个热备组。通过共用的虚拟IP地址对外提供服务；每个热备组内同一时刻只有一台主服务器提供服务，其他服务器处于冗余状态，若当前在线的服务器失败，其他服务器会自动接替（优先级决定接替顺序）虚拟IP地址，以继续提供服务。<br> keepalived 默认需要使用D类多播地址224.0.0.18 进行心跳通信<br> keepalived 使用vrrp协议（虚拟路由冗余协议）进行通信（协议号码为112）</p> 
+   </blockquote> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;"><img src="https://images2015.cnblogs.com/blog/273387/201703/273387-20170313205609026-116079400.png" alt="" width="599" height="330" style="border:0px;"></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　Keepalived也可以与LVS、Nginx、MySQL等结合使用，形成可靠的主备机，给了你宝贵的抢修时间。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　下面来讲如何一步步搭建。</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;">环境　　</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　CentOS6.X</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　HAProxy 1.7.3</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　Keepalived&nbsp;1.3.4</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　用root用户安装</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;">下载</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　若在线安装不用下载，可直接通过yum命令安装（建议），不过需要联网。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　去官网下载 ：http://www.keepalived.org/software/keepalived-1.3.4.tar.gz</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　下载后放进CentOS中的/usr/local/ 文件夹中</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;">安装 　　</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　分两种：</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　1、在线装：yum install -y ipvsadm keepalived （建议）</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　2、安装包;</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　此处按照下载好的安装包操作：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>[root@H32 local]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">tar -zxvf keepalived-1.3.4.tar.gz</span>
+[root@H32 local]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">cd keepalived-1.3.4</span>
+<span style="line-height:1.5;">
+[root@H32 keepalived</span>-1.3.4]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">./configure --prefix=/usr/ --sysconfdir=/etc/</span><span style="line-height:1.5;">
+[root@H32 keepalived</span>-1.3.4]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">make</span><span style="line-height:1.5;">
+[root@H32 keepalived</span>-1.3.4]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">make install</span></pre>
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">&nbsp;</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　在此之前还需要设置主备机的时间一致，可用ntpdate向时间服务器同步，具体的方法有时间再详细说明。</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;">设置</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">&nbsp;　　修改keepalived.conf文件配置</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>[root@H32 ~]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> vi /etc/keepalived/keepalived.conf</span></pre>
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　具体配置内容：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>! Configuration File <span style="color:rgb(0,0,255);line-height:1.5;">for</span><span style="line-height:1.5;"> keepalived
+
+global_defs {
+   notification_email {
+     root@localhost </span><span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">接受邮件方</span>
+<span style="line-height:1.5;">   }
+   notification_email_from soul@</span>104.com <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">发件人</span>
+   smtp_server 127.0.0.1 <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">邮件服务器</span>
+   smtp_connect_timeout 30 <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">超时时长</span>
+   router_id LVS_DEVEL <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">ID；随意即可</span>
+<span style="line-height:1.5;">}
+
+vrrp_script chk_state_down {
+    script </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">[[ -f /etc/keepalived/down ]] &amp;&amp; exit 1 || exit 0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">如果在/roo/下有down文件；就失败；转移到从上；否则正常</span>
+    interval 2<span style="line-height:1.5;">
+    weight </span>3<span style="line-height:1.5;">
+}
+
+vrrp_script chk_haproxy { 
+  script </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">/etc/keepalived/chk_haproxy.sh</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 设置执行的脚本，可以是脚本，也可以是命令</span>
+  interval 2 <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> script执行周期，每个interval执行一次健康检查</span>
+  weight 2 <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 健康检查返回0 &amp; weight大于0，优先级增加相应权值；健康检查非0 &amp; weight小于0，优先级减小相应值；</span><span style="color:rgb(0,128,0);line-height:1.5;">
+　　　　　　#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 不管提高优先级还是降低优先级，最终优先级的范围是在[1,254]，不会出现优先级小于等于0或者优先级大于等于255的情况</span>
+<span style="line-height:1.5;">}
+
+vrrp_instance VI_1 { </span><span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> VRRP 配置标识 VI_1是实例名称，一个文件可配置多个</span>
+    <span style="line-height:1.5;">state MASTER</span>  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 指定Keepalvied角色 MASTER表示此主机为主服务器 <span style="line-height:1.5;">BACKUP则是表示为备用服务器</span></span>
+                  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 当master出现异常后，backup自动切换为master。当backup成为master后，master恢复正常后会再次抢占成为master，导致不必要的主备切换。</span>
+ 　　　　　　　　　　<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 实际应用中，可以将两台keepalived初始状态均配置为backup，设置不同的优先级，优先级高的设置nopreempt(非抢占)解决异常恢复后再次抢占的问题。</span>
+    interface eth0 <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 节点固有IP（非VIP）的网卡，用来发VRRP包</span>
+    <span style="line-height:1.5;">virtual_router_id 111</span>  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 虚拟路由标识（0-255），同一个VRRP实例使用唯一的标识，DB中的规范是使用节点IP的最后一位。如10.10.16.51的51 <span style="line-height:1.5;">（主备相同）</span></span>
+    <span style="line-height:1.5;">priority 100</span>  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 节点优先级，数字越大表示节点的优先级越高。keepalived启动时会通过选举将优先级最高的节点选举为master。如果某个节点初始state是master，但是优先级低，该节点会变成backup</span>
+    advert_int 1  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 发送通告的时间间隔，</span>
+                   <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 按照vrrp的官方文档，backup会接收master的advert_int的值，然后计算出skew time和master down interval，认为master宕机触发的选举时间应该是(3 * Master_Adver_Interval) + Skew_time</span>
+<span style="line-height:1.5;">    authentication {
+        auth_type PASS
+        auth_pass </span>1111   <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 同一 vrrp 实例MASTER 与 BACKUP 使用相同的密码才能正常通信 <span style="line-height:1.5;">（主备相同）</span></span>
+<span style="line-height:1.5;">    }
+    virtual_ipaddress {
+        </span>192.168.80.114  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 设置虚拟IP地址 (VIP),又叫做漂移IP地址 可以有多个，每个一行 <span style="line-height:1.5;">（主备机必须相同，也是对外的虚拟IP）</span></span>
+<span style="line-height:1.5;">    }
+    
+    track_script { 
+      chk_haproxy  </span><span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 该实例需要执行的健康执行脚本，每个一行</span>
+<span style="line-height:1.5;">      chk_state_down
+    }
+    
+    notify_master </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">/etc/keepalived/notify.sh master 192.168.80.114</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    notify_backup </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">/etc/keepalived/notify.sh backup 192.168.80.114</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+    notify_fault </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">/etc/keepalived/notify.sh fault 192.168.80.114</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span>  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 状态切换为master/backup/fault时执行对应的脚本</span>
+<span style="line-height:1.5;">}
+                    </span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　说明：</p> 
+   <blockquote style="border:2px solid rgb(239,239,239);line-height:1.6em;color:rgb(51,51,51);font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;background:rgb(255,255,255) none;"> 
+    <p>因为Keepalived在转换状态时会依照状态来呼叫：<br> 当进入Master状态时会呼叫notify_master<br> 当进入Backup状态时会呼叫notify_backup<br> 当发现异常情况时进入Fault状态呼叫notify_fault<br> 当Keepalived程序终止时则呼叫notify_stop</p> 
+   </blockquote> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　配置中notify.sh：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>[root@H32 ~]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> vi /etc/keepalived/notify.sh</span></pre>
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　配置内容：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">!/bin/bash</span><span style="color:rgb(0,128,0);line-height:1.5;">
+#</span><span style="color:rgb(0,128,0);line-height:1.5;"> description: An example of notify script</span><span style="color:rgb(0,128,0);line-height:1.5;">
+#
+</span>contact=<span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">root104@localhost</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">
+notify() { 
+mailsubject</span>=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">`hostname` to be $1: $2 floating</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+mailbody</span>=<span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">`date '+%F %H:%M:%S'`: vrrp transition, `hostname` changed to be $1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">
+echo $mailbody </span>| mail -s <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$mailsubject</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;"> $contact
+}
+
+case </span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">$1</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> <span style="color:rgb(0,0,255);line-height:1.5;">in</span><span style="line-height:1.5;">
+master) 
+notify master 
+</span>/etc/rc.d/init.d/<span style="line-height:1.5;">haproxy start
+exit 0
+;;
+backup)
+notify backup
+</span>/etc/rc.d/init.d/<span style="line-height:1.5;">haproxy stop
+exit 0
+;;
+fault)
+notify fault
+</span>/etc/rc.d/init.d/<span style="line-height:1.5;">haproxy stop
+exit 0
+;;
+</span>*<span style="line-height:1.5;">)
+echo </span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="color:rgb(128,0,0);line-height:1.5;">Usage: `basename $0` {master|backup|fault}</span><span style="color:rgb(128,0,0);line-height:1.5;">'</span><span style="line-height:1.5;">
+exit </span>1<span style="line-height:1.5;">
+;;
+esac</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　其中chk_haproxy.sh</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>[root@H32 ~]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> vi /etc/keepalived/chk_haproxy.sh</span></pre>
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　添加内容：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">!/bin/bash</span><span style="color:rgb(0,128,0);line-height:1.5;">
+#
+#</span><span style="color:rgb(0,128,0);line-height:1.5;"> author: weizhifeng</span><span style="color:rgb(0,128,0);line-height:1.5;">
+#</span><span style="color:rgb(0,128,0);line-height:1.5;"> description:</span><span style="color:rgb(0,128,0);line-height:1.5;">
+#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 定时查看haproxy是否存在，如果不存在则启动haproxy，</span><span style="color:rgb(0,128,0);line-height:1.5;">
+#</span><span style="color:rgb(0,128,0);line-height:1.5;"> 如果启动失败，则停止keepalived</span><span style="color:rgb(0,128,0);line-height:1.5;">
+#
+</span>status=$(ps aux|grep haproxy | grep -v grep | grep -v bash | wc -<span style="line-height:1.5;">l)
+</span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> [ <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">${status}</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> = <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;"> ]; then
+    </span>/etc/init.d/<span style="line-height:1.5;">haproxy start
+ 
+    status2</span>=$(ps aux|grep haproxy | grep -v grep | grep -v bash |wc -<span style="line-height:1.5;">l)
+ 
+    </span><span style="color:rgb(0,0,255);line-height:1.5;">if</span> [ <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">${status2}</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span> = <span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="color:rgb(128,0,0);line-height:1.5;">0</span><span style="color:rgb(128,0,0);line-height:1.5;">"</span><span style="line-height:1.5;">  ]; then
+            </span>/etc/init.d/<span style="line-height:1.5;">keepalived stop
+    fi
+fi</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　<span>将以上三个文件全部更改后 复制一份到备机；注意根据上述高亮描述进行更改。(非常重要)</span></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　还要给chk_haproxy.sh和notify.sh执行脚本的权限。</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>chmod  +x  /etc/keepalived/<span style="line-height:1.5;">notify.sh
+chmod  </span>+x  /etc/keepalived/chk_haproxy.sh</pre>
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;">启动</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">&nbsp;　　配置完后进行启动keepalived 和haproxy，主备机均要启动：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    service keepalived start
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">&nbsp;　　其它命令：</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <pre>service keepalived stop <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">停止</span>
+<span style="line-height:1.5;">
+service keepalived restart </span><span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">重启<br></span></pre> 
+    <pre><span style="line-height:1.5;">service keepalived enable <span style="color:rgb(51,153,102);line-height:1.5;">#开机启动</span></span></pre> 
+   </div> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;">测试</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　down掉主机的haproxy，查看haproxy监控访问VIP：192.168.80.32：8089/stats，看haproxy的ID是否有变化，然后重启主机的haproxy，再看haproxy的ID是否有变化。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">&nbsp;　　执行ip a查看VIP在两台机子上有变化</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre>[root@H32 ~]<span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;"> ip a</span></pre>
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">&nbsp;</p> 
+   <h2 style="font-size:21px;line-height:1.5;font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;">思考：</h2> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　虚拟IP必须与master 和 备机 在同一网段，经测试若虚拟IP与他们不在同一网段访问不了VIP。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　防止keepalived互抢IP的办法，这个也有网有提出过，有相应的方法。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　主备机互作主备，即主机也是备机，可以做配置多个实例来实现。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　有网友测试出Keepalived限制死20个VIP问题，那这个是怎么解决的。</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">　　有时主备机都出现绑定了VIP，这时最可能的是主备机间无法通讯，最简单的测试方法是关掉两机的防火墙，再试，由于Keepalived基于vrrp 通讯，因此还需要加vrrp和防火墙：(在<a class="postTitle2" href="http://www.cnblogs.com/zhangs1986/p/6517788.html" rel="nofollow" style="color:#000000;">入坑系列之HAProxy负载均衡</a>&nbsp;中提到过)</p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre>vi /etc/sysconfig/iptables  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">编辑</span>
+
+-A RH-Firewall-1-INPUT -d 224.0.0.18 -j ACCEPT  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">允许组播地址通信（在做keepalived时用得到）</span>
+-A RH-Firewall-1-INPUT -p    vrrp    -j ACCEPT  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">允许VRRP（虚拟路由器冗余协）通信</span>
+-A RH-Firewall-1-INPUT -m state --state NEW -m tcp -p tcp --dport 80 -j ACCEPT  <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">允许80端口通过防火墙</span>
+:wq! <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">保存退出</span>
+service iptables restart <span style="color:rgb(0,128,0);line-height:1.5;">#</span><span style="color:rgb(0,128,0);line-height:1.5;">重启防火墙使配置生效</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">&nbsp;本文转自欢醉博客园博客，原文链接http://www.cnblogs.com/zhangs1986/p/6533370.html如需转载请自行联系原作者</p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;"><br></p> 
+   <p style="font-family:'Helvetica Neue', Helvetica, Verdana, Arial, sans-serif;font-size:14px;line-height:23.8px;">欢醉</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

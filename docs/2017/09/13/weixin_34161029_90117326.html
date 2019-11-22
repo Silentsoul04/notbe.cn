@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>C# 文件下载之断点续传 « NotBeCN</title>
+  <meta name="description" content="             注意，本文所说的断点续传特指 HTTP 协议中的断点续传。本文主要聊聊思路和关键代码，更多细节请参考本文附带的 demo。    工作原理    HTTP 协议中定义了一些请求/响应头，通过组合使用这些头信息。我们可以在一次 HTTP 请求中只请求一个文件中的一部分数据。这样我们就可以把...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/09/13/weixin_34161029_90117326.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">C# 文件下载之断点续传</h1>
+    <p class="post-meta">Sep 13, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">注意，本文所说的断点续传特指 HTTP 协议中的断点续传。本文主要聊聊思路和关键代码，更多细节请参考本文附带的 demo。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">工作原理</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">HTTP 协议中定义了一些请求/响应头，通过组合使用这些头信息。我们可以在一次 HTTP 请求中只请求一个文件中的一部分数据。这样我们就可以把已经下载的数据存起来，下次只用请求剩余的数据即可，当全部数据都下载到本地后再完成合并工作。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">HTTP 协议指出，可以通过 HTTP 请求中的 Range 头指定请求数据的范围，Range 头的使用也很简单，只要指定下面的格式就可以了：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;">
+    <pre><span style="font-size:12px;line-height:1.5;">Range: bytes=500-999</span></pre>
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">它的意思是，只请求目标文件的第 500 到第 999 这 500 个字节。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">比如我有一个1000 bytes 大小的文件需要下载，第一次请求时不用指定 Range 头，表示下载整个文件。但在下载完第 499 个字节后，下载被取消了。那么在下一次请求下载同一个文件时，只需要下载第 500 个字节至第 999 个字节的数据就可以了。原理看上去很简单，但我们需要考虑下面几个问题：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">1．&nbsp;&nbsp; &nbsp;是不是所有的 web 服务器都支持 Range 头？</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">2．&nbsp;&nbsp; &nbsp;多次请求之间可能会间隔很长的时间，服务器上的文件发生了变化怎么办？</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">3．&nbsp;&nbsp; &nbsp;如何保存下载的部分数据和相关信息？</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">4．&nbsp;&nbsp; &nbsp;当我们通过字节操作把一个文件拼成原始大小后，如何验证它和源文件一模一样？</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">下面我们就带着这些问题去探究断点续传的一些细节。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">检查服务器端对断点续传的支持</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">在服务器响应我们的请求时，会在响应头中通过 Accept-Ranges 指明是否接受请求一个资源的一部分数据。但这里似乎有个小小的陷阱，就是不同的服务器可能返回不同的值来指明自己能够接受部分资源的请求。貌似比较统一的方法是，当服务器不支持请求部分数据时，都会返回 Accept-Ranges: none，我们只要判断这个返回值是不是等于 none 就行了。代码如下：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">static</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">bool</span><span style="font-size:12px;line-height:1.5;"> IsAcceptRanges(WebResponse res)
+{
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span> (res.Headers[<span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">Accept-Ranges</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span>] != <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">null</span><span style="font-size:12px;line-height:1.5;">)
+    {
+        </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">string</span> s = res.Headers[<span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">Accept-Ranges</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="font-size:12px;line-height:1.5;">];
+        </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span> (s == <span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">none</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="font-size:12px;line-height:1.5;">)
+        {
+            </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">return</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">false</span><span style="font-size:12px;line-height:1.5;">;
+        }
+    }
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">return</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">true</span><span style="font-size:12px;line-height:1.5;">;
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">检查服务器端文件是否变化</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">当我们下载了一个文件的一部分之后，可能马上就会接着下载，也可能会过一段时间再下载，也可能永远不会再接着下载了…</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">这里的问题是，当下次要接着下载时，如何确定服务器上的文件还是当初下载了一半的那个文件。如果服务器上的文件已经更新了，那无论如何都需要重新从头开始下载。只有在服务器上的文件没有发生变化的情况下，断点续传才有意义。</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">对于这个问题，HTTP 响应头为我们提供了不同的选择。ETag 和 Last-Modified 都能完成任务。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">先看 ETag：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">The ETag response-header field provides the current value of the entity tag for the requested variant. (引自RFC2616 14.19 ETag)</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">简单点说 ETag 就是一个标识当前请求内容的字符串，当请求的资源发生变化后，对应的 ETag 也会变化。好了，最简单的办法是第一次请求时，把响应头中的 ETag 存下来，下次请求时做比较。代码如下：</span></p> 
+   <div class="cnblogs_code" style="border:1px solid rgb(204,204,204);font-family:'Courier New';font-size:12px;"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+    <pre><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">string</span> newEtag =<span style="font-size:12px;line-height:1.5;"> GetEtag(response);
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> tempFileName指已经下载到本地的部分文件内容
+</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> tempFileInfoName指保存了Etag内容的临时文件</span>
+<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span> (File.Exists(tempFileName) &amp;&amp;<span style="font-size:12px;line-height:1.5;"> File.Exists(tempFileInfoName))
+{
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">string</span> oldEtag =<span style="font-size:12px;line-height:1.5;"> File.ReadAllText(tempFileInfoName);
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span> (!<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">string</span>.IsNullOrEmpty(oldEtag) &amp;&amp; !<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">string</span>.IsNullOrEmpty(newEtag) &amp;&amp; newEtag ==<span style="font-size:12px;line-height:1.5;"> oldEtag)
+    {
+    </span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;">//</span><span style="color:rgb(0,128,0);font-size:12px;line-height:1.5;"> Etag没有变化，可以断点续传</span>
+        resumeDowload = <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">true</span><span style="font-size:12px;line-height:1.5;">;
+    }
+}
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">else</span><span style="font-size:12px;line-height:1.5;">
+{
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span> (!<span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">string</span><span style="font-size:12px;line-height:1.5;">.IsNullOrEmpty(newEtag))
+    {
+        File.WriteAllText(tempFileInfoName, newEtag);
+    }
+}
+</span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">private</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">static</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">string</span><span style="font-size:12px;line-height:1.5;"> GetEtag(WebResponse res)
+{
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">if</span> (res.Headers[<span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">ETag</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span>] != <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">null</span><span style="font-size:12px;line-height:1.5;">)
+    {
+        </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">return</span> res.Headers[<span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">ETag</span><span style="color:rgb(128,0,0);font-size:12px;line-height:1.5;">"</span><span style="font-size:12px;line-height:1.5;">];
+    }
+    </span><span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">return</span> <span style="color:rgb(0,0,255);font-size:12px;line-height:1.5;">null</span><span style="font-size:12px;line-height:1.5;">;
+}</span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy" style="font-size:12px;line-height:1.5;"><a title="复制代码" style="text-decoration:underline;border:none;"><img src="http://common.cnblogs.com/images/copycode.gif" alt="复制代码" style="border:none;"></a></span>
+    </div> 
+   </div> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">再来看看 Last-Modified：</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">The Last-Modified entity-header field indicates the date and time at which the origin server believes the variant was last modified. (引自RFC2616 14.29 Last-Modified)</span><br><span style="font-family:'Microsoft YaHei';font-size:15px;">Last-Modified 就是所请求的资源在服务器上的最后一次修改时间。使用方法和 ETag 大体相同。</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">个人感觉使用 ETag 和 Last-Modified 中的任何一个都能达到我们的目的。但是你也可以两个都用，做 double check，谁知道web服务器的实现是不是严格遵循了 HTTP 协议！</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">保存中间结果</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">这里主要就是用 C# 进行文件操作。大体思路是如果有未下载完的文件，就把新下载的字节添加到文件的末尾，不再啰嗦，有兴趣的同学请直接看 demo 代码。</span></p> 
+   <h1 style="font-size:28px;line-height:1.5;font-family:Verdana, Arial, Helvetica, sans-serif;"><span style="font-family:'Microsoft YaHei';font-size:18pt;">验证文件</span></h1> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;">在断点续传的过程中，我们以 byte 为单位下载、合并文件，如果整个过程中稍有没有处理好的异常，可能最后得到的文件就和源文件不太一样。因此最好是能够对下载好的文件进行一次校验。可这也是最难、最不容易实现的。因为它需要服务器端的支持，比如服务器端在提供一个可下载文件的同时提供该文件的 MD5 hash。当然，如果服务器端也是我们自己创建的，我们就可以去实现它。但我们又怎么能够要求现存的 web 服务器都提供这样的功能呢！</span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><span style="font-family:'Microsoft YaHei';font-size:15px;"><a href="http://files.cnblogs.com/files/sparkdev/BreakpointResume.zip" rel="nofollow" style="color:#000000;">Demo 下载</a></span></p> 
+   <p style="font-family:Verdana, Arial, Helvetica, sans-serif;font-size:14px;line-height:21px;"><br></p> 
+   <p><font><span style="font-size:14px;line-height:21px;">本文转自sparkdev博客园博客，原文链接：http://www.cnblogs.com/sparkdev/p/6141539.html</span></font><span style="font-size:14px;line-height:21px;font-family:Verdana, Arial, Helvetica, sans-serif;">，如需转载请自行联系原作者</span></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>知方可补不足～sqlserver中的几把锁~续 « NotBeCN</title>
+  <meta name="description" content="             之前写过相关的文章，对脏读，不可重复读，幻读都做了相当的研究，而今天在程序中又出现了这个问题，即当一条数据被update时，另一个线程同时发起了读的操作，这对于序列化级别的事务是不被允许的，正常情况下它应该被阻塞，当事务消失时，数据从新被读取。    一些术语－来自百度百科    更新丢...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/07/weixin_34364071_90134995.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">知方可补不足～sqlserver中的几把锁~续</h1>
+    <p class="post-meta">Dec 7, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">之前写过相关的文章，对脏读，不可重复读，幻读都做了相当的研究，而今天在程序中又出现了这个问题，即当一条数据被update时，另一个线程同时发起了读的操作，这对于序列化级别的事务是不被允许的，正常情况下它应该被阻塞，当事务消失时，数据从新被读取。</p> 
+   <h3 style="color:rgb(255,255,255);font-size:17px;line-height:25px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(41,129,162) none repeat scroll 0px 0px;">一些术语－来自百度百科</h3> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><span class="title-text"><strong>更新丢失</strong></span></p> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    两个事务都同时更新一行数据，一个事务对数据的更新把另一个事务对数据的更新覆盖了。这是因为系统没有执行任何的锁操作，因此并发事务并没有被隔离开来。
+   </div> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><span class="title-text"><strong>脏读</strong></span></p> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    一个事务读取到了另一个事务未提交的数据操作结果。这是相当危险的，因为很可能所有的操作都被回滚。
+   </div> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><span class="title-text"><strong>不可重复读</strong></span></p> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    不可重复读（Non-repeatable Reads）：一个事务对同一行数据重复读取两次，但是却得到了不同的结果。
+   </div> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    包括以下情况：
+   </div> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    （1） 虚读：事务T1读取某一数据后，事务T2对其做了修改，当事务T1再次读该数据时得到与前一次不同的值。
+   </div> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    （2） 幻读（Phantom Reads）：事务在操作过程中进行两次查询，第二次查询的结果包含了第一次查询中未出现的数据或者缺少了第一次查询中出现的数据（这里并不要求两次查询的SQL语句相同）。这是因为在两次查询过程中有另外一个事务插入数据造成的。
+   </div> 
+   <h3 style="color:rgb(255,255,255);font-size:17px;line-height:25px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(41,129,162) none repeat scroll 0px 0px;">一些解决方案－来自百度百科</h3> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><span class="title-text"><strong>未授权读取</strong></span></p> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    也称为读未提交（Read Uncommitted）：允许脏读取，但不允许更新丢失。如果一个事务已经开始写数据，则另外一个事务则不允许同时进行写操作，但允许其他事务读此行数据。该隔离级别可以通过“排他写锁”实现。
+   </div> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><span class="title-text"><strong>授权读取</strong></span></p> 
+   <div class="anchor-list" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    也称为读提交（Read Committed）：允许
+    <a href="http://baike.baidu.com/view/684763.htm" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">不可重复读取</a>，但不允许脏读取。这可以通过“瞬间共享读锁”和“排他写锁”实现。读取数据的事务允许其他事务继续访问该行数据，但是未提交的写事务将会禁止其他事务访问该行。&nbsp;
+   </div> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><span class="title-text"><strong>可重复读取（Repeatable Read）</strong></span></p> 
+   <div class="anchor-list" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    可重复读取（Repeatable Read）：禁止
+    <a href="http://baike.baidu.com/view/684763.htm" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">不可重复读取</a>和脏读取，但是有时可能出现幻读数据。这可以通过“共享读锁”和“排他写锁”实现。读取数据的事务将会禁止写事务（但允许读事务），写事务则禁止任何其他事务。&nbsp;
+   </div> 
+   <p style="line-height:24px;color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;"><span class="title-text"><strong>序列化（Serializable）</strong></span></p> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    序列化（Serializable）：提供严格的事务隔离。它要求事务
+    <a href="http://baike.baidu.com/view/160029.htm" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">序列化</a>执行，事务只能一个接着一个地执行，不能并发执行。仅仅通过“行级锁”是无法实现事务序列化的，必须通过其他机制保证新插入的数据不会被刚执行查询操作的事务访问到。
+   </div> 
+   <div class="para" style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;">
+    隔离级别越高，越能保证数据的完整性和一致性，但是对并发性能的影响也越大。对于多数应用程序，可以优先考虑把
+    <a href="http://baike.baidu.com/view/7809.htm" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">数据库系统</a>的隔离级别设为
+    <strong>Read Committed</strong>。它能够避免脏读取，而且具有较好的并发性能。尽管它会导致
+    <a href="http://baike.baidu.com/view/1406359.htm" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">不可重复读</a>、幻读和第二类丢失更新这些并发问题，在可能出现这类问题的个别场合，可以由应用程序采用
+    <a href="http://baike.baidu.com/view/1953079.htm" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">悲观锁</a>或
+    <a href="http://baike.baidu.com/view/1953089.htm" rel="nofollow" style="text-decoration:none;color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">乐观锁</a>来控制。
+   </div> 
+   <h3 style="color:rgb(255,255,255);font-size:17px;line-height:25px;font-family:'微软雅黑', '宋体', '黑体', Arial;background:rgb(41,129,162) none repeat scroll 0px 0px;">在.net中TransactionScope产生的事务，默认是序列化的</h3> 
+   <div class="para"> 
+    <div class="cnblogs_code" style="color:rgb(0,0,0);font-family:'Courier New';font-size:12px;border:1px solid rgb(204,204,204);">
+     <pre><span style="color:rgb(0,128,128);line-height:1.5;">--</span><span style="color:rgb(0,128,128);line-height:1.5;"> network protocol: TCP/IP</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> quoted_identifier <span style="color:rgb(0,0,255);line-height:1.5;">on</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> arithabort <span style="color:rgb(0,0,255);line-height:1.5;">off</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> numeric_roundabort <span style="color:rgb(0,0,255);line-height:1.5;">off</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> ansi_warnings <span style="color:rgb(0,0,255);line-height:1.5;">on</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> ansi_padding <span style="color:rgb(0,0,255);line-height:1.5;">on</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> ansi_nulls <span style="color:rgb(0,0,255);line-height:1.5;">on</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> concat_null_yields_null <span style="color:rgb(0,0,255);line-height:1.5;">on</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> cursor_close_on_commit <span style="color:rgb(0,0,255);line-height:1.5;">off</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> implicit_transactions <span style="color:rgb(0,0,255);line-height:1.5;">off</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span><span style="line-height:1.5;"> language 简体中文
+</span><span style="color:rgb(0,0,255);line-height:1.5;">set</span><span style="line-height:1.5;"> dateformat ymd
+</span><span style="color:rgb(0,0,255);line-height:1.5;">set</span> datefirst <span style="color:rgb(128,0,0);font-weight:bold;line-height:1.5;">7</span>
+<span style="color:rgb(0,0,255);line-height:1.5;">set</span> <span style="color:rgb(0,0,255);line-height:1.5;">transaction</span> <span style="color:rgb(0,0,255);line-height:1.5;">isolation</span> <span style="color:rgb(0,0,255);line-height:1.5;">level</span> <span style="color:rgb(0,0,255);line-height:1.5;">serializable</span> </pre>
+    </div> 
+    <p style="color:rgb(51,51,51);font-family:'comic sans ms';font-size:15px;line-height:24px;">感谢各位的阅读！</p> 
+    <p style="line-height:24px;"><font color="#333333"><span style="font-size:15px;">本文转自博客园张占岭（仓储大叔）的博客，原文链接：<a href="http://www.cnblogs.com/lori/p/5166063.html" rel="nofollow">知方可补不足～sqlserver中的几把锁~续</a></span></font><span style="font-size:15px;color:rgb(51,51,51);font-family:'comic sans ms';">，如需转载请自行联系原博主。</span></p> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

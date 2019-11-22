@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Raw-OS互斥的源代码分析的量的Mutex « NotBeCN</title>
+  <meta name="description" content="             &nbsp;&nbsp; 作为分析的内核版本2014-04-15，基于1.05正式版。blogs我们会跟上的内核开发进度的最新版本，如果出现源代码的目光”？？？”的话，没有深究的部分是理解。    &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;Raw-OS官方站点：h...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/11/15/weixin_33901843_90128173.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Raw-OS互斥的源代码分析的量的Mutex</h1>
+    <p class="post-meta">Nov 15, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;&nbsp; 作为分析的内核版本2014-04-15，基于1.05正式版。blogs我们会跟上的内核开发进度的最新版本，如果出现源代码的目光”？？？”的话，没有深究的部分是理解。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;Raw-OS官方站点：<a href="http://www.raw-os.org/" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);"><span style="line-height:1.8;color:rgb(0,0,255);">http://www.raw-os.org/</span></a></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;Raw-OS托管地址：<a href="https://github.com/jorya/raw-os/" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);"><span style="line-height:1.8;color:rgb(0,0,255);">https://github.com/jorya/raw-os/</span></a></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;今天来说说Raw-OS的相互排斥锁Mutex模块，这个Mutex用起来非常easy，用户api也仅仅有5个函数。可是内核关于这个模块的代码有点复杂，看明确要花点时间，所以要做好心理准备啊~亲~</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">一、优先级反转问题</h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;先来看看所谓的“优先级反转”问题</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;">&nbsp;<img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140613223122484?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdG9ydG9pc2VjaGFu/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;任务訪问某个硬件。那么硬件对于系统来说是一个共享资源，用相互排斥量来保护，那么</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.task&nbsp;z訪问硬件。获取相互排斥锁。然后运行硬件相关操作（读写）</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.然后task&nbsp;x优先级比task&nbsp;z高。那么抢占task&nbsp;z</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;3.Task&nbsp;x也要訪问硬件进行读写，然后发现硬件被占用。那么task就被堵塞</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;4.系统调度。task&nbsp;y运行，等待task&nbsp;y运行完成</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;5.系统调度，task&nbsp;z运行。运行完硬件操作后，释放相互排斥锁</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;6.最后才轮到task&nbsp;x运行硬件操作</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;这里task&nbsp;x是最高优先级。反而被低优先级任务抢占执行，这就是所谓的“优先级反转”问题的由来。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">二、“优先级反转”问题的一般解决方法</h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;依照一般RTOS理论，解决“优先级反转”的问题有两种一般方法：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;优先级继承协议、优先级天花板协议</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;以下简单描写叙述下两种协议的原理：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;优先级继承协议：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;"><img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140613223138296?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdG9ydG9pc2VjaGFu/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;依照“优先级反转”问题的延续，关键在于步骤4的优先级提升</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.task&nbsp;z訪问硬件。获取相互排斥锁，然后运行硬件相关操作（读写）</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.然后task&nbsp;x优先级比task&nbsp;z高，那么抢占task&nbsp;z</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;3.Task&nbsp;x也要訪问硬件进行读写。然后发现硬件被占用。那么task就被堵塞</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;4.将task&nbsp;z的优先级提升至task&nbsp;x的优先级，然后运行系统调度</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;5.task&nbsp;z提升优先级后。那么task&nbsp;y优先级就不足够高来抢占task&nbsp;z。所以task&nbsp;z继续运行</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;6.task&nbsp;z运行完硬件操作后。释放信号量，还原原来的基优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;7.系统调度。运行task&nbsp;x进行硬件读写</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;这里“优先级反转”的问题能够通过继承搞优先级任务就得到解决</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;优先级天花板协议</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;"><img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140613223147312?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdG9ydG9pc2VjaGFu/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;优先级天花板协议就要比优先级继承协议简单得多</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.给相互排斥锁定义一个优先级，这个优先级比全部要获取相互排斥锁的任务的优先级都要高</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.task&nbsp;z获取相互排斥锁时，直接将优先级提升到提前定义优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;3.由于提前定义优先级比全部要获取相互排斥锁的任务优先级都要高。所以获取相互排斥锁后的task&nbsp;z无法被更高的优先级任务抢占，就能够顺利运行硬件操作</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;4.运行完硬件操作后，task&nbsp;z还原原来的基优先级，运行系统调度</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;5.唤醒堵塞的task&nbsp;x</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;6.task&nbsp;x运行硬件操作</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">三、获取相互排斥锁操作</h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.相互排斥锁占用任务</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;内核中的相互排斥锁被占用时。用相互排斥锁控制块的mtxtsk变量表示被哪个任务占用</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;mutex_ptr-&gt;mtxtsk；</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.相互排斥锁链表</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;内核的相互排斥锁链表。当然这个名词是我自己想出来的哈，看一个情况</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;">&nbsp;<img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140613223156437?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdG9ydG9pc2VjaGFu/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;Task&nbsp;x在某一时刻内顺利的占用3个相互排斥锁，那么，在内核中，同一个任务占用多个相互排斥锁时。被同一个任务占用的相互排斥锁会形成一个相互排斥锁链表</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;">&nbsp;<img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140613223203500?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdG9ydG9pc2VjaGFu/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;相互排斥锁间通过相互排斥锁控制块的mtxlist指针组成单向链表，第一个被任务占用的锁的相互排斥锁链表指针指向0。然后task通过mtxlist指针指向最迟获取的相互排斥锁的链表指针。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;相互排斥锁链表在样例中再解说内核是怎样使用的</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;3.获取相互排斥锁情况举例</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;由于使用优先级天花板协议的相互排斥锁相关操作都很之简单。所以只举例使用优先级继承协议的相互排斥锁的情况</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;">&nbsp;<img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140613223208468?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdG9ydG9pc2VjaGFu/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;这是一个比較简单的情况：获取属于执行任务的相互排斥锁</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.task&nbsp;x占有相互排斥锁</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.task&nbsp;x成功占有相互排斥锁，返回</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;3.task&nbsp;y抢占task&nbsp;x获取相互排斥锁，相互排斥锁被task&nbsp;x占有</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;4.task&nbsp;x提升优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;5.task&nbsp;y堵塞在相互排斥锁上</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;那么看一个比較复杂的样例：获取属于堵塞任务的相互排斥锁</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;">&nbsp;<img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140613223212218?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdG9ydG9pc2VjaGFu/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;重点关注第5步骤之后的操作，特别是第9步</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.task&nbsp;x获取相互排斥锁mutex1</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.task&nbsp;x获取相互排斥锁mutex1成功，返回</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;3.task&nbsp;y抢占task&nbsp;x，获取相互排斥锁mutex2</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;4.task&nbsp;y获取相互排斥锁mutex2成功，返回</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;5.task&nbsp;y运行过程。获取相互排斥锁mutex1</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;6.由于mutex已经被task&nbsp;x占用，又由于task&nbsp;y优先级高于task&nbsp;x，所以task&nbsp;x提升到task&nbsp;y的优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;7.task&nbsp;y由于不能获取相互排斥锁mutex1，堵塞在mutex1上。等待mutex1被释放，然后系统调度后返回task&nbsp;x运行</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;8.很之不幸的是。又来一个更高优先级的任务task&nbsp;z抢占task&nbsp;x，获取相互排斥锁mutex2</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;9.由于mutex2已经被task&nbsp;y占有。所以，task&nbsp;y必须提升到task&nbsp;z的优先级，好了，这里重点来了，由于task&nbsp;y是堵塞在mutex1上面的。当task&nbsp;y提升了优先级，那么task&nbsp;x也须要提升优先级，这里发生的就是所谓的“相互排斥锁嵌套”的情况</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;10.task&nbsp;z因为不能获取相互排斥锁mutex2，所以堵塞在mutex2上，返回task&nbsp;x运行</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;这里须要注意的几点是：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.相互排斥锁优先级是全部要获取相互排斥锁任务的优先级的最高那个</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.使用优先级继承协议的相互排斥锁被任务占有时，占有相互排斥锁过程的任务优先级等于可能的相互排斥锁任务优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;3.相互排斥锁嵌套时，会发生连续提升任务优先级的情况</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">四、创建相互排斥锁</h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;创建相互排斥锁就是创建一个相互排斥锁控制块。操作类似创建任务控制块过程类似</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">RAW_U16 raw_mutex_create(RAW_MUTEX *mutex_ptr, RAW_U8 *name_ptr, RAW_U8 policy, RAW_U8 ceiling_prio)
+{
+	/* 检查要创建的相互排斥量控制块是否有实体定义，未定义时返回 */
+	#if (RAW_MUTEX_FUNCTION_CHECK &gt; 0)
+	if (mutex_ptr == 0) {
+		return RAW_NULL_OBJECT;
+	}
+	/* 检查Raw-OS相互排斥量支持的协议：优先级继承、优先级天花板、无协议。不是这三种协议时返回 */
+	if ((policy != RAW_MUTEX_CEILING_POLICY) &amp;&amp; (policy != RAW_MUTEX_INHERIT_POLICY) &amp;&amp; (policy != RAW_MUTEX_NONE_POLICY)){
+		return RAW_MUTEX_NO_POLICY;
+	}
+	#endif
+
+	/* 初始化相互排斥量控制块内的堵塞链表 */
+	list_init(&amp;mutex_ptr-&gt;common_block_obj.block_list);
+	/* 相互排斥量堵塞方式：默认优先级排序 */
+	mutex_ptr-&gt;common_block_obj.block_way = RAW_BLOCKED_WAY_PRIO;
+	/* 相互排斥量控制块名称 */
+	mutex_ptr-&gt;common_block_obj.name  =  name_ptr;
+	/* 这个是当前在使用相互排斥锁的任务控制块 */
+	mutex_ptr-&gt;mtxtsk 		= 0;
+	/* 这个是当同一个任务占有多个相互排斥锁时，被同一个任务占用的相互排斥锁会形成相互排斥锁链表 */
+	mutex_ptr-&gt;mtxlist 		= 0;
+	/* 相互排斥锁的协议：优先级继承、优先级天花板、无协议之中的一个 */
+	mutex_ptr-&gt;policy = policy;
+
+	#if (CONFIG_RAW_TASK_0 &gt; 0)
+	if (policy == RAW_MUTEX_CEILING_POLICY) {
+		if (ceiling_prio == 0) {
+			return RAW_CEILING_PRIORITY_NOT_ALLOWED;
+		}
+	}
+	#endif
+	/* 设置优先级天花板的值 */
+	mutex_ptr-&gt;ceiling_prio = ceiling_prio;
+	/* 相互排斥锁类型：相互排斥锁对象 */
+	mutex_ptr-&gt;common_block_obj.object_type = RAW_MUTEX_OBJ_TYPE;
+	/* trace调试系统？？？ */
+	TRACE_MUTEX_CREATE(raw_task_active, mutex_ptr, name_ptr, policy, ceiling_prio);
+
+	return RAW_SUCCESS;
+}</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">五、获取相互排斥锁内核代码分析</h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;&nbsp;由于内核获取相互排斥锁的代码综合了各种各样的获取相互排斥锁的情况，光看代码事实上是非常难理解的。这里建议对上上面列举的两种获取情况来跟踪代码。相互排斥锁的内核代码要花点时间去看啊~各位亲~</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">RAW_U16 raw_mutex_get(RAW_MUTEX *mutex_ptr, RAW_TICK_TYPE wait_option)
+{
+	RAW_U16 		error_status;
+	RAW_TASK_OBJ	*mtxtsk;
+	/* 定义CPU状态机字变量 */
+	RAW_SR_ALLOC();
+	/* 检查相互排斥锁控制块是否存在，不存在返回 */
+	#if (RAW_MUTEX_FUNCTION_CHECK &gt; 0)
+	if (mutex_ptr == 0) {
+		return RAW_NULL_OBJECT;
+	}
+	/* 检查中断嵌套，中断内不能调用此函数。即中断内不能获取相互排斥锁 */
+	if (raw_int_nesting) {
+		return RAW_NOT_CALLED_BY_ISR;
+	}
+	#endif
+	/* 保存CPU状态字 */
+	RAW_CRITICAL_ENTER();
+	/* 检查操作传入的相互排斥锁控制块，控制块内标识不是相互排斥锁对象类型时，返回 */
+	if (mutex_ptr-&gt;common_block_obj.object_type != RAW_MUTEX_OBJ_TYPE) {
+		RAW_CRITICAL_EXIT();
+		return RAW_ERROR_OBJECT_TYPE;
+	}
+
+	/* 假设当前任务已经获取相互排斥锁后，再获取同一个相互排斥锁，那么会发生死锁，标记后返回 */
+	if (raw_task_active == mutex_ptr-&gt;mtxtsk) {
+		mutex_ptr-&gt;owner_nested++;
+  		RAW_CRITICAL_EXIT();
+		return RAW_MUTEX_OWNER_NESTED;
+	}
+
+	/*
+	 * 这里是对于任务訪问使用优先级天花板协议的相互排斥锁的边界推断
+	 *
+	 * 这里注意Raw-OS的优先级数值越小优先级越高，那么依据优先级天花板协议，不论什么訪问相互排斥锁
+	 * 的任务的优先级必须小于或等于相互排斥锁的天花板优先级
+	 */
+	if (mutex_ptr-&gt;policy == RAW_MUTEX_CEILING_POLICY) {
+		/* 当訪问相互排斥锁的任务基优先级大于相互排斥锁的优先级时。错误返回 */
+		if (raw_task_active-&gt;bpriority &lt; mutex_ptr-&gt;ceiling_prio) {
+			RAW_CRITICAL_EXIT();
+			/* trace调试系统？？？ */
+			TRACE_MUTEX_EX_CE_PRI(raw_task_active, mutex_ptr, wait_option);
+			return RAW_EXCEED_CEILING_PRIORITY;
+		}
+	}
+
+	/* 获取当前使用相互排斥锁的任务控制块 */
+	mtxtsk = mutex_ptr-&gt;mtxtsk;
+	/* 假设相互排斥锁有没被任务占用，任务将获取相互排斥锁 */
+	if (mtxtsk == 0) {
+		/* 将当前使用相互排斥锁的任务记录到相互排斥锁控制块的任务指针中 */
+		mutex_ptr-&gt;mtxtsk = raw_task_active;
+		/*
+		 * 将当前相互排斥锁插入到当前任务控制块的相互排斥锁链表中
+		 * 当某一个任务占用多个相互排斥锁时。相互排斥锁组成相互排斥锁链表
+		 *
+		 * 0.raw_task_active-&gt;mtxlist未空，表示任务不占有不论什么相互排斥锁
+		 * 1.当raw_task_active获取一个相互排斥锁时，mutex_ptr-&gt;mtxlist指向0。raw_task_active-&gt;mtxlist指向当前锁
+		 * 2.当任务此时再获取一个相互排斥锁，那么，新锁mtxlist指向任务mtxlist。又由于任务的mtxlist指向前一个锁，那么新锁就指向前一个锁
+		 * 3.任务的mtxlist更新指向新获取的锁(总是指向最新占用的相互排斥锁)
+		 *
+		 * note：相互排斥锁的mtxlist是这样形式单项链表的
+		 */
+		mutex_ptr-&gt;mtxlist = raw_task_active-&gt;mtxlist;
+		raw_task_active-&gt;mtxlist = mutex_ptr;
+		/* 相互排斥锁的使用次数+1 */
+		mutex_ptr-&gt;owner_nested = 1u;
+
+		/* 当相互排斥锁使用优先级天花板协议时。须要在临界区提升获取相互排斥锁的任务优先级=优先级天花板 */
+		if (mutex_ptr-&gt;policy == RAW_MUTEX_CEILING_POLICY) {
+			if (raw_task_active-&gt;priority &gt; mutex_ptr-&gt;ceiling_prio) {
+				/*
+				 * 暂时提升任务互优先级=相互排斥锁优先级天花板相互排斥锁
+				 * 提升优先级的当前运行任务，所以改变优先级时只更改优先级后，又一次加入到就绪链表
+				 */
+				change_internal_task_priority(raw_task_active, mutex_ptr-&gt;ceiling_prio);
+			}
+		}
+
+		RAW_CRITICAL_EXIT();
+		/* trace调试系统 */
+		TRACE_MUTEX_GET(raw_task_active, mutex_ptr, wait_option);
+		/* 成功占用相互排斥锁，返回 */
+		return RAW_SUCCESS;
+	}
+
+	/* 假设当不能获取相互排斥锁时，而且用户不设置等待，那么直接返回 */
+	if (wait_option == RAW_NO_WAIT) {
+		RAW_CRITICAL_EXIT();
+		return RAW_NO_PEND_WAIT;
+	}
+
+	/* 当系统系统上锁时，任务不能被堵塞，直接返回 */
+	SYSTEM_LOCK_PROCESS();
+
+	/*
+	 * 当前任务无法获取相互排斥锁时，而且当相互排斥锁使用的是优先级继承协议，
+	 * 检查当前获取相互排斥锁任务优先级，假设当前任务优先级高于占用相互排斥锁任务的优先级，
+	 * 那么之前占用相互排斥锁的任务，要继承当前无法获取相互排斥锁任务的优先级(即须要提升占用相互排斥锁任务的优先级)
+	 */
+	if (mutex_ptr-&gt;policy == RAW_MUTEX_INHERIT_POLICY) {
+		if (raw_task_active-&gt;priority &lt; mtxtsk-&gt;priority) {
+			/* trace调试系统？？？ */
+			TRACE_TASK_PRI_INV(raw_task_active, mtxtsk);
+			/*
+			 * 将此时占用相互排斥锁的任务继承当前无法获取相互排斥锁任务的优先级
+			 * 改变优先级后又一次加入就绪链表适当位置。所谓适当位置。就是按优先级大小排序的位置
+			 */
+			change_internal_task_priority(mtxtsk, raw_task_active-&gt;priority);
+		}
+	}
+
+	/* 这里把当前不能获取相互排斥锁的任务堵塞到相互排斥锁的堵塞链表上 */
+	raw_pend_object((RAW_COMMON_BLOCK_OBJECT *)mutex_ptr, raw_task_active, wait_option);
+
+	RAW_CRITICAL_EXIT();
+	/* trace调试系统？？？ */
+	TRACE_MUTEX_GET_BLOCK(raw_task_active, mutex_ptr, wait_option);
+
+	/* 运行任务调度 */
+	raw_sched();
+
+	/*
+	 * 运行到这里，是由于某些条件唤醒新的最高优先级任务，依据之前堵塞的情况，
+	 * 推断之前堵塞的情况。置位新任务TCB堵塞标志，目的是得知是什么操作唤醒任务
+	 */
+	error_status = block_state_post_process(raw_task_active, 0);
+
+	return error_status;
+}</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">六、释放相互排斥锁内核代码分析</h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;那么。当任务运行完临界区的时候。任务就要释放获取的相互排斥锁，而且。依据须要还原成任务原本的优先级，分两种情况：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.假设task只占有一个相互排斥锁时。那么释放相互排斥锁后，就还原task原来的基优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.假设task占有两个以上相互排斥锁时。那么释放当中一个相互排斥锁后，就会检查其余相互排斥锁的相互排斥锁优先级。然后改变成其余相互排斥锁优先级中最高优先级的那一个</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;那么这里占有两个以上相互排斥锁时，相互排斥锁链表就发挥作用了，检查全部相互排斥锁优先级时，就是历遍整个相互排斥锁链表，检查每个相互排斥锁链表项的相互排斥锁堵塞链表来得到相互排斥锁优先级。这里我可能讲得不明不白的，看以下我自己理解的图吧~</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;text-align:center;">&nbsp;<img src="https://uzshare.com/_p?https://img-blog.csdn.net/20140613223219109?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdG9ydG9pc2VjaGFu/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast" alt="" style="border:0px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;之前说过</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;相互排斥锁优先级：定义为全部是全部要获取相互排斥锁任务的优先级的最高那个</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;相互排斥锁项优先级：实际上等于相互排斥锁项的堵塞链表的堵塞任务的最高优先级（堵塞链表第1个任务。由于堵塞链表是按优先级大小排序的）</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;相互排斥锁链表最高优先级：定义为整条相互排斥锁链表中全部相互排斥锁项的相互排斥锁优先级最大值</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;那么当任务占用2个或2个以上相互排斥锁时，相互排斥锁就会形成相互排斥锁链表，那么在任务释放相互排斥锁后，任务必须更改任务的执行优先级至相互排斥锁链表最高优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;这些是Raw-OS的相互排斥锁模块比較难理解的部分。之前提过的相互排斥锁链表并结合源代码去理解，略微话点时间去看</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">RAW_U16 raw_mutex_put(RAW_MUTEX *mutex_ptr)
+{
+	LIST 				*block_list_head;
+	RAW_TASK_OBJ   		*tcb;
+	/* 定义CPU状态机字变量 */
+	RAW_SR_ALLOC();
+	/* 检查相互排斥锁控制块是否存在，不存在返回 */
+	#if (RAW_MUTEX_FUNCTION_CHECK &gt; 0)
+	if (mutex_ptr == 0) {
+		return RAW_NULL_OBJECT;
+	}
+	/* 检查中断嵌套，中断内不能调用此函数。即中断内不能释放相互排斥锁 */
+	if (raw_int_nesting) {
+		return RAW_NOT_CALLED_BY_ISR;
+	}
+	#endif
+
+	RAW_CRITICAL_ENTER();
+	/* 检查操作传入的相互排斥锁控制块，控制块内标识不是相互排斥锁对象类型时，返回 */
+	if (mutex_ptr-&gt;common_block_obj.object_type != RAW_MUTEX_OBJ_TYPE) {
+		RAW_CRITICAL_EXIT();
+		return RAW_ERROR_OBJECT_TYPE;
+	}
+
+	/* 检查占用相互排斥锁的任务是否是当前任务。系统要求必须是获取相互排斥锁的任务自行释放相互排斥锁 */
+	if (raw_task_active != mutex_ptr-&gt;mtxtsk) {
+		RAW_CRITICAL_EXIT();
+		return RAW_MUTEX_NOT_RELEASE_BY_OCCYPY;
+	}
+	/* 释放相互排斥锁后。相互排斥锁使用次数-- */
+	mutex_ptr-&gt;owner_nested--;
+	/* 当此时相互排斥锁使用次数不为0，那么仅仅有一种情况，就是当时已经获取相互排斥锁的任务又一次获取相互排斥锁。死锁状态 */
+	if (mutex_ptr-&gt;owner_nested) {
+		RAW_CRITICAL_EXIT();
+		return RAW_MUTEX_OWNER_NESTED;
+	}
+	/*
+	 * 历遍传入相互排斥锁的相互排斥锁链表，而且将传入的相互排斥锁从相互排斥链表中删除，
+	 * 而且设置释放相互排斥锁的任务的优先级，或者是基优先级。或者是改变成相互排斥锁链表的最高优先级
+	 *
+	 * 1.当任务仅占用一个相互排斥锁时，释放后还原成基优先级
+	 * 2.当任务占用2个或2个以上相互排斥锁时，改变成相互排斥锁链表的最高优先级
+	 */
+	release_mutex(raw_task_active, mutex_ptr);
+
+	/* 获取相互排斥锁堵塞链表头 */
+	block_list_head = &amp;mutex_ptr-&gt;common_block_obj.block_list;
+
+	/* 假设相互排斥锁堵塞链表为空，那么没有其它任务堵塞在这个相互排斥锁上 */
+	if (is_list_empty(block_list_head)) {
+		/* 设置相互排斥锁被任务占有的标志为0。返回 */
+		mutex_ptr-&gt;mtxtsk = 0;
+		RAW_CRITICAL_EXIT();
+		TRACE_MUTEX_RELEASE_SUCCESS(raw_task_active, mutex_ptr);
+		return RAW_SUCCESS;
+	}
+
+	/* 执行到这里，说明堵塞相互排斥锁的堵塞链表不为空。那么，获取堵塞链表的第一个任务(最高优先级任务) */
+	tcb = list_entry(block_list_head-&gt;next, RAW_TASK_OBJ, task_list);
+
+	/* 唤醒当前被释放相互排斥锁中堵塞链表的最高优先级任务 */
+	raw_wake_object(tcb);
+
+	/* 设置占有相互排斥锁的任务为唤醒后的任务 */
+	mutex_ptr-&gt;mtxtsk = tcb;
+	/* 更新相互排斥锁链表 */
+	mutex_ptr-&gt;mtxlist = tcb-&gt;mtxlist;
+	tcb-&gt;mtxlist = mutex_ptr;
+	mutex_ptr-&gt;owner_nested = 1u;
+
+	/*
+	 * 这里为什么释放相互排斥锁后，唤醒相互排斥锁堵塞链表中的最高优先级任务后，要还改变任务的执行优先级 ？？？
+	 * 由于当任务堵塞在相互排斥锁上后，仅仅会受到优先级继承协议的影响，而被唤醒后，任务优先级也仅仅会是相互排斥锁优先级
+	 * 而假设任务是堵塞在使用优先级天花板协议的相互排斥锁上被唤醒后，就要提升至相互排斥锁的优先级天花板
+	 */
+	/* 假设相互排斥锁是优先级天花板协议 */
+	if (mutex_ptr-&gt;policy == RAW_MUTEX_CEILING_POLICY) {
+		/* 当任务的执行优先级低于相互排斥锁的天花板优先级， */
+		if (tcb-&gt;priority &gt; mutex_ptr-&gt;ceiling_prio) {
+			/* 将任务执行优先级提升到相互排斥锁的优先级天花板，又一次增加到就绪队列 */
+			change_internal_task_priority(tcb, mutex_ptr-&gt;ceiling_prio);
+		}
+	}
+
+	TRACE_MUTEX_WAKE_TASK(raw_task_active, tcb);
+	RAW_CRITICAL_EXIT();
+	/* 执行系统调度 */
+	raw_sched();
+
+	return RAW_SUCCESS;
+}</code></pre> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <h2 style="line-height:1.5;font-size:21px;font-family:verdana, Arial, Helvetica, sans-serif;">七、相互排斥锁中的任务优先级改变</h2> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;经过上面的分析就能够知道获取相互排斥锁，释放相互排斥锁等等的操作都随时涉及到任务执行优先级的改变，这也是之前blog中任务篇没涉及的操作。首先要理解好上面相互排斥锁的操作再去看怎样依据各种各样的情况更改任务的执行优先级，这个在内核中也是比較难理解的</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;总结相互排斥锁的几点，再结合看代码再理解。确实mutex的代码是比較复杂的啊~亲~</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;1.当一个任务占有多个相互排斥锁时，同一个任务的全部相互排斥锁组成相互排斥锁链表</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;2.相互排斥锁优先级等于被堵塞在相互排斥锁上堵塞链表全部任务的最高优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;3.相互排斥锁链表最高优先级等于全部相互排斥锁链表项的相互排斥锁优先级的最大值</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;4.取得相互排斥锁的任务的执行优先级等于相互排斥锁链表的最高优先级</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;5.注意任务获取执行任务占有的相互排斥锁时，执行任务的执行优先级怎样改变</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;6.注意任务获取堵塞任务占有的相互排斥锁时，堵塞任务的执行优先级怎样改变</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">&nbsp;</p> 
+   <div> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;">版权声明：本文博客原创文章，博客，未经同意，不得转载。</p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:12px;"><br></p> 
+    <p><font color="#333333"><span style="font-size:12px;">本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/4740420.html，如需转载请自行联系原作者</span></font></p> 
+    <div style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+     <br>
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

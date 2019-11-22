@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux内存分配方法总结【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.bkjia.com/Linuxjc/443717.html    内存映射结构：1.32位地址线寻址4G的内存空间，其中0-3G为用户程序所独有，3G-4G为内核占有。2.struct page：整个物理内存在初始化时，每个4kb页面生成一个对应的struct...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/12/29/weixin_34319374_90120544.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux内存分配方法总结【转】</h1>
+    <p class="post-meta">Dec 29, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.bkjia.com/Linuxjc/443717.html" rel="nofollow">http://www.bkjia.com/Linuxjc/443717.html</a></p> 
+   <p>内存映射结构：<br><br>1.32位地址线寻址4G的内存空间，其中0-3G为用户程序所独有，3G-4G为内核占有。<br><br>2.struct page：整个物理内存在初始化时，每个4kb页面生成一个对应的struct page结构，这个page结构就独一无二的代表这个物理内存页面，并存放在mem_map全局数组中。<br><br>3.段式映射：首先根据代码段选择子cs为索引，以GDT值为起始地址的段描述表中选择出对应的段描述符，随后根据段描述符的基址，本段长度，权限信息等进行校验，校验成功后。cs:offset中的32位偏移量直接与本段基址相累加，得出最终访问地址。<br><br>0-3G与mem_map的映射方式：<br>因linux中采用的段式映射为flat模式，所以从逻辑地址到线性地址没有变化。从段式出来进入页式，每个用户进程都独自拥有一个页目录表（pdt），运行时存放于CR3。&nbsp; CR3（页目录） + 前10位 =&gt;&nbsp; 页面表基址 + 中10位 =&gt; 页表项 + 后12位 =&gt; 物理页面地址<br><br>3G-4G与mem_map的映射方式：<br>分为三种类型：低端内存/普通内存/高端内存。<br>低端内存：3G-3G+16M 用于DMA&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __pa线性映射<br>普通内存：3G+16M-3G+896M&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __pa线性映射 （若物理内存&lt;896M，则分界点就在3G+实际内存）<br>高端内存：3G+896-4G&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 采用动态的分配方式<br><br>4.高端内存(假设3G+896为高端内存起址)<br>作用：访问到1G以外的物理内存空间。<br>线性地址共分为三段：vmalloc段/kmap段/kmap_atomic段（针对与不同的内存分配方式）<br><br><br>从内存分配函数的结构来看主要分为下面几个部分:<br>a.伙伴算法(最原始的面向页的分配方式)<br>alloc_pages 接口：<br>&nbsp;&nbsp; &nbsp;struct page * alloc_page(unsigned int gfp_mask)——分配一页物理内存并返回该页物理内存的page结构指针。<br>&nbsp;&nbsp; &nbsp;struct page * alloc_pages(unsigned int gfp_mask, unsigned int order)——分配 个连续的物理页并返回分配的第一个物理页的page结构指针。<br>&nbsp;&nbsp; &nbsp;&lt;释放函数：__free_page(s)&gt;<br>&nbsp;&nbsp; &nbsp;<br>&nbsp;&nbsp; &nbsp;内核中定义：#define alloc_page(gfp_mask) alloc_pages(gfp_mask, 0)&nbsp; &nbsp;<br>&nbsp;&nbsp; &nbsp;最终都是调用 __alloc_pages.<br>&nbsp;&nbsp; &nbsp;其中MAX_ORDER 11，及最大分配到到页面个数为2^10（即4M）。<br>&nbsp;&nbsp; &nbsp;分配页后还不能直接用，需要得到该页对应的虚拟地址：<br>&nbsp;&nbsp; &nbsp;void *page_address(struct page *page);<br>&nbsp;&nbsp; &nbsp;低端内存的映射方式：__va((unsigned long)(page&nbsp; -&nbsp; mem_map)&nbsp; &lt;&lt;&nbsp; 12)<br>&nbsp;&nbsp; &nbsp;高端内存到映射方式：struct page_address_map分配一个动态结构来管理高端内存。(内核是访问不到vma的3G以下的虚拟地址的) 具体映射由kmap / kmap_atomic执行。<br>&nbsp;&nbsp; &nbsp;<br>get_free_page接口：(alloc_pages接口两步的替代函数)<br>&nbsp;&nbsp; &nbsp;unsigned long get_free_page(unsigned int gfp_mask) <br>&nbsp;&nbsp; &nbsp;unsigned long __get_free_page(unsigned int gfp_mask) <br>&nbsp;&nbsp; &nbsp;Unsigned long __get_free_pages(unsigned int gfp_mask, unsigned int order)<br>&nbsp;&nbsp; &nbsp;&lt;释放函数：free_page&gt;<br>&nbsp;&nbsp; &nbsp;与alloc_page(s)系列最大的区别是无法申请高端内存，因为它返回到是一个线性地址，而高端内存是需要额外映射才可以访问的。<br><br>b.slab高速缓存（反复分配很多同一大小内存）&nbsp;&nbsp; 注：使用较少<br>&nbsp;&nbsp; &nbsp;kmem_cache_t* xx_cache;<br>&nbsp;&nbsp; &nbsp;创建： xx_cache = kmem_cache_create("name", sizeof(struct xx), SLAB_HWCACHE_ALIGN, NULL, NULL);<br>&nbsp;&nbsp; &nbsp;分配： kmem_cache_alloc(xx_cache, GFP_KERNEL);<br>&nbsp;&nbsp; &nbsp;释放： kmem_cache_free(xx_cache, addr);<br>&nbsp; 内存池<br>&nbsp; &nbsp;&nbsp; &nbsp;mempool 不使用。<br>&nbsp; <br>c.kmalloc（最常用的分配接口）&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 注：必须小于128KB<br>&nbsp;&nbsp; &nbsp;GFP_ATOMIC 不休眠，用于中断处理等情况<br>&nbsp;&nbsp; &nbsp;GFP_KERNEL 会休眠，一般状况使用此标记<br>&nbsp;&nbsp; &nbsp;GFP_USER&nbsp;&nbsp; 会休眠<br>&nbsp;&nbsp; &nbsp;__GFP_DMA&nbsp; 分配DMA内存<br>&nbsp;&nbsp; &nbsp;kmalloc/kfree<br>&nbsp;&nbsp; &nbsp;<br>d.vmalloc/vfree<br>&nbsp;&nbsp; &nbsp;vmalloc采用高端内存预留的虚拟空间来收集内存碎片引起的不连续的物理内存页，是用于非连续物理内存分配。<br>当kmalloc分配不到内存且无物理内存连续的需求时，可以使用。（优先从高端内存中查找）<br>&nbsp;&nbsp; &nbsp;<br>e.ioremap()/iounmap()<br>　　ioremap()的作用是把device寄存器和内存的物理地址区域映射到内核虚拟区域，返回值为内核的虚拟地址。使用的线性地址区间也在vmmlloc段<br>注：<br>vmalloc()与 alloc_pages(_GFP_HIGHMEM)+kmap()；前者不连续，后者只能映射一个高端内存页面<br>__get_free_pages与alloc_pages(NORMAL)+page_address()； 两者完全等同<br>内核地址通过 __va/__pa进行中低内存的直接映射<br>高端内存采用kmap/kmap_atomic的方式来映射<br><br>&nbsp;&nbsp; &nbsp;<br>个人总结如下：<br>a.在&lt;128kB的一般内存分配时，使用kmalloc<br>&nbsp;&nbsp; &nbsp;允许睡眠：GFP_KERNEL<br>&nbsp;&nbsp; &nbsp;不允许睡眠：GFP_ATOMIC<br>b.在&gt;128kB的内存分配时，使用get_free_pages，获取成片页面，直接返回虚拟地址（&lt;4M）（或alloc_pages + page_address）<br>c.b失败，<br>&nbsp;&nbsp; &nbsp;如果要求分配高端内存：alloc_pages(_GFP_HIGHMEM)+kmap（仅能映射一个页面）<br>&nbsp;&nbsp; &nbsp;如果不要求内存连续： 则使用vmalloc进行分配逻辑连续的大块页面.(不建议)/分配速度较慢，访问速率较慢。<br>d.频繁创建和销毁很多较大数据结构,使用slab.<br>e.高端内存映射：<br>&nbsp;&nbsp; &nbsp;允许睡眠：kmap&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (永久映射)<br>&nbsp;&nbsp; &nbsp;不允许睡眠：kmap_atomic&nbsp;&nbsp; &nbsp;&nbsp; (临时映射)会覆盖以前到映射（不建议）</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>v深入研究Clang（四） Clang编译器的简单分析 « NotBeCN</title>
+  <meta name="description" content="             作者：史宁宁（snsn1984）    首先我们确定下Clang编译器的详细内容和涵盖范围。之前在《LLVM每日谈之二十 Everything &amp;&amp; Clang driver&nbsp;》中以前提到过。Clang driver（命令行表示是clang）和Clang前端（依...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2017/10/12/weixin_33919941_90124272.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">v深入研究Clang（四） Clang编译器的简单分析</h1>
+    <p class="post-meta">Oct 12, 2017</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">作者：<a href="http://blog.csdn.net/snsn1984" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">史宁宁（snsn1984）</a><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">首先我们确定下Clang编译器的详细内容和涵盖范围。之前在《<span class="link_title" style="line-height:1.8;"><a href="http://blog.csdn.net/snsn1984/article/details/40857967" rel="nofollow" style="color:rgb(0,0,0);border-bottom:1px dotted rgb(51,51,51);">LLVM每日谈之二十 Everything &amp;&amp; Clang driver&nbsp;</a></span>》中以前提到过。Clang driver（命令行表示是clang）和Clang前端（依照详细实现来说就是Clang的那些库所实现的前端）是不同的。同一时候还存在一个Clang编译器（命令行表示是clang -cc1）。Clang编译器不只包括了Clang前端，还包括使用LLVM的哭实现的编译器的中间阶段以及后端，同一时候也集成了assembler。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">Clang driver有一系列的frontend action，这些frontend action定义于clang/include/clang/Frontend/FrontendOptions.h中的ActionKind枚举中。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">当中一些frontend action就会触发Clang编译器（clang -cc1），比方：ASTView, EmitBC, EmitObj等。一旦触发了Clang编译器（clang -cc1）。就会执行函数cc1_main()（clang/tools/driver/cc1_main.cpp），从名字上就能够看出来，这个函数是Clang编译器（clang -cc1）的入口主函数。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">举个详细的样例来看一下：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">min.c<br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">int min(int a, int b) {
+    if (a &lt; b) {
+        return a;
+    }
+    return b;
+}</code></pre> 
+   <br style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">执行命令： clang -### min.c -o min</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">clang version 3.5.0 (tags/RELEASE_350/final)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+ "/home/shining/llvm-3.5/build/bin/clang-3.5" "-cc1" "-triple" "x86_64-unknown-linux-gnu" "-emit-obj" "-mrelax-all" "-disable-free" "-main-file-name" "min.c" "-mrelocation-model" "static" "-mdisable-fp-elim" "-fmath-errno" "-masm-verbose" "-mconstructor-aliases" "-munwind-tables" "-fuse-init-array" "-target-cpu" "x86-64" "-dwarf-column-info" "-resource-dir" "/home/shining/llvm-3.5/build/bin/../lib/clang/3.5.0" "-internal-isystem" "/usr/local/include" "-internal-isystem" "/home/shining/llvm-3.5/build/bin/../lib/clang/3.5.0/include" "-internal-externc-isystem" "/usr/include/x86_64-linux-gnu" "-internal-externc-isystem" "/include" "-internal-externc-isystem" "/usr/include" "-fdebug-compilation-dir" "/home/shining/llvm-3.5/build/bin" "-ferror-limit" "19" "-fmessage-length" "80" "-mstackrealign" "-fobjc-runtime=gcc" "-fdiagnostics-show-option" "-o" "/tmp/min-75c13b.o" "-x" "c" "min.c"
+ "/usr/bin/ld" "-z" "relro" "--hash-style=gnu" "--build-id" "--eh-frame-hdr" "-m" "elf_x86_64" "-dynamic-linker" "/lib64/ld-linux-x86-64.so.2" "-o" "min" "/usr/lib/gcc/x86_64-linux-gnu/4.8/../../../x86_64-linux-gnu/crt1.o" "/usr/lib/gcc/x86_64-linux-gnu/4.8/../../../x86_64-linux-gnu/crti.o" "/usr/lib/gcc/x86_64-linux-gnu/4.8/crtbegin.o" "-L/usr/lib/gcc/x86_64-linux-gnu/4.8" "-L/usr/lib/gcc/x86_64-linux-gnu/4.8/../../../x86_64-linux-gnu" "-L/lib/x86_64-linux-gnu" "-L/lib/../lib64" "-L/usr/lib/x86_64-linux-gnu" "-L/usr/lib/gcc/x86_64-linux-gnu/4.8/../../.." "-L/home/shining/llvm-3.5/build/bin/../lib" "-L/lib" "-L/usr/lib" "/tmp/min-75c13b.o" "-lgcc" "--as-needed" "-lgcc_s" "--no-as-needed" "-lc" "-lgcc" "--as-needed" "-lgcc_s" "--no-as-needed" "/usr/lib/gcc/x86_64-linux-gnu/4.8/crtend.o" "/usr/lib/gcc/x86_64-linux-gnu/4.8/../../../x86_64-linux-gnu/crtn.o"
+</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">-###參数是为了查看。clang driver究竟调用了哪些命令，而且不会执行这些命令。从这里能够实际看到，实际上调用的是 clang-3.5 -cc1。当中3.5是版本，所以事实上调用的就是clang编译器。</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">之后又调用了系统的ld loader,由于LLVM架构的loader还在开发之中。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">所以，对于那些我们已经明白须要clang编译器去作的工作，我们能够不通过clang driver去隐式调用（比方上面的样例）。而是直接在命令行调用clang -cc1去执行。而且在clang -cc1之后跟clang编译器接受的參数。也能够通过clang -Xclang就能够直接将參数传递给clang编译器（clang -cc1）。以下的详细实现，将同一时候给出这两种的命令行形式，事实上执行结果差点儿是全然同样的。不同的是，使用clang -Xclang的时候，假设不加强制的參数，这里尽管-Xclang将參数传递给了clang -cc1，可是这里的clang driver依旧会继续工作的。在以下的样例中会进行分别的展示<br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">编译器首先进行的是词法分析。我们能够通过命令行去查看进行词法分析之后的token序列究竟是怎么样的，仍然以上面的min.c为例，执行命令：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">clang -cc1 -dump-tokens min.c</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">执行之后得到例如以下输出：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">int 'int'	 [StartOfLine]	Loc=&lt;min.c:1:1&gt;
+identifier 'min'	 [LeadingSpace]	Loc=&lt;min.c:1:5&gt;
+l_paren '('		Loc=&lt;min.c:1:8&gt;
+int 'int'		Loc=&lt;min.c:1:9&gt;
+identifier 'a'	 [LeadingSpace]	Loc=&lt;min.c:1:13&gt;
+comma ','		Loc=&lt;min.c:1:14&gt;
+int 'int'	 [LeadingSpace]	Loc=&lt;min.c:1:16&gt;
+identifier 'b'	 [LeadingSpace]	Loc=&lt;min.c:1:20&gt;
+r_paren ')'		Loc=&lt;min.c:1:21&gt;
+l_brace '{'	 [LeadingSpace]	Loc=&lt;min.c:1:23&gt;
+if 'if'	 [StartOfLine] [LeadingSpace]	Loc=&lt;min.c:2:5&gt;
+l_paren '('	 [LeadingSpace]	Loc=&lt;min.c:2:8&gt;
+identifier 'a'		Loc=&lt;min.c:2:9&gt;
+less '&lt;'	 [LeadingSpace]	Loc=&lt;min.c:2:11&gt;
+identifier 'b'	 [LeadingSpace]	Loc=&lt;min.c:2:13&gt;
+r_paren ')'		Loc=&lt;min.c:2:14&gt;
+l_brace '{'	 [LeadingSpace]	Loc=&lt;min.c:2:16&gt;
+return 'return'	 [StartOfLine] [LeadingSpace]	Loc=&lt;min.c:3:9&gt;
+identifier 'a'	 [LeadingSpace]	Loc=&lt;min.c:3:16&gt;
+semi ';'		Loc=&lt;min.c:3:17&gt;
+r_brace '}'	 [StartOfLine] [LeadingSpace]	Loc=&lt;min.c:4:5&gt;
+return 'return'	 [StartOfLine] [LeadingSpace]	Loc=&lt;min.c:5:5&gt;
+identifier 'b'	 [LeadingSpace]	Loc=&lt;min.c:5:12&gt;
+semi ';'		Loc=&lt;min.c:5:13&gt;
+r_brace '}'	 [StartOfLine]	Loc=&lt;min.c:6:1&gt;
+eof ''		Loc=&lt;min.c:6:2&gt;</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">或者选用： clang -Xclang -dump-tokens min.c</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">输出信息例如以下：<br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">int 'int'	 [StartOfLine]	Loc=&lt;min.c:1:1&gt;
+identifier 'min'	 [LeadingSpace]	Loc=&lt;min.c:1:5&gt;
+l_paren '('		Loc=&lt;min.c:1:8&gt;
+int 'int'		Loc=&lt;min.c:1:9&gt;
+identifier 'a'	 [LeadingSpace]	Loc=&lt;min.c:1:13&gt;
+comma ','		Loc=&lt;min.c:1:14&gt;
+int 'int'	 [LeadingSpace]	Loc=&lt;min.c:1:16&gt;
+identifier 'b'	 [LeadingSpace]	Loc=&lt;min.c:1:20&gt;
+r_paren ')'		Loc=&lt;min.c:1:21&gt;
+l_brace '{'	 [LeadingSpace]	Loc=&lt;min.c:1:23&gt;
+if 'if'	 [StartOfLine] [LeadingSpace]	Loc=&lt;min.c:2:5&gt;
+l_paren '('	 [LeadingSpace]	Loc=&lt;min.c:2:8&gt;
+identifier 'a'		Loc=&lt;min.c:2:9&gt;
+less '&lt;'	 [LeadingSpace]	Loc=&lt;min.c:2:11&gt;
+identifier 'b'	 [LeadingSpace]	Loc=&lt;min.c:2:13&gt;
+r_paren ')'		Loc=&lt;min.c:2:14&gt;
+l_brace '{'	 [LeadingSpace]	Loc=&lt;min.c:2:16&gt;
+return 'return'	 [StartOfLine] [LeadingSpace]	Loc=&lt;min.c:3:9&gt;
+identifier 'a'	 [LeadingSpace]	Loc=&lt;min.c:3:16&gt;
+semi ';'		Loc=&lt;min.c:3:17&gt;
+r_brace '}'	 [StartOfLine] [LeadingSpace]	Loc=&lt;min.c:4:5&gt;
+return 'return'	 [StartOfLine] [LeadingSpace]	Loc=&lt;min.c:5:5&gt;
+identifier 'b'	 [LeadingSpace]	Loc=&lt;min.c:5:12&gt;
+semi ';'		Loc=&lt;min.c:5:13&gt;
+r_brace '}'	 [StartOfLine]	Loc=&lt;min.c:6:1&gt;
+eof ''		Loc=&lt;min.c:6:2&gt;
+/usr/bin/ld: cannot find /tmp/min-3cce9d.o: No such file or directory
+clang-3.5: error: linker command failed with exit code 1 (use -v to see invocation)
+</code></pre> 
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">明显能够看到，使用-Xclang的时候，把-dump-tokens參数传递给了clang -cc1，可是clang driver依旧工作，而且调用了ld.</span> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">能够使用clang -### -Xclang -dump-tokens min.c命令进行验证。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">看过了词法分析阶段，我们再看下clang编译器语法分析来的AST nodes。</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">使用命令：clang -cc1 -fsyntax-only -ast-dump min.c</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">或者：clang -fsyntax-only -Xclang -ast-dump min.c</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">输出结果一样：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <pre><code class="language-cpp">TranslationUnitDecl 0x6bc3a40 &lt;&lt;invalid sloc&gt;&gt; &lt;invalid sloc&gt;
+|-TypedefDecl 0x6bc3f40 &lt;&lt;invalid sloc&gt;&gt; &lt;invalid sloc&gt; implicit __int128_t '__int128'
+|-TypedefDecl 0x6bc3fa0 &lt;&lt;invalid sloc&gt;&gt; &lt;invalid sloc&gt; implicit __uint128_t 'unsigned __int128'
+|-TypedefDecl 0x6bc42f0 &lt;&lt;invalid sloc&gt;&gt; &lt;invalid sloc&gt; implicit __builtin_va_list '__va_list_tag [1]'
+`-FunctionDecl 0x6bc4490 &lt;min.c:1:1, line:6:1&gt; line:1:5 min 'int (int, int)'
+  |-ParmVarDecl 0x6bc4350 &lt;col:9, col:13&gt; col:13 used a 'int'
+  |-ParmVarDecl 0x6bc43c0 &lt;col:16, col:20&gt; col:20 used b 'int'
+  `-CompoundStmt 0x6bc46f8 &lt;col:23, line:6:1&gt;
+    |-IfStmt 0x6bc4668 &lt;line:2:5, line:4:5&gt;
+    | |-&lt;&lt;&lt;NULL&gt;&gt;&gt;
+    | |-BinaryOperator 0x6bc45c0 &lt;line:2:9, col:13&gt; 'int' '&lt;'
+    | | |-ImplicitCastExpr 0x6bc4590 &lt;col:9&gt; 'int' &lt;LValueToRValue&gt;
+    | | | `-DeclRefExpr 0x6bc4540 &lt;col:9&gt; 'int' lvalue ParmVar 0x6bc4350 'a' 'int'
+    | | `-ImplicitCastExpr 0x6bc45a8 &lt;col:13&gt; 'int' &lt;LValueToRValue&gt;
+    | |   `-DeclRefExpr 0x6bc4568 &lt;col:13&gt; 'int' lvalue ParmVar 0x6bc43c0 'b' 'int'
+    | |-CompoundStmt 0x6bc4648 &lt;col:16, line:4:5&gt;
+    | | `-ReturnStmt 0x6bc4628 &lt;line:3:9, col:16&gt;
+    | |   `-ImplicitCastExpr 0x6bc4610 &lt;col:16&gt; 'int' &lt;LValueToRValue&gt;
+    | |     `-DeclRefExpr 0x6bc45e8 &lt;col:16&gt; 'int' lvalue ParmVar 0x6bc4350 'a' 'int'
+    | `-&lt;&lt;&lt;NULL&gt;&gt;&gt;
+    `-ReturnStmt 0x6bc46d8 &lt;line:5:5, col:12&gt;
+      `-ImplicitCastExpr 0x6bc46c0 &lt;col:12&gt; 'int' &lt;LValueToRValue&gt;
+        `-DeclRefExpr 0x6bc4698 &lt;col:12&gt; 'int' lvalue ParmVar 0x6bc43c0 'b' 'int'
+</code></pre> 
+   <br style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+   <span style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">通过clang -### -fsyntax-only -Xclang -ast-dump min.c查看实际执行命令。事实上跟使用clang -cc1是同样的。</span>
+   <br style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">參考资料：</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">1. 《Getting Started with LLVM Core Libraries》</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;">2.&nbsp; Code of clang</p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p style="color:rgb(51,51,51);font-family:verdana, Arial, Helvetica, sans-serif;font-size:14px;"><br></p> 
+   <p><font color="#333333"><span style="font-size:14px;">本文转自mfrbuaa博客园博客，原文链接：http://www.cnblogs.com/mfrbuaa/p/5138868.html，如需转载请自行联系原作者</span></font><br></p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>
