@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>INSERT DELAYED使用总结 « NotBeCN</title>
+  <meta name="description" content="             今天研究了下insert delayed这个特性。    背景RD反馈，他有一个异步的队列缓冲表，现在在做优化，看如果用insert delayed能不能提升性能？这个业务要求呢，本来就是异步插入到数据库的，所以并不是那么急着访问。听着，好像延迟插入也没什么不妥哈。环境：mysql 5....">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/17/weixin_33735077_90118006.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">INSERT DELAYED使用总结</h1>
+    <p class="post-meta">Jan 17, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>今天研究了下insert delayed这个特性。</p> 
+   <p><strong>背景</strong><br>RD反馈，他有一个异步的队列缓冲表，现在在做优化，看如果用insert delayed能不能提升性能？这个业务要求呢，本来就是异步插入到数据库的，所以并不是那么急着访问。听着，好像延迟插入也没什么不妥哈。<br>环境：mysql 5.6 innodb表<br>MySQL的这个特性只是听说过，没仔细研究过，趁这个机会研究下。</p> 
+   <p><strong>结论</strong><br>首先查了下官网资料：<br>MySQL的这个特性，是MySQL对标准SQL的一个扩展，从MySQL 3.22.15 引入，5.6已经不推荐使用，5.7已经不支持了（虽然能识别，但是已经被忽略掉，而且会生成ER_WARN_LEGACY_SYNTAX_CONVERTED警告），在后续的版本中会废弃掉。<br>5.1：<br>mysql&gt; show create table t2G<br><strong><em><em></em></em></strong><strong><em></em></strong><strong><em><em></em></em></strong><strong><em><em></em></em> 1. row </strong><strong><em><em></em></em></strong><strong><em></em></strong><strong><em><em></em></em></strong>**</p> 
+   <pre><code>   Table: t2</code></pre> 
+   <p>Create Table: CREATE TABLE <code>t2</code> (<br><code>id</code> int(11) DEFAULT NULL,<br><code>name</code> char(10) DEFAULT NULL<br>) ENGINE=InnoDB DEFAULT CHARSET=utf8<br>1 row in set (0.00 sec)</p> 
+   <p>mysql&gt; insert delayed into t2(id,name) values(1,'a');<br>ERROR 1616 (HY000): DELAYED option not supported for table ‘t2'</p> 
+   <p>5.6：<br>mysql&gt; show create table t1G<br><strong><em><em></em></em></strong><strong><em></em></strong><strong><em><em></em></em></strong><strong><em><em></em></em> 1. row </strong><strong><em><em></em></em></strong><strong><em></em></strong><strong><em><em></em></em></strong>**</p> 
+   <pre><code>   Table: t1</code></pre> 
+   <p>Create Table: CREATE TABLE <code>t1</code> (<br><code>id</code> int(11) DEFAULT NULL,<br><code>name</code> char(2) DEFAULT NULL<br>) ENGINE=MyISAM DEFAULT CHARSET=utf8<br>1 row in set (0.00 sec)</p> 
+   <p>mysql&gt; insert delayed into t1(id,name) values(1,'a'); <br>Query OK, 1 row affected, 1 warning (0.00 sec)</p> 
+   <table>
+    <thead>
+     <tr>
+      <th>mysql&gt; show warnings;</th>
+     </tr>
+    </thead>
+    <tbody>
+     <tr>
+      <td>Level</td> 
+      <td>Code</td> 
+      <td>Message</td> 
+     </tr>
+     <tr>
+      <td>Warning</td> 
+      <td>1287</td> 
+      <td>'INSERT DELAYED' is deprecated and will be removed in a future release. Please use INSERT instead</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>1 row in set (0.00 sec)</p> 
+   <p><strong>insert delayed研究</strong><br>insert delayed使用限制：</p> 
+   <ul>
+    <li>INSERT DELAYED works only with MyISAM, MEMORY, ARCHIVE, and BLACKHOLE tables. For engines that do not supportDELAYED, an error occurs.</li> 
+    <li>insert delayed 只适用于MyISAM、MEMORY、ARCHIVE、BLACKHOLE引擎的表，对于不支持的引擎会报错。</li> 
+    <li>An error occurs for INSERT DELAYED if used with a table that has been locked with LOCK TABLES because the insert must be handled by a separate thread, not by the session that holds the lock.</li> 
+    <li>insert delayed必须由单独的线程完成，如果线程已经持有lock tables锁，则insert delayed会报错。</li> 
+    <li>For MyISAM tables, if there are no free blocks in the middle of the data file, concurrent SELECT and INSERTstatements are supported. Under these circumstances, you very seldom need to use INSERT DELAYED with MyISAM.</li> 
+    <li>对于MyISAM表，如果在数据文件中没有空闲块，支持并发的select和insert。在这种情况下，你会很少需要使用insert delayed。</li> 
+    <li>INSERT DELAYED should be used only for INSERT statements that specify value lists. The server ignores DELAYED forINSERT ... SELECT or INSERT ... ON DUPLICATE KEY UPDATE statements.</li> 
+    <li>insert delayed 只适用于指定具体值的insert，对于insert...select...或insert...on duplicate update不支持。</li> 
+    <li>Because the INSERT DELAYED statement returns immediately, before the rows are inserted, you cannot useLAST_INSERT_ID() to get the AUTO_INCREMENT value that the statement might generate.</li> 
+    <li>insert delayed执行完会立马返回结果。但是insert delayed是缓存在内存中，并没有真正的执行，不能使用LAST_INSERT_ID()来获取表的自增键。</li> 
+    <li>DELAYED rows are not visible to SELECT statements until they actually have been inserted.</li> 
+    <li>delayed的行在未真正插入数据库前，不能使用select查出结果。</li> 
+    <li> <p>INSERT DELAYED is handled as a simple INSERT (that is, without the DELAYED option) whenever the value of binlog_format is STATEMENT or MIXED. (In the latter case, the statement does not trigger a switch to row-based logging, and so is logged using the statement-based format.)<br>This does not apply when using row-based binary logging mode (binlog_format set to ROW), in which INSERT DELAYED statements are always executed using the DELAYED option as specified, and logged as row-update events.</p> 
+     <ul>
+      <li></li>
+     </ul></li> 
+    <li>DELAYED is ignored on slave replication servers, so that INSERT DELAYED is treated as a normal INSERT on slaves. This is because DELAYED could cause the slave to have different data than the master.</li> 
+    <li>在从库上，delayed会被忽略。这是因为delayed可能会导致主从数据不一致。</li> 
+    <li>Pending INSERT DELAYED statements are lost if a table is write locked and ALTER TABLE is used to modify the table structure.</li> 
+    <li>如果表被写入索引，并且使用alter table来修改表结构，则挂起的insert delayed将会丢失。</li> 
+    <li>INSERT DELAYED is not supported for views.</li> 
+    <li>insert delayed不支持视图。</li> 
+    <li>INSERT DELAYED is not supported for partitioned tables.</li> 
+    <li>insert delayed不支持分区表。<br>The following describes in detail what happens when you use the DELAYED option to INSERT or REPLACE. In this description, the “thread” is the thread that received an INSERT DELAYED statement and “handler” is the thread that handles all INSERT DELAYED statements for a particular table.</li> 
+   </ul>
+   <p>下面详细描述当您使用INSERT或REPLACE的DELAYED选项时会发生什么情况。 在此描述中，“线程”是接收到INSERT DELAYED语句的线程，“处理程序”是处理特定表的所有INSERT DELAYED语句的线程。</p> 
+   <ul>
+    <li>When a thread executes a DELAYED statement for a table, a handler thread is created to process all DELAYEDstatements for the table, if no such handler already exists.</li> 
+    <li>当一个线程为一个表执行一个DELAYED语句时，如果没有这个处理程序，就会创建一个处理程序线程来处理表的所有DELAYED语句。</li> 
+    <li>The thread checks whether the handler has previously acquired a DELAYED lock; if not, it tells the handler thread to do so. The DELAYED lock can be obtained even if other threads have a READ or WRITE lock on the table. However, the handler waits for all ALTER TABLE locks or FLUSH TABLES statements to finish, to ensure that the table structure is up to date.</li> 
+    <li>线程检查处理程序以前是否获取了DELAYED锁; 如果没有，它会通知处理程序线程这样做。 即使其他线程在表上具有READ或WRITE锁，也可以获得DELAYED锁。 但是，处理程序将等待所有ALTER TABLE锁定或FLUSH TABLES语句完成，以确保表结构是最新的。</li> 
+    <li>The thread executes the INSERT statement, but instead of writing the row to the table, it puts a copy of the final row into a queue that is managed by the handler thread. Any syntax errors are noticed by the thread and reported to the client program.</li> 
+    <li>线程执行INSERT语句，但不是将行写入表中，而是将最后一行的副本放入由处理程序线程管理的队列中。 任何语法错误都被线程注意到并被报告给客户端程序。</li> 
+    <li>The client cannot obtain from the server the number of duplicate rows or the AUTO_INCREMENT value for the resulting row, because the INSERT returns before the insert operation has been completed. (If you use the C API, the mysql_info() function does not return anything meaningful, for the same reason.)</li> 
+    <li>客户端无法从服务器获取重复行数或结果行的AUTO_INCREMENT值，因为INSERT在真正的插入操作完成之前返回。 （如果使用C API，出于同样的原因，mysql_info（）函数不会返回任何有意义的内容。</li> 
+    <li>The binary log is updated by the handler thread when the row is inserted into the table. In case of multiple-row inserts, the binary log is updated when the first row is inserted.</li> 
+    <li>当行插入到表中时，二进制日志由处理程序线程更新。 在多行插入的情况下，插入第一行时更新二进制日志。</li> 
+    <li>Each time that delayed_insert_limit rows are written, the handler checks whether any SELECT statements are still pending. If so, it permits these to execute before continuing.</li> 
+    <li>每次写入delayed_insert_limit行时，处理程序都将检查是否有任何SELECT语句仍处于待处理状态。 如果是这样，它允许这些在继续之前执行。</li> 
+    <li>When the handler has no more rows in its queue, the table is unlocked. If no new INSERT DELAYED statements are received within delayed_insert_timeout seconds, the handler terminates.</li> 
+    <li>当处理程序的队列中没有更多的行时，表将被解锁。 如果在delayed_insert_timeout秒内没有收到新的INSERT DELAYED语句，则处理程序终止。</li> 
+    <li>If more than delayed_queue_size rows are pending in a specific handler queue, the thread requesting INSERT DELAYED waits until there is room in the queue. This is done to ensure that mysqld does not use all memory for the delayed memory queue.</li> 
+    <li>如果多于delayed_queue_size行在特定的处理程序队列中挂起，则请求INSERT DELAYED的线程将等待，直到队列中有空间。 这样做是为了确保mysqld不会将全部内存用于延迟内存队列。</li> 
+    <li>The handler thread shows up in the MySQL process list with delayed_insert in the Command column. It is killed if you execute a FLUSH TABLES statement or kill it with KILL thread_id. However, before exiting, it first stores all queued rows into the table. During this time it does not accept any new INSERT statements from other threads. If you execute an INSERT DELAYED statement after this, a new handler thread is created.</li> 
+    <li>处理程序线程显示在Command列中的delayed_insert的MySQL进程列表中。 如果你执行一个FLUSH TABLES语句或者用KILL thread_id杀死它，它就会被杀死。 但是，在退出之前，它首先将所有排队的行存储到表中。 在此期间，它不接受来自其他线程的任何新的INSERT语句。 如果在此之后执行INSERT DELAYED语句，则会创建一个新的处理程序线程。<br>This means that INSERT DELAYED statements have higher priority than normal INSERT statements if there is an INSERT DELAYED handler running. Other update statements have to wait until the INSERT DELAYED queue is empty, someone terminates the handler thread (with KILL thread_id), or someone executes a FLUSH TABLES.</li> 
+    <li>The following status variables provide information about INSERT DELAYED statements.<br>Status Variable</li> 
+   </ul>
+   <p>Meaning<br>Delayed_insert_threads<br>Number of handler threads <br>Delayed_writes<br>Number of rows written with INSERT DELAYED<br>Not_flushed_delayed_rows<br>Number of rows waiting to be written</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

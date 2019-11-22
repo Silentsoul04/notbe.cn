@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>《Pro SQL Server Internals, 2nd edition》CHAPTER 7 中的Clustered Index Design Considerations « NotBeCN</title>
+  <meta name="description" content="         &nbsp;   聚集索引设计注意事项   每次更改聚集索引键的值时，都会发生两件事。首先，SQLServer将行移动到聚集索引页链和数据文件中的不同位置。 其次，它更新行ID，即聚集索引键。行ID是存储的，需要在所有非聚集索引中进行更新。这在I/O方面可能很昂贵，尤其是在批量更新的情况下。此外...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/emmm00_90139992.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">《Pro SQL Server Internals, 2nd edition》CHAPTER 7 中的Clustered Index Design Considerations</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>&nbsp;</p> 
+  <p>聚集索引设计注意事项</p> 
+  <p>每次更改聚集索引键的值时，都会发生两件事。首先，SQLServer将行移动到聚集索引页链和数据文件中的不同位置。<br> 其次，它更新行ID，即聚集索引键。行ID是存储的，需要在所有非聚集索引中进行更新。这在I/O方面可能很昂贵，尤其是在批量更新的情况下。此外，它可以增加聚集索引的碎片，并且在行id大小增加的情况下，也可以增加非聚集索引的碎片。因此，最好有一个不改变键值的静态聚集索引。</p> 
+  <p>所有非聚集索引都使用聚集索引键作为行ID。太宽的聚集索引键会增加非聚集索引行的大小，并且需要更多空间来存储它们。因此，SQLServer在索引或范围扫描操作期间需要处理更多的数据页，这会降低索引的效率。</p> 
+  <p>在非唯一非聚集索引的情况下，行ID也以非叶索引级别存储，这反过来减少了每页的索引记录数量，并可能导致索引中额外的中间级别。即使非叶索引级别通常缓存在内存中，这也会在SQL Server每次遍历非聚集索引B-Tree时引入额外的逻辑读取。</p> 
+  <p>最后，较大的非聚集索引在缓冲池中使用更多空间，并在索引维护过程中引入更多开销。显然，不可能提供一个通用阈值来定义可应用于任何表的键的最大可接受大小。但是，作为一般规则，最好有一个窄的聚集索引键，并且索引键越小越好。</p> 
+  <p>将聚集索引定义为唯一也是有益的。这一点很重要的原因并不明显。考虑这样一个场景，在这种情况下，表没有唯一的聚集索引，并且您希望运行一个在执行计划中使用非聚集索引查找的查询。在这种情况下，如果非聚集索引中的行ID不是唯一的，SQL Server将不知道在键查找操作期间要选择哪个聚集索引行。</p> 
+  <p>SQLServer通过向非唯一聚集索引添加另一个名为uniquifier的可为空的整数列来解决这些问题。SQLServer为键值的第一次出现使用NULL填充uniquifier，并为插入到表中的每个后续副本自动递增键值。</p> 
+  <p>每个聚集索引键的可能重复数受整型域值的限制。具有相同聚集索引键的行不能超过2，147，483，648行。这是一个理论上的限制，而且创建具有如此低选择性的索引显然不是一个好主意。</p> 
+  <p>让我们看看非唯一聚集索引中的uniquifier引入的开销。清单7-1所示的代码创建了三个相同结构的不同表，并分别用65，536行填充它们。表dbo.UniqueCI是唯一定义了唯一聚集索引的表。表dbo.NonUniqueCINoDups没有任何重复的键值。最后，表dbo.nonUniqueCDups在索引中有大量重复项。</p> 
+  <p></p> 
+  <pre class="has">
+<code class="language-sql">create table dbo.UniqueCI
+(
+ KeyValue int not null,
+ ID int not null,
+ Data char(986) null,
+ VarData varchar(32) not null
+ constraint DEF_UniqueCI_VarData
+ default 'Data'
+);
+create unique clustered index IDX_UniqueCI_KeyValue
+on dbo.UniqueCI(KeyValue);
+create table dbo.NonUniqueCINoDups
+(
+ KeyValue int not null,
+ ID int not null,
+ Data char(986) null,
+ VarData varchar(32) not null
+ constraint DEF_NonUniqueCINoDups_VarData
+ default 'Data'
+);
+create /*unique*/ clustered index IDX_NonUniqueCINoDups_KeyValue
+on dbo.NonUniqueCINoDups(KeyValue);
+create table dbo.NonUniqueCIDups
+(
+ KeyValue int not null,
+ ID int not null,
+ Data char(986) null,
+ VarData varchar(32) not null
+ constraint DEF_NonUniqueCIDups_VarData
+ default 'Data'
+);
+create /*unique*/ clustered index IDX_NonUniqueCIDups_KeyValue
+on dbo.NonUniqueCIDups(KeyValue); 
+-- Populating data
+;with N1(C) as (select 0 union all select 0) -- 2 rows
+,N2(C) as (select 0 from N1 as T1 cross join N1 as T2) -- 4 rows
+,N3(C) as (select 0 from N2 as T1 cross join N2 as T2) -- 16 rows
+,N4(C) as (select 0 from N3 as T1 cross join N3 as T2) -- 256 rows
+,N5(C) as (select 0 from N4 as T1 cross join N4 as T2) -- 65,536 rows
+,IDs(ID) as (select row_number() over (order by (select null)) from N5)
+insert into dbo.UniqueCI(KeyValue, ID)
+ select ID, ID from IDs;
+insert into dbo.NonUniqueCINoDups(KeyValue, ID)
+ select KeyValue, ID from dbo.UniqueCI;
+insert into dbo.NonUniqueCIDups(KeyValue, ID)
+ select KeyValue % 10, ID from dbo.UniqueCI; </code></pre> 
+  <p>现在，让我们来看一下每个表的聚集索引的物理统计信息。这方面的代码如清单7-2所示，结果如图7-1所示。</p> 
+  <pre class="has">
+<code class="language-sql">select index_level, page_count, min_record_size_in_bytes as [min row size]
+ ,max_record_size_in_bytes as [max row size]
+ ,avg_record_size_in_bytes as [avg row size]
+from
+ sys.dm_db_index_physical_stats(db_id(), object_id(N'dbo.UniqueCI'), 1, null ,'DETAILED');
+select index_level, page_count, min_record_size_in_bytes as [min row size]
+ ,max_record_size_in_bytes as [max row size]
+ , avg_record_size_in_bytes as [avg row size]
+from
+ sys. dm_db_index_physical_stats(db_id(), object_id(N'dbo.NonUniqueCINoDups'), 1, null
+,'DETAILED');
+select index_level, page_count, min_record_size_in_bytes as [min row size]
+ ,max_record_size_in_bytes as [max row size]
+ ,avg_record_size_in_bytes as [avg row size]
+from
+ sys. dm_db_index_physical_stats(db_id(), object_id(N'dbo.NonUniqueCIDups'), 1, null
+,'DETAILED'); </code></pre> 
+  <p style="text-align:center;"><img alt="" class="has" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512141629124.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2VtbW0wMA==,size_16,color_FFFFFF,t_70"></p> 
+  <p>即使dbo.nonUniqueCINoDups表中没有重复的键值，仍有两个额外字节添加到行中。SQLServer在数据的可变长度部分存储一个统一符，这两个字节由可变长度数据偏移量数组中的另一个条目添加。</p> 
+  <p>在这种情况下，当聚集索引具有重复值时，单位值符会再添加四个字节，这意味着总开销为六个字节。</p> 
+  <p>值得一提的是，在某些边缘情况下，Uniquifier使用的额外存储空间可以减少数据页上的行数。我们的例子说明了这样一个条件。如您所见，dbo.UniqueCI使用的数据页比其他两个表少15%。</p> 
+  <p>现在，让我们看看Uniquifier如何影响非聚集索引。清单7-3所示的代码在所有三个表中创建非聚集索引。图7-2显示了这些索引的物理统计信息。</p> 
+  <pre class="has">
+<code class="language-sql">create nonclustered index IDX_UniqueCI_ID
+on dbo.UniqueCI(ID);
+create nonclustered index IDX_NonUniqueCINoDups_ID
+on dbo.NonUniqueCINoDups(ID);
+create nonclustered index IDX_NonUniqueCIDups_ID
+on dbo.NonUniqueCIDups(ID);
+select index_level, page_count, min_record_size_in_bytes as [min row size]
+ ,max_record_size_in_bytes as [max row size]
+ ,avg_record_size_in_bytes as [avg row size]
+from
+ sys. dm_db_index_physical_stats(db_id(), object_id(N'dbo.UniqueCI'), 2, null
+,'DETAILED');
+select index_level, page_count, min_record_size_in_bytes as [min row size]
+ ,max_record_size_in_bytes as [max row size]
+ ,avg_record_size_in_bytes as [avg row size] 
+from
+ sys. dm_db_index_physical_stats(db_id(), object_id(N'dbo.NonUniqueCINoDups'), 2, null
+,'DETAILED');
+select index_level, page_count, min_record_size_in_bytes as [min row size]
+ ,max_record_size_in_bytes as [max row size]
+ ,avg_record_size_in_bytes as [avg row size]
+from
+ sys. dm_db_index_physical_stats(db_id(), object_id(N'dbo.NonUniqueCIDups'), 2, null
+,'DETAILED'); </code></pre> 
+  <p style="text-align:center;"><img alt="" class="has" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512141919821.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2VtbW0wMA==,size_16,color_FFFFFF,t_70"></p> 
+  <p>dbo.nonUniqueCINoDups表中的非聚集索引没有开销。您可能还记得，SQLServer不会将偏移量信息存储在用于存储空数据的尾部列的可变长度偏移量数组中。尽管如此，uniquifier在dbo.nonUniqueCIDups表中引入了8个字节的开销，这8个字节由一个4字节的uniquifier值、一个2字节的可变长度数据偏移量数组条目和一个存储行中可变长度列数组的2字节条目组成。</p> 
+  <p>我们可以用下面的方法来总结Uniquifier的存储开销。对于将UNIquifier设置为NULL的行，如果索引至少有一个存储NOT NULL值的可变长度列，则会有两个字节的开销。该开销来自Uniquifier列的可变长度偏移量数组条目。否则没有开销。</p> 
+  <p>在填充Uniquifier的情况下，如果存在存储NOT NULL值的可变长度列，则开销为6个字节。否则，开销为8字节。</p> 
+  <p>如果希望聚集索引值中有大量重复项，则可以向索引中添加一个整数标识列作为最右边的列，从而使其唯一。与Uniquifier引入的最多8字节的不可预测存储开销相比，这为每行增加了4字节的可预测存储开销。当您按行的所有聚集索引列引用该行时，这也可以提高单个查找操作的性能。</p> 
+  <p>以最大限度地减少插入新行引起的索引碎片的方式设计聚集索引是有益的。实现这一点的方法之一是使聚集索引值不断增加。IDENTITY列上的索引就是这样一个例子。另一个示例是插入时使用当前系统时间填充的DateTime列。</p> 
+  <p>然而，不断增加的指数存在两个潜在问题。第一个问题与统计有关。正如您在第3章中了解到的，当直方图中没有参数值时，SQLServer中的遗留基数估计器会低估基数。除非您使用的是新的SQL Server 2014-2016基数估计器，否则您应将此行为考虑到系统的统计信息维护策略中，该估值器假定直方图以外的数据的分布与表中其他数据的分布相似。</p> 
+  <p>下一个问题更复杂。随着索引的不断增加，数据总是插入到索引的末尾。一方面，它可以防止页面分裂并减少碎片。另一方面，它可能导致热点，即在多个会话试图修改相同的数据页和/或分配新的页或区段时发生的序列化延迟。SQLServer不允许多个会话更新相同的数据结构，而是序列化这些操作。</p> 
+  <p>除非系统以非常高的速率收集数据，并且索引每秒处理数百个插入，否则热点通常不是问题。我们将在第27章“系统故障排除”中讨论如何检测此类问题。</p> 
+  <p>最后，如果一个系统有一组频繁执行的重要查询，那么考虑一个聚集索引可能是有益的，因为聚集索引可以优化这些查询。<br> 这消除了昂贵的密钥查找操作，并提高了系统的性能。</p> 
+  <p>尽管可以通过使用覆盖非聚集索引来优化此类查询，但这并不总是理想的解决方案。在某些情况下，它要求您创建非常宽的非聚集索引，这将占用磁盘和缓冲池中的大量存储空间。</p> 
+  <p>另一个重要因素是修改列的频率。将频繁修改的列添加到非聚集索引需要SQLServer在多个位置更改数据，这会对系统的更新性能产生负面影响，并增加阻塞。</p> 
+  <p>尽管如此，设计满足所有这些指导原则的聚集索引并不总是可能的。此外，您不应将这些指导原则视为绝对要求。您应该分析系统、业务需求、工作负载和查询，并选择对您有利的聚集索引，即使它们违反了其中的一些指导原则。</p> 
+  <h2>身份、序列和统一标识符</h2> 
+  <p>人们通常选择身份、序列和唯一标识符作为聚集索引键。和以往一样，这种方法有它自己的一套正反两方面的优点和缺点。</p> 
+  <p>在这些列上定义的聚集索引是唯一的、静态的和狭窄的。此外，恒等式和序列不断增加，从而减少了索引碎片。它们的理想用例之一是目录实体表。例如，可以考虑存储客户、文章或设备列表的表。这些表存储了数千行，甚至可能是几百万行，尽管数据是相对静态的，因此热点不是问题。此外，这些表通常由外键引用并在联接中使用。整数或bigint列上的索引非常紧凑和高效，这将提高查询的性能。</p> 
+  <p>我们将在第8章“约束”中更详细地讨论外键约束。</p> 
+  <p>在事务表的情况下，身份列或序列上的聚集索引效率较低，事务表以非常高的速率收集大量数据，这是因为它们引入了潜在的热点。</p> 
+  <p>另一方面，UniqueIdentifier很少是索引的好选择，无论是聚集的还是非聚集的。使用newid()函数生成的随机值极大地增加了索引碎片。此外，唯一标识符上的索引会降低批处理操作的性能。让我们来看一个例子，并创建两个表：一个在IDENTITY列上使用聚集索引，另一个在uniqueIDENTIFIER列上使用聚集索引。在下一步中，我们将在这两个表中插入65，536行。您可以在清单7-4中看到执行此操作的代码。</p> 
+  <pre class="has">
+<code class="language-sql">create table dbo.IdentityCI
+(
+ ID int not null identity(1,1),
+ Val int not null,
+ Placeholder char(100) null
+);
+create unique clustered index IDX_IdentityCI_ID
+on dbo.IdentityCI(ID);
+create table dbo.UniqueidentifierCI
+(
+ ID uniqueidentifier not null
+ constraint DEF_UniqueidentifierCI_ID
+ default newid(),
+ Val int not null,
+ Placeholder char(100) null,
+);
+create unique clustered index IDX_UniqueidentifierCI_ID
+on dbo.UniqueidentifierCI(ID)
+go
+;with N1(C) as (select 0 union all select 0) -- 2 rows
+,N2(C) as (select 0 from N1 as T1 cross join N1 as T2) -- 4 rows
+,N3(C) as (select 0 from N2 as T1 cross join N2 as T2) -- 16 rows
+,N4(C) as (select 0 from N3 as T1 cross join N3 as T2) -- 256 rows
+,N5(C) as (select 0 from N4 as T1 cross join N4 as T2) -- 65,536 rows
+,IDs(ID) as (select row_number() over (order by (select null)) from N5)
+insert into dbo.IdentityCI(Val)
+ select ID from IDs;
+;with N1(C) as (select 0 union all select 0) -- 2 rows
+,N2(C) as (select 0 from N1 as T1 cross join N1 as T2) -- 4 rows
+,N3(C) as (select 0 from N2 as T1 cross join N2 as T2) -- 16 rows
+,N4(C) as (select 0 from N3 as T1 cross join N3 as T2) -- 256 rows
+,N5(C) as (select 0 from N4 as T1 cross join N4 as T2) -- 65,536 rows
+,IDs(ID) as (select row_number() over (order by (select null)) from N5)
+insert into dbo.UniqueidentifierCI(Val)
+ select ID from IDs; </code></pre> 
+  <p>“My Computer(我的计算机)”上的执行时间和读取次数如表7-1所示。图7-3显示了这两个查询的执行计划。</p> 
+  <p style="text-align:center;"><img alt="" class="has" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512143159557.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2VtbW0wMA==,size_16,color_FFFFFF,t_70"></p> 
+  <p>如您所见，uniqueIdentifier列上的索引中还有另一个排序运算符。SQLServer在插入之前对随机生成的uniqueIdentifier值进行排序，这会降低查询的性能。</p> 
+  <p>让我们在表中插入另一批行，并检查索引碎片。执行此操作的代码如清单7-5所示。图7-4显示了查询的结果。</p> 
+  <pre class="has">
+<code>;with N1(C) as (select 0 union all select 0) -- 2 rows
+,N2(C) as (select 0 from N1 as T1 cross join N1 as T2) -- 4 rows
+,N3(C) as (select 0 from N2 as T1 cross join N2 as T2) -- 16 rows
+,N4(C) as (select 0 from N3 as T1 cross join N3 as T2) -- 256 rows
+,N5(C) as (select 0 from N4 as T1 cross join N4 as T2) -- 65,536 rows
+,IDs(ID) as (select row_number() over (order by (select null)) from N5)
+insert into dbo.IdentityCI(Val)
+ select ID from IDs;
+;with N1(C) as (select 0 union all select 0) -- 2 rows
+,N2(C) as (select 0 from N1 as T1 cross join N1 as T2) -- 4 rows
+,N3(C) as (select 0 from N2 as T1 cross join N2 as T2) -- 16 rows
+,N4(C) as (select 0 from N3 as T1 cross join N3 as T2) -- 256 rows
+,N5(C) as (select 0 from N4 as T1 cross join N4 as T2) -- 65,536 rows
+,IDs(ID) as (select row_number() over (order by (select null)) from N5) 
+insert into dbo.UniqueidentifierCI(Val)
+ select ID from IDs;
+select page_count, avg_page_space_used_in_percent, avg_fragmentation_in_percent
+from sys.dm_db_index_physical_stats(db_id(),object_id(N'dbo.IdentityCI'),1,null,'DETAILED');
+select page_count, avg_page_space_used_in_percent, avg_fragmentation_in_percent
+from sys.dm_db_index_physical_stats(db_id(),object_id(N'dbo.UniqueidentifierCI'),1,null
+,'DETAILED'); </code></pre> 
+  <p style="text-align:center;"><img alt="" class="has" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512143357928.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2VtbW0wMA==,size_16,color_FFFFFF,t_70"></p> 
+  <p>如您所见，uniqueIdentifier列上的索引非常零碎，与Identity列上的索引相比，它使用的数据页大约多40%。</p> 
+  <p>批量插入uniqueIdentifier列上的索引会在数据文件中的不同位置插入数据，这会导致大表的情况下产生大量随机的物理I/O。<br> 这会显著降低操作的性能。</p> 
+  <p>个人经验</p> 
+  <p>一段时间以前，我参与了一个系统的优化，该系统有一个250 GB的表，包含一个聚集索引和三个非聚集索引。非聚集索引之一是uniqueIdentifier列上的索引。通过删除此索引，我们能够将50，000行的批插入速度从45秒缩短到7秒。</p> 
+  <p>当您希望在uniqueIdentifier列上创建索引时，有两种常见的使用情形。第一个是支持跨多个数据库的值的唯一性。考虑一个分布式系统，其中的行可以插入到每个数据库中。开发人员通常使用uniqueIdentifier来确保每个键值在系统范围内都是唯一的。</p> 
+  <p>这种实现的关键要素是如何生成关键值。正如您已经看到的，使用newid()函数或在客户端代码中生成的随机值会对系统性能产生负面影响。但是，您可以使用NEWSEQUENTIALID()函数，该函数会生成唯一且通常不断增加的值(SQL Server会不时重置其基值)。使用NEWSEQUENTIALID()函数生成的uniqueIdentifier列上的索引类似于Identity列和Sequence列上的索引；但是，您应该记住，uniqueIdentifier数据类型使用16字节的存储空间，而不是4字节的int或8字节的bigint数据类型。</p> 
+  <p>作为一种替代解决方案，您可以考虑创建一个包含两列(InstallationId，Unique_ID_Inside_Installation)的复合索引。这两个列的组合确保了跨多个安装和数据库的唯一性，并使用比uniqueIdentifier更少的存储空间。您可以使用整数标识或序列来生成UNIQUE_ID_INTER_INSTUTION值，这将减少索引的碎片。</p> 
+  <p>在需要在数据库中的所有实体之间生成唯一键值的情况下，可以考虑跨所有实体使用单个序列对象。<br> 此方法满足要求，但使用的数据类型比uniqueIdentifier小。</p> 
+  <p>另一个常见的用例是安全性，其中uniqueIdentifier值用作安全令牌或随机对象ID。不幸的是，在此场景中不能使用NEWSEQUENTIALID()函数，因为可以猜测该函数返回的下一个值。</p> 
+  <p>此场景中一个可能的改进是使用checksum()函数创建一个计算列，然后对其进行索引，而不在uniqueIdentifier列上创建索引。<br> 代码如清单7-6所示。</p> 
+  <pre class="has">
+<code class="language-sql">create table dbo.Articles
+(
+ ArticleId int not null identity(1,1),
+ ExternalId uniqueidentifier not null
+ constraint DEF_Articles_ExternalId
+ default newid(),
+ ExternalIdCheckSum as checksum(ExternalId),
+ /* Other Columns */
+);
+create unique clustered index IDX_Articles_ArticleId
+on dbo.Articles(ArticleId);
+create nonclustered index IDX_Articles_ExternalIdCheckSum
+on dbo.Articles(ExternalIdCheckSum); 
+</code></pre> 
+  <p>可以为计算列编制索引，而不对其进行持久化。</p> 
+  <p>尽管IDX_TERMS_ExternalIdCheckSum索引将被严重分割，但与uniqueIdentifier列上的索引(一个4字节的键与16个字节的键)相比，它将更加紧凑。它还提高了批处理操作的性能，因为排序速度更快，这也需要更少的内存才能进行。</p> 
+  <p>您必须记住的一点是，checksum()函数的结果并不一定是唯一的。您应该在查询中包含这两个谓词，如清单7-7所示。</p> 
+  <pre class="has">
+<code class="language-sql">select ArticleId /* Other Columns */
+from dbo.Articles
+where checksum(@ExternalId) = ExternalIdCheckSum and ExternalId = @ExternalId </code></pre> 
+  <p>在需要索引大于900/1700字节(非聚集索引键的最大小)的字符串列的情况下，可以使用相同的技术。即使这样的索引不支持范围扫描操作，它也可以用于点查找。</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

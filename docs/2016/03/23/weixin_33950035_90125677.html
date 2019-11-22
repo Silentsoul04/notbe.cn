@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>浅谈linux的死锁检测 【转】 « NotBeCN</title>
+  <meta name="description" content="                       转自：     http://www.blog.chinaunix.net/uid-25942458-id-3823545.html               死锁：就是多个进程（≥2）因为争夺资源而相互等待的一种现象，若无外力推动，将无法继续运行下去。     注...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/03/23/weixin_33950035_90125677.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">浅谈linux的死锁检测 【转】</h1>
+    <p class="post-meta">Mar 23, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="Blog_wz1"> 
+    <div class="O">
+     转自：
+     <a href="http://www.blog.chinaunix.net/uid-25942458-id-3823545.html" rel="nofollow">http://www.blog.chinaunix.net/uid-25942458-id-3823545.html</a> 
+    </div> 
+    <div class="O">
+     死锁：就是多个进程（≥2）因为争夺资源而相互等待的一种现象，若无外力推动，将无法继续运行下去。
+     <br>注意，只有在多进程或者多线程之间或者他们与中断之间相互通讯或者共享资源才有可能发生死锁，单线程或者进程之间没有联系的话，一般不会发生死锁。锁的种类比较多，这里主要说自旋锁和信号量。两者的差别就在于前者获得不到资源时的动作是不断的资源（即忙转浪费cpu的cycles）而后者则表现为睡眠等待。
+     <br>死锁的基本情况如下：
+     <br>（一）、自旋锁
+     <br>&nbsp; &nbsp;1 递归使用：同一个进程或线程中，申请自旋锁，但没有释放之前又再次申请，一定产生死锁。
+     <br>&nbsp; &nbsp; 2 进程得到自旋锁后阻塞，睡眠：在获得自旋锁之后调用copy_from_user()、copy_to_ser()、和kmalloc（）等有可能引起阻塞的函数。
+     <br>&nbsp; &nbsp; 3 中断中没有关中断，或着因为申请未释放的自旋锁：在中断中使用自旋锁是可以的，应该在进入中断的时候关闭中断，不然中断再次进入的时候，中断处理函数会自旋等待自旋锁可以再次使用。或者在进程中申请了自旋锁，释放前进入中断处理函数，中断处理函数又申请同样的自旋锁，这将导致死锁。
+     <br>&nbsp; &nbsp; 4 中断与中断下半部共享资源和中断与进程共享资源死锁出现的情况类似。
+     <br>&nbsp; &nbsp; 5 中断下半部与进程共享资源和中断与进程共享资源死锁出现的情况类似。
+     <br>&nbsp;
+     <br>&nbsp; &nbsp; 自旋锁三种状态：
+     <br>&nbsp; &nbsp; 自旋锁保持期间是抢占失效的（内核不允许被抢占）。
+     <br>&nbsp; &nbsp; 1 单CPU且内核不可抢占：
+     <br>&nbsp; &nbsp; &nbsp; 自旋锁的所有操作都是空。不会引起死锁，内核进程间不存在并发操作进程，进程与中断仍然可能共享数据，存在并发操作，此时内核自旋锁已经失去效果。
+     <br>&nbsp; &nbsp; 2 单CPU且内核可抢占：
+     <br>&nbsp; &nbsp; &nbsp; 当获得自旋锁的时候，禁止内核抢占直到释放锁为止。此时可能存在死锁的情况是参考自旋锁可能死锁的一般情况。
+     <br>&nbsp; &nbsp; &nbsp; 禁止内核抢占并不代表不会进行内核调度，如果在获得自旋锁后阻塞或者主动调度，内核会调度其他进程运行，被调度的内核进程返回用户空间时，会进行用户抢占，此时调用的进程再次申请上次未释放的自旋锁时，会一直自旋。但是内核被禁止抢占，从而造成死锁。
+     <br>&nbsp; &nbsp; &nbsp; 内核被禁止抢占，但此时中断并没被禁止，内核进程可能因为中断申请自旋锁而死锁。
+     <br>&nbsp; &nbsp; 3 多CPU且内核可抢占：
+     <br>&nbsp; &nbsp; &nbsp; 这才是是真正的SMP的情况。当获得自旋锁的时候，禁止内核抢占直到释放锁为止。
+     <br>（二）信号量
+     <br>&nbsp; &nbsp;&nbsp;1 递归使用：&nbsp;同理，在同一个进程或线程中，申请了信号量，但没有释放之前又再次申请，进程会一直睡眠，这种情况一定死锁。
+     <br>&nbsp; &nbsp; 2 进程得到信号量后阻塞，睡眠：由于获取到信号量的进程阻塞或者随眠，其他在获取不到后信号量也会进入睡眠等待，这种情况可能造成死锁。
+     <br>&nbsp; &nbsp; 3 中断中申请信号量：由于信号量在获取不到自旋锁后会进入睡眠等待，中断处理函数不允许睡眠，如果睡眠，中断将无法返回。
+     <br>&nbsp; &nbsp; 4 中断下半部申请信号量：中断下半部允许睡眠，这种情况不会造成死锁。
+     <br>&nbsp; &nbsp; 5 俩个进程相互等待资源：进程1获得信号量A，需要信号量B，在进程1需要信号量B之前进程2获得信号量B，需要信号量A。进程1、2因相互等待资源而死锁。
+     <br>
+     <br>上面是死锁的基本情况和类型。linux本身就提供了检测死锁的机制，如下：
+     <br>（一）D状态死锁检测
+     <br>所谓D状态死锁：进程长时间（系统默认配置120秒）处于TASK_UNINTERRUPTIBLE&nbsp;睡眠状态，这种状态下进程不响应异步信号。如：进程与外设硬件的交互（如read），通常使用这种状态来保证进程与设备的交互过程不被打断，否则设备可能处于不可控的状态。
+     <br>对于这种死锁的检测linux提供的是hungtask机制，主要内容集中在Hung_task.c文件中。具体实现原理如下：
+     <br>&nbsp;1）、系统创建normal级别的khungtaskd内核线程，内核线程每120秒检查一次，检查的内容：遍历所有的线程链表，发现D状态的任务，就判断自最近一次切换以来是否还有切换发生，若是有，则返回。若没有发生切换，则把任务的所有调用栈等信息打印出来。
+     <br>2）、具体实现过程如下：
+     <br>首先，hung_task_init创建一个名为khungtaskd的内核线程，内核线程的工作由watchdog来完成。
+     <br>
+     <div> 
+      <div class="codeheads"> 
+       <p>点击(此处)折叠或打开</p> 
+      </div> 
+      <div class="codeText">
+       <ol>
+        <li>static&nbsp;int&nbsp;__init hung_task_init(void)</li> 
+        <li>{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;atomic_notifier_chain_register(&amp;panic_notifier_list,&nbsp;&amp;panic_block);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;watchdog_task&nbsp;=&nbsp;kthread_run(watchdog,&nbsp;NULL,&nbsp;"khungtaskd");</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;return 0;</li> 
+        <li>}</li> 
+       </ol>
+      </div> 
+     </div> 其次，我们看watchdog的实现：
+     <br>
+     <br>
+     <div> 
+      <div class="codeheads"> 
+       <p>点击(此处)折叠或打开</p> 
+      </div> 
+      <div class="codeText">
+       <ol>
+        <li>static&nbsp;int&nbsp;watchdog(void&nbsp;*dummy)</li> 
+        <li>{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;//将内核线程设置为normal级别</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;set_user_nice(current,&nbsp;0);</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;for&nbsp;(&nbsp;;&nbsp;;&nbsp;)&nbsp;{</li> 
+        <li>//设置hungtask的校验时间间隔，用户可以修改这个时间，默认为120秒</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;unsigned long timeout&nbsp;=&nbsp;sysctl_hung_task_timeout_secs;</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;while&nbsp;(schedule_timeout_interruptible(timeout_jiffies(timeout)))</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;timeout&nbsp;=&nbsp;sysctl_hung_task_timeout_secs;</li> 
+        <li> </li> 
+        <li>//核心的检查代码在下面的函数中实现。&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;check_hung_uninterruptible_tasks(timeout);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;return 0;</li> 
+        <li>}</li> 
+       </ol>
+      </div> 
+     </div> 最后，我们分析一下hungtask的核心实现check_hung_uninterruptible_tasks，如下：
+     <br>
+     <br>
+     <div> 
+      <div class="codeheads"> 
+       <p>点击(此处)折叠或打开</p> 
+      </div> 
+      <div class="codeText">
+       <ol>
+        <li>static void check_hung_uninterruptible_tasks(unsigned long timeout)</li> 
+        <li>{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;max_count&nbsp;=&nbsp;sysctl_hung_task_check_count;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;batch_count&nbsp;=&nbsp;HUNG_TASK_BATCHING;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;task_struct&nbsp;*g,&nbsp;*t;</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;/*</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;If&nbsp;the system crashed already then all bets are off,</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;do&nbsp;not&nbsp;report extra hung tasks:</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</li> 
+        <li>//判断系统是否已经die、oops或者panic了，若是系统已经crash了，就无需再做hungtask了。</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(test_taint(TAINT_DIE)&nbsp;||&nbsp;did_panic)</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return;</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;rcu_read_lock();</li> 
+        <li>//检查进程的列表，寻找D状态的任务</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;do_each_thread(g,&nbsp;t)&nbsp;{</li> 
+        <li>//判断用户是否设置了检查进程的数量，若是已经达到用户设置的限制，就跳出循环。</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(!max_count--)</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto&nbsp;unlock;</li> 
+        <li>//判断是否到达批处理的个数，做这个批处理的目的就是因为整个检查是在关抢占的前提下进行的，可能进程列表的进程数很多，为了防止hungtask垄断cpu，所以，做了一个批处理的限制，到达批处理的数量后，就放一下权，给其他的进程运行的机会。</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(!--batch_count)&nbsp;{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;batch_count&nbsp;=&nbsp;HUNG_TASK_BATCHING;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rcu_lock_break(g,&nbsp;t);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;Exit&nbsp;if&nbsp;t&nbsp;or&nbsp;g was unhashed during refresh.&nbsp;*/</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(t-&gt;state&nbsp;==&nbsp;TASK_DEAD&nbsp;||&nbsp;g-&gt;state&nbsp;==&nbsp;TASK_DEAD)</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto&nbsp;unlock;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;use&nbsp;"=="&nbsp;to skip the TASK_KILLABLE tasks waiting on NFS&nbsp;*/</li> 
+        <li>//如果进程处于D状态，就开始把相关的信息显示出来了。</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(t-&gt;state&nbsp;==&nbsp;TASK_UNINTERRUPTIBLE)</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;check_hung_task(t,&nbsp;timeout);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;} while_each_thread(g,&nbsp;t);</li> 
+        <li>&nbsp;unlock:</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;rcu_read_unlock();</li> 
+        <li>}</li> 
+       </ol>
+      </div> 
+     </div> 
+     <br>
+     <br>
+     <div> 
+      <div class="codeheads"> 
+       <p>点击(此处)折叠或打开</p> 
+      </div> 
+      <div class="codeText">
+       <ol>
+        <li>static void check_hung_task(struct&nbsp;task_struct&nbsp;*t,&nbsp;unsigned long timeout)</li> 
+        <li>{</li> 
+        <li>//统计进程的切换次数=主动切换次数+被动切换次数</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;unsigned long switch_count&nbsp;=&nbsp;t-&gt;nvcsw&nbsp;+&nbsp;t-&gt;nivcsw;</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;/*</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;Ensure the task is&nbsp;not&nbsp;frozen.</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;Also,&nbsp;when a freshly created task is scheduled once,&nbsp;changes</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;its state to TASK_UNINTERRUPTIBLE without having ever been</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;switched&nbsp;out&nbsp;once,&nbsp;it musn</li> 
+       </ol>
+      </div> 
+     </div> 怎么样，经过上面的分析，可以发现其实原理很简单。
+     <br>（二）R状态死锁检测
+     <br>所谓R状态死锁：进程长时间（系统默认配置60秒）处于
+     <strong>TASK_RUNNING</strong>&nbsp;状态垄断cpu而不发生切换，一般情况下是进程关抢占后长时候干活，有时候可能进程关抢占后处于死循环或者睡眠后，这样就造成系统异常。
+     <br>对于这种死锁的检测机制linux提供的机制是softlockup。主要集中在softlockup.c文件中。
+     <br>1）、系统创建一个fifo的进程，此进程周期性的清一下时间戳（per cpu），而系统的时钟中断中会被softlockup挂入一个钩子（softlockup_tick）,这个钩子就是每个时钟中断到来的时候都检查是否每cpu的时间戳被touch了，若在阀值60秒内都没有被touch，系统就打印调试信息。
+     <br>2）、让我们分析一下具体的实现：
+     <br>首先，系统初始化的时候为每个cpu创建一个watchdog线程，这个线程是fifo的。具体实现如下：
+     <br>
+     <br>
+     <div> 
+      <div class="codeheads"> 
+       <p>点击(此处)折叠或打开</p> 
+      </div> 
+      <div class="codeText">
+       <ol>
+        <li>static&nbsp;int&nbsp;__init spawn_softlockup_task(void)</li> 
+        <li>{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;void&nbsp;*cpu&nbsp;=&nbsp;(void&nbsp;*)(long)smp_processor_id();</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;err;</li> 
+        <li>//可以通过启动参数禁止softlockup</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(nosoftlockup)</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return 0;</li> 
+        <li>//下面两个回调函数就是为每个cpu创建一个watchdog线程</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;err&nbsp;=&nbsp;cpu_callback(&amp;cpu_nfb,&nbsp;CPU_UP_PREPARE,&nbsp;cpu);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(err&nbsp;==&nbsp;NOTIFY_BAD)&nbsp;{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;BUG();</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return 1;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;cpu_callback(&amp;cpu_nfb,&nbsp;CPU_ONLINE,&nbsp;cpu);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;register_cpu_notifier(&amp;cpu_nfb);</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;atomic_notifier_chain_register(&amp;panic_notifier_list,&nbsp;&amp;panic_block);</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;return 0;</li> 
+        <li>}</li> 
+       </ol>
+      </div> 
+     </div> 
+     <br>
+     <div> 
+      <div class="codeheads"> 
+       <p>点击(此处)折叠或打开</p> 
+      </div> 
+      <div class="codeText">
+       <ol>
+        <li>static&nbsp;int&nbsp;__cpuinit</li> 
+        <li>cpu_callback(struct&nbsp;notifier_block&nbsp;*nfb,&nbsp;unsigned long action,&nbsp;void&nbsp;*hcpu)</li> 
+        <li>{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;hotcpu&nbsp;=&nbsp;(unsigned long)hcpu;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;task_struct&nbsp;*p;</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;switch&nbsp;(action)&nbsp;{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;case CPU_UP_PREPARE:</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;case CPU_UP_PREPARE_FROZEN:</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;BUG_ON(per_cpu(softlockup_watchdog,&nbsp;hotcpu));</li> 
+        <li>//创建watchdog内核线程</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;p&nbsp;=&nbsp;kthread_create(watchdog,&nbsp;hcpu,&nbsp;"watchdog/%d",&nbsp;hotcpu);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(IS_ERR(p))&nbsp;{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_ERR&nbsp;"watchdog for %i failed\n",&nbsp;hotcpu);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return NOTIFY_BAD;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+        <li>//将时间戳清零</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;per_cpu(softlockup_touch_ts,&nbsp;hotcpu)&nbsp;=&nbsp;0;</li> 
+        <li>//设置watchdog</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;per_cpu(softlockup_watchdog,&nbsp;hotcpu)&nbsp;=&nbsp;p;</li> 
+        <li>//绑定cpu</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;kthread_bind(p,&nbsp;hotcpu);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;case CPU_ONLINE:</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;case CPU_ONLINE_FROZEN:</li> 
+        <li>//唤醒watchdog这个内核线程&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;wake_up_process(per_cpu(softlockup_watchdog,&nbsp;hotcpu));</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break;</li> 
+        <li>......</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;return NOTIFY_OK;</li> 
+        <li>}</li> 
+       </ol>
+      </div> 
+     </div> 其次，我们看一下内核线程watchdog的实现，如下：
+     <br>
+     <br>
+     <div> 
+      <div class="codeheads"> 
+       <p>点击(此处)折叠或打开</p> 
+      </div> 
+      <div class="codeText">
+       <ol>
+        <li>static&nbsp;int&nbsp;watchdog(void&nbsp;*__bind_cpu)</li> 
+        <li>{</li> 
+        <li>//将watchdog设置为fifo</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;sched_param param&nbsp;=&nbsp;{&nbsp;.sched_priority&nbsp;=&nbsp;MAX_RT_PRIO-1 };</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;sched_setscheduler(current,&nbsp;SCHED_FIFO,&nbsp;?m);</li> 
+        <li>//清狗，即touch时间戳</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;initialize timestamp&nbsp;*/</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;__touch_softlockup_watchdog();</li> 
+        <li>//当前进程可以被信号打断</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;set_current_state(TASK_INTERRUPTIBLE);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;/*</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;Run briefly once per second to reset the softlockup timestamp.</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;If&nbsp;this&nbsp;gets delayed&nbsp;for&nbsp;more than 60 seconds then the</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;debug-printout triggers&nbsp;in&nbsp;softlockup_tick().</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;while&nbsp;(!kthread_should_stop())&nbsp;{</li> 
+        <li>//核心实现就是touch时间戳，让出cpu</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__touch_softlockup_watchdog();</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;schedule();</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(kthread_should_stop())</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;break;</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;set_current_state(TASK_INTERRUPTIBLE);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;}</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;__set_current_state(TASK_RUNNING);</li> 
+        <li> </li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;return 0;</li> 
+        <li>}</li> 
+       </ol>
+      </div> 
+     </div> 最后，softlockup在时钟中断中挂上一个钩子softlockup_tick，每个时钟中断都来检查watchdog这个fifo进程是否有touch过时间戳，若是60秒都没有touch过，就向系统上报异常信息了，如下：
+     <br>
+     <br>
+     <div> 
+      <div class="codeheads"> 
+       <p>点击(此处)折叠或打开</p> 
+      </div> 
+      <div class="codeText">
+       <ol>
+        <li>void softlockup_tick(void)</li> 
+        <li>{</li> 
+        <li>//取得当前的cpu</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;int&nbsp;this_cpu&nbsp;=&nbsp;smp_processor_id();</li> 
+        <li>//获得当前cpu的时间戳</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;unsigned long touch_ts&nbsp;=&nbsp;per_cpu(softlockup_touch_ts,&nbsp;this_cpu);</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;unsigned long print_ts;</li> 
+        <li>//获得进程当前的寄存器组</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;pt_regs&nbsp;*regs&nbsp;=&nbsp;get_irq_regs();</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;unsigned long now;</li> 
+        <li>//如果没有打开softlockup，就将这个cpu对应的时间戳清零</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;Is detection switched off?&nbsp;*/</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(!per_cpu(softlockup_watchdog,&nbsp;this_cpu)&nbsp;||&nbsp;softlockup_thresh&nbsp;&lt;=&nbsp;0)&nbsp;{</li> 
+        <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;Be sure we don</li> 
+       </ol>
+      </div> 
+     </div> 怎么样，说白了，也不难，就是两条线并行工作：一条线是fifo级别的内核线程负责清时间戳，另一条线是时钟中断定期检查时间戳是否有被清过，若是到了阀值都没有被请过，则打印softlockup的信息。
+     <br>（三）长时间关中断检测
+     <br>长时间关中断检测可以有几种实现机制，而利用nmi watchdog来检查这种长时间关中断情况，是比较简单的。其原理是需要软硬件配合，硬件通常提供一个计数器（可以递增也可以递减），当记数到某个值得时候，系统就硬件复位。而nmi watchdog就定期（小于这个计数到达系统复位的时间）的去清一下系统的计数，若是某个进程长时间关中断，则可能导致nmi watchdog得不到清，最终系统复位。
+    </div> 
+   </div> 
+   <div class="Blog_con2_1 Blog_con3_2">
+    &nbsp;
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

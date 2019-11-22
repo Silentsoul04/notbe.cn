@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux信号机制 － 用户堆栈和内核堆栈的变化【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://itindex.net/detail/16418-linux-%E4%BF%A1%E5%8F%B7-%E5%A0%86%E6%A0%88    此文只简单分析发送信号给用户程序后，用户堆栈和内核堆栈的变化。没有分析实时信号，当然整个过程基本一致。很多参考了＜情景分析＞...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/08/23/weixin_34128237_90131621.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux信号机制 － 用户堆栈和内核堆栈的变化【转】</h1>
+    <p class="post-meta">Aug 23, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://itindex.net/detail/16418-linux-%E4%BF%A1%E5%8F%B7-%E5%A0%86%E6%A0%88" rel="nofollow">http://itindex.net/detail/16418-linux-%E4%BF%A1%E5%8F%B7-%E5%A0%86%E6%A0%88</a></p> 
+   <p>此文只简单分析发送信号给用户程序后，用户堆栈和内核堆栈的变化。没有分析实时信号，当然整个过程基本一致。很多参考了＜情景分析＞，所以有些代码和现在的内核可能不同，比如RESTORE_ALL，但大体的机制是类似的。<br><br></p> 
+   <div class="cnblogs_code"> 
+    <pre><span style="color:#800080;">1</span><span style="color:#000000;">. 一个信号小例子
+
+hex@Gentoo </span>~/<span style="color:#000000;">signal $ cat sigint.c 
+#include </span>&lt;stdio.h&gt;<span style="color:#000000;">
+#include </span>&lt;stdlib.h&gt;<span style="color:#000000;">
+#include </span>&lt;signal.h&gt;
+
+<span style="color:#0000ff;">void</span> sig_int(<span style="color:#0000ff;">int</span><span style="color:#000000;"> signo)
+{
+    printf(</span><span style="color:#800000;">"</span><span style="color:#800000;">hello\n</span><span style="color:#800000;">"</span><span style="color:#000000;">);
+}
+
+</span><span style="color:#0000ff;">int</span><span style="color:#000000;"> main()
+{
+    </span><span style="color:#0000ff;">if</span>(signal(SIGINT, sig_int) ==<span style="color:#000000;"> SIG_ERR){
+        printf(</span><span style="color:#800000;">"</span><span style="color:#800000;">can't catch SIGINT\n</span><span style="color:#800000;">"</span><span style="color:#000000;">);
+        exit(</span>-<span style="color:#800080;">1</span><span style="color:#000000;">);
+    }
+
+    </span><span style="color:#0000ff;">for</span><span style="color:#000000;">(;;)
+        ;
+
+    </span><span style="color:#0000ff;">return</span> <span style="color:#800080;">0</span><span style="color:#000000;">;
+}
+
+</span><span style="color:#800080;">2</span><span style="color:#000000;">. 用户堆栈里发生的故事
+
+</span><span style="color:#800080;">2.1</span> 编译运行该程序,并设置断点在sig_int函数开头(<span style="color:#800080;">0x80482e8</span><span style="color:#000000;">)，并设置SIGINT信号的处理方式
+hex@Gentoo </span>~/signal $ gdb ./<span style="color:#000000;">sigint
+(gdb) b </span>*<span style="color:#800080;">0x80482e8</span><span style="color:#000000;">
+Breakpoint </span><span style="color:#800080;">1</span> at <span style="color:#800080;">0x80482e8</span>: file sigint.c, line <span style="color:#800080;">6</span><span style="color:#000000;">.
+(gdb) handle SIGINT noprint pass
+SIGINT </span><span style="color:#0000ff;">is</span><span style="color:#000000;"> used by the debugger.
+Are you sure you want to change it</span>?<span style="color:#000000;"> (y or n) y
+Signal        Stop    Print    Pass to program    Description
+SIGINT        No    No    Yes        Interrupt
+(gdb) r
+Starting program: </span>/home/gj/signal/<span style="color:#000000;">sigint 
+
+</span><span style="color:#800080;">2.2</span> 向该程序发送信号: kill -<span style="color:#000000;">INT 此程序的pid号
+hex@Gentoo </span>~/signal $ kill -INT <span style="color:#800080;">4639</span>
+
+<span style="color:#800080;">2.3</span><span style="color:#000000;"> 该程序收到信号后停在断点处
+Breakpoint </span><span style="color:#800080;">1</span>, sig_int (signo=<span style="color:#800080;">2</span>) at sigint.c:<span style="color:#800080;">6</span>
+<span style="color:#800080;">6</span><span style="color:#000000;">    {
+(gdb) i r esp
+esp            </span><span style="color:#800080;">0xbfffe7ec</span>    <span style="color:#800080;">0xbfffe7ec</span><span style="color:#000000;">
+(gdb) x</span>/40a <span style="color:#800080;">0xbfffe7ec</span>
+<span style="color:#800080;">0xbfffe7ec</span>:    <span style="color:#800080;">0xb7fff400</span>    <span style="color:#800080;">0x2</span>    <span style="color:#800080;">0x33</span>    <span style="color:#800080;">0x0</span>
+<span style="color:#800080;">0xbfffe7fc</span>:    <span style="color:#800080;">0x7b</span>    <span style="color:#800080;">0x7b</span>    <span style="color:#800080;">0x8048930</span> &lt;__libc_csu_init&gt;    <span style="color:#800080;">0x80488f0</span> &lt;__libc_csu_fini&gt;
+<span style="color:#800080;">0xbfffe80c</span>:    <span style="color:#800080;">0xbfffed58</span>    <span style="color:#800080;">0xbfffed40</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>
+<span style="color:#800080;">0xbfffe81c</span>:    <span style="color:#800080;">0xbfffec18</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>
+<span style="color:#800080;">0xbfffe82c</span>:    <span style="color:#800080;">0x8048336</span> &lt;main+<span style="color:#800080;">58</span>&gt;    <span style="color:#800080;">0x73</span>    <span style="color:#800080;">0x213</span>    <span style="color:#800080;">0xbfffed40</span>
+<span style="color:#800080;">0xbfffe83c</span>:    <span style="color:#800080;">0x7b</span>    <span style="color:#800080;">0xbfffead0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>
+<span style="color:#800080;">0xbfffe84c</span>:    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>
+<span style="color:#800080;">0xbfffe85c</span>:    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>
+<span style="color:#800080;">0xbfffe86c</span>:    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>
+<span style="color:#800080;">0xbfffe87c</span>:    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span>    <span style="color:#800080;">0x0</span><span style="color:#000000;">
+栈上的内容为信号栈sigframe：
+根据此结构可以知道：
+</span><span style="color:#800080;">1</span><span style="color:#000000;">). 返回地址0xb7fff400，它指向vdso里的sigreturn
+(gdb) x</span>/10i <span style="color:#800080;">0xb7fff400</span>
+   <span style="color:#800080;">0xb7fff400</span> &lt;__kernel_sigreturn&gt;:    pop    %<span style="color:#000000;">eax
+   </span><span style="color:#800080;">0xb7fff401</span> &lt;__kernel_sigreturn+<span style="color:#800080;">1</span>&gt;:    mov    $<span style="color:#800080;">0x77</span>,%<span style="color:#000000;">eax
+   </span><span style="color:#800080;">0xb7fff406</span> &lt;__kernel_sigreturn+<span style="color:#800080;">6</span>&gt;:    <span style="color:#0000ff;">int</span>    $<span style="color:#800080;">0x80</span><span style="color:#000000;">
+这个地址根据内核的不同而不同，我的内核版本是2.</span><span style="color:#800080;">6.38</span><span style="color:#000000;">。
+</span><span style="color:#800080;">2</span>). 信号处理程序完成后，会回到 eip = <span style="color:#800080;">0x8048336</span><span style="color:#000000;"> 的地址继续执行。
+
+
+</span><span style="color:#800080;">2.4</span><span style="color:#000000;"> 执行完sig_int函数后，进入了__kernel_sigreturn，接着回到了代码0x8048336处，一切恢复了正常。
+(gdb) x</span>/<span style="color:#000000;">5i $pc
+</span>=&gt; <span style="color:#800080;">0x8048336</span> &lt;main+<span style="color:#800080;">58</span>&gt;:    jmp    <span style="color:#800080;">0x8048336</span> &lt;main+<span style="color:#800080;">58</span>&gt;<span style="color:#000000;">
+(gdb) i r esp
+esp            </span><span style="color:#800080;">0xbfffed40</span>    <span style="color:#800080;">0xbfffed40</span><span style="color:#000000;">
+
+在用户层我们能看到的只有上面这么多信息了，可能有一个地方不能理解：在上面过程c中 从0xbfffe7ec起那一块栈上的内容从哪来的？（正常情况下堆栈esp应该一直指向在过程d中显示的esp值0xbfffed40）
+
+现在来看看在上面这些现象之下，内核的堆栈发生了怎样的变化。
+
+</span><span style="color:#800080;">3</span><span style="color:#000000;">. 内核堆栈里发生的故事
+</span><span style="color:#800080;">3.1</span><span style="color:#000000;"> 发信号时 
+在 </span><span style="color:#800080;">2.2</span> 里当执行kill -INT 4639后，pid为4639的程序（也就是我们运行的 ./sigint）会收到一个信号，但是信号实际都是在内核里实现的。每个进程（这里只讲进程的情况，线程类似，线程有一个tid）都有一个pid，与此pid对应有一个结构 task_struct ，在task_struct里有一个变量 <span style="color:#0000ff;">struct</span><span style="color:#000000;"> sigpending pending，当该进程收到信号时，并不会立即作出反应，只是让内核把这个信号记在了此变量里（它里面是一个链表结构）。当然，此时与内核堆栈还没有多大关系。
+
+</span><span style="color:#800080;">3.2</span><span style="color:#000000;"> 检测信号
+  如果只记录了信号，但没有相应反应，那有什么用啊。一个进程在什么 情况下会检测信号的存在呢？在</span>&lt;情景分析&gt;<span style="color:#000000;">里说到了：“在中断机制中，处理器的硬件在每条指令结束时都要检测是否有中断请求的存在。信号机制是纯软件的，当然不能依靠硬件来检测信号的到来。同时，要在每条指令结束时都来检测显然是不现实的，甚至是不可能的。所以对信号的检测机制是：每当从系统调用，中断处理或异常处理返回到用户空间的前夕；还有就是当进程被从睡眠中唤醒（必定是在系统调用中）的时候，此时若发现有信号在等待就要提前从系统调用返回。总而言之，不管是正常返回还是提前返回，在返回到用户空间的前夕总是要检测信号的存在并作出反应。”
+
+  因此，对收到的信号做出反应的时间是 从内核返回用户空间的前夕，那么有那些情况会让程序进入内核呢？答案是中断，异常和系统调用。简单了解一下它们发生时内核堆栈的变化。
+
+  </span><span style="color:#008000;">//</span><span style="color:#008000;">-----中断，异常，系统调用 : 开始 </span>
+   <span style="color:#800080;">1</span>)在用户空间发生中断时，CPU会自动在内核空间保存用户堆栈的SS， 用户堆栈的ESP， EFLAGS, 用户空间的CS, EIP, 中断号 - <span style="color:#800080;">256</span>
+   | 用户堆栈的SS | 用户堆栈的ESP | EFLAGS | 用户空间的CS | EIP | 中断号 － <span style="color:#800080;">256</span><span style="color:#000000;"> 
+   进入内核后，会进行一个SAVE_ALL，这样内核栈上的内容为：
+   </span>| 用户堆栈的SS | 用户堆栈的ESP | EFLAGS | 用户空间的CS | EIP | 中断号 － <span style="color:#800080;">256</span> | ES | DS | EAX | EBP | EDI | ESI | EDX | ECX |<span style="color:#000000;"> EBX
+
+   好了，一切都处理完时，内核jmp到RESTORE_ALL（它是一个宏，例：在x86_32体系结构下，</span>/usr/src/kernel/arch/<span style="color:#800080;">286</span>/kernel/<span style="color:#000000;">entry_32.S文件里包含该宏的定义）
+
+   RESTORE做的工作，从它的代码里就可以看出来了：   
+   首先把栈上的 ES </span>| DS | EAX | EBP | EDI | ESI | EDX | ECX |<span style="color:#000000;"> EBX pop到对应的寄存器里
+   然后将esp ＋ </span><span style="color:#800080;">4</span> 把 “中断号 － <span style="color:#800080;">256</span><span style="color:#000000;">” pop掉 
+   此时内核栈上的内容为：
+   </span>| 用户堆栈的SS | 用户堆栈的ESP | EFLAGS | 用户空间的CS |<span style="color:#000000;"> EIP 
+   最后执行iret指令，此时CPU会从内核栈上取出SS, ESP, ELFGAS, CS, EIP，然后接着运行。
+
+   </span><span style="color:#800080;">2</span><span style="color:#000000;">) 在用户空间发生异常时，CPU自动保存在内核栈的内容为：
+   </span>| 用户堆栈的SS | 用户堆栈的ESP | EFLAGS | 用户空间的CS | EIP |<span style="color:#000000;"> 出错代码 error_code
+   （注：CPU只是在进入异常时才知道是否应该把出错代码压入堆栈（为什么</span>?<span style="color:#000000;">），而从异常处理通过iret指令返回时已经时过境迁，CPU已经无从知当初发生异常的原因，因此不会自动跳过这一项，而要靠相应的异常处程序对堆栈加以调整，使得在CPU开始执行iret指令时堆栈顶部是返回地址）
+
+   进入内核后，没有进行SAVE_ALL，而是进入相应的异常处理函数（这个函数是包装后的，真正的处理函数在后面）（在此函数里会把真正的处理函数的地址push到栈上），然后jmp到各种异常处理所共用的程序入口error_code，它会像SAVE_ALL那样保存相应的寄存器（没有保存ES），此时内核空间上的内容为：
+   </span>| 用户堆栈的SS | 用户堆栈的ESP | EFLAGS | 用户空间的CS | EIP | 出错代码 error_code | 相应异常处理函数入口 | DS | EAX | EBP | EDI | ESI | EDX | ECX |<span style="color:#000000;"> EBX
+   （注：如果没有出错代码，则此值为0）
+
+   最后结束时与中断类似（RESTORE_ALL）。
+
+   </span><span style="color:#800080;">3</span><span style="color:#000000;">) 发生系统调用时，CPU自动保存在内核栈的内容为:
+   </span>| 用户堆栈的SS | 用户堆栈的ESP | EFLAGS | 用户空间的CS |<span style="color:#000000;"> EIP 
+   为了与中断和异常的栈一致，在进入系统调用入口（ENTRY(system_call)）后会首先push </span>%<span style="color:#000000;">eax，然后进行SAVE_ALL，此时内核栈上的内容为
+   </span>| 用户堆栈的SS | 用户堆栈的ESP | EFLAGS | 用户空间的CS | EIP | EAX | ES | DS | EAX | EBP | EDI | ESI | EDX | ECX |<span style="color:#000000;"> EBX
+  
+   最后结束时与中断类似（RESTORE_ALL）。
+   </span><span style="color:#008000;">//</span><span style="color:#008000;">-----中断，异常，系统调用 : 结束</span>
+<span style="color:#000000;">
+   中断，异常，系统调用这部分有一点遗漏的地方：检测信号的时机就是紧挨着RESTORE_ALL之前发生的。
+
+</span><span style="color:#800080;">3.3</span><span style="color:#000000;"> 对检测到的信号做出反应
+  如果检测到有要处理的信号时，就要开始做一些准备工作了，此时内核里的内容为（进入内核现场时的内容）
+  </span>| 用户堆栈的SS1 | 用户堆栈的ESP1 | EFLAGS1 | 用户空间的CS1 | EIP1 | ? | ES1 | DS1 | EAX1 | EBP1 | EDI1 | ESI1 | EDX1 | ECX1 |<span style="color:#000000;"> EBX1
+  （注：？的值有三个选择：中断号 － </span><span style="color:#800080;">256</span><span style="color:#000000;">／出错代码 error_code／出错代码 error_code） 
+  假设将要处理的信号对应的信号处理程序是用户自己设置的，即本文中SIGINT对应的信号处理程序sig_int。
+  现在要做的事情是让cpu去执行信号处理程序sig_int，但是执行前需要做好准备工作：
+  </span><span style="color:#800080;">3.3</span>.<span style="color:#800080;">1</span><span style="color:#000000;">  setup_frame
+  在用户空间设置好信号栈(</span><span style="color:#0000ff;">struct</span><span style="color:#000000;"> sigframe)(假设设置好栈后esp的值为sigframe_esp，在本文中其值为0xbfffe7ec)，即在2.3里看到的栈内容。
+  注：</span><span style="color:#0000ff;">struct</span><span style="color:#000000;"> sigframe里至少包含以下内容：
+  用户堆栈的SS1， 用户堆栈的ESP1， EFLAGS1， 用户空间的CS1， EIP1， ES1， DS1， EAX1， EBP1， EDI1， ESI1， EDX1， ECX1， EBX1 
+
+  </span><span style="color:#800080;">3.3</span>.<span style="color:#800080;">2</span><span style="color:#000000;"> 设置即将运行的eip的值为信号处理函数sig_int的地址（为0x80482e8），并设置用户ESP的值为sigframe_esp(为0xbfffe7ec)，这是通过修改内核栈里的EIP和ESP的值实现的，因为在从系统调用里iret时，会从内核栈里取EIP，ESP。
+  这时内核栈的内核为:
+  </span>| 用户堆栈的SS1 | <span style="color:#800080;">0xbfffe7ec</span> | EFLAGS1 | 用户空间的CS1 | <span style="color:#800080;">0x80482e8</span> | ? | ES1 | DS1 | EAX1 | EBP1 | EDI1 | ESI1 | EDX1 | ECX1 |<span style="color:#000000;"> EBX1
+  
+  最后，进行RESTORE_ALL，内核栈上的内容为：
+  </span>| 用户堆栈的SS1 | <span style="color:#800080;">0xbfffe7ec</span> | EFLAGS1 | 用户空间的CS1 | <span style="color:#800080;">0x80482e8</span><span style="color:#000000;">
+  
+  RESTORE_ALL里执行完iret后，寄存器内容为： EIP为0x80482e8(即sig_int),esp为0xbfffe7ec 。 于是用户空间到了步骤 </span><span style="color:#800080;">2.3</span>
+
+<span style="color:#800080;">3.4</span><span style="color:#000000;"> 信号处理程序完成以后
+  </span><span style="color:#800080;">2.3</span> -&gt; <span style="color:#800080;">2.4</span><span style="color:#000000;">，进入了sig_return系统调用，在sig_return里，内核栈的内容为（每个名字后面加一个2以便与前面的1区分）
+  </span>| 用户堆栈的SS2 | 用户堆栈的ESP2 | EFLAGS2 | 用户空间的CS2 | EIP2 | ? | ES2 | DS2 | EAX2 | EBP2 | EDI2 | ESI2 | EDX2 | ECX2 |<span style="color:#000000;"> EBX2
+  sig_return要做的主要工作就是根据用户栈里sigframe的值修改内核栈里的内容，使内核栈变为:
+  </span>| 用户堆栈的SS1 | 用户堆栈的ESP1 | EFLAGS1 | 用户空间的CS1 | EIP1 | ? | ES1 | DS1 | EAX1 | EBP1 | EDI1 | ESI1 | EDX1 | ECX1 |<span style="color:#000000;"> EBX1
+                                                  
+  至此内核栈里的内容和进行信号处理前一样了。经过RESTORE_ALL后，用户堆栈里的内容也和以前一样（主要指ESP的值一样）。 
+
+  </span><span style="color:#800000;">"</span><span style="color:#800000;">kill -INT 4639</span><span style="color:#800000;">"</span> 只是一段小插曲。程序从原处开始运行。</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

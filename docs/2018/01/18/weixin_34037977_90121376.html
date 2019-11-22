@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>自建hadoop集群迁移到EMR之数据迁移篇 « NotBeCN</title>
+  <meta name="description" content="             自建集群要迁移到EMR集群，往往需要迁移已有数据。本文主要介绍hdfs数据和hive meta数据如何迁移。    前置    已按需求创建好EMR集群。    迁移hdfs数据    主要依靠distcp,核心是打通网络，确定hdfs参数和要迁移内容，测速，迁移。    网络    需...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/18/weixin_34037977_90121376.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">自建hadoop集群迁移到EMR之数据迁移篇</h1>
+    <p class="post-meta">Jan 18, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>自建集群要迁移到EMR集群，往往需要迁移已有数据。本文主要介绍hdfs数据和hive meta数据如何迁移。</p> 
+   <h1>前置</h1> 
+   <p>已按需求创建好EMR集群。</p> 
+   <h1>迁移hdfs数据</h1> 
+   <p>主要依靠distcp,核心是打通网络，确定hdfs参数和要迁移内容，测速，迁移。</p> 
+   <h2>网络</h2> 
+   <p>需要自建集群和EMR各个节点网络互通。同为VPC网络只需要同一个安全组，不同的安全组需要设置安全组互通。</p> 
+   <p>如果自建集群是经典网络，EMR集群是vpc，网络访问需要设置CLASSICLINK.参见<a href="https://yq.aliyun.com/articles/175011" rel="nofollow">文档</a>,详情可以咨询ECS客服。</p> 
+   <p>设置后可以在新集群节点上ssh 老集群节点确定网络连通情况，distcp操作如果有xx 节点无法连接xx节点的异常，说明没有连通，需要继续设置。</p> 
+   <h2>hdfs权限配置确认</h2> 
+   <p>hdfs有权限设置，确定老集群是否有acl规则，是否要同步，检查dfs.permissions.enabled 和dfs.namenode.acls.enabled的配置新老集群是否一致，按照实际需要修改。</p> 
+   <p>如果有acl规则要同步，distcp参数要加-p同步权限参数。如果distcp操作提示xx集群不支持acl，说明对应集群没配置。新集群没配置可以修改配置并重启NM。旧集群不支持，说明旧集群根本就没有acl方面的设置，也不需要同步。</p> 
+   <h2>同步参数</h2> 
+   <p>一般在新集群上运行同步，这样同步的作业可以在新集群上运行，对老集群影响较小。</p> 
+   <p>distcp<a href="https://hadoop.apache.org/docs/current/hadoop-distcp/DistCp.html" rel="nofollow">参数细节</a>，一般命令格式如下：<br><code> hadoop distcp -Ddfs.replication=3 -pbugpcax -m 1000 -bandwidth 30 hdfs://oldclusterip:8020 /user/hive/warehouse /user/hive/ </code><br>注意事项：</p> 
+   <ol>
+    <li>hdfs://oldclusterip:8020写老集群nameode ip，多个namenode写当前active的。</li> 
+    <li>指定了副本数3，如想保留原有副本数-p后加r如-prbugpcax。如果不同步权限和acl，-p后去掉p和a。</li> 
+    <li>-m指定map数，和集群规模，数据量有关。比如集群有2000核cpu，就可以指定2000个map。 -bandwidth指定单个map的同步速度，是靠控制副本复制速度实现的，是大概值。<br>4.迁移整体速度受集群间带宽，集群规模影响。同时文件越多，checksum需要的时间越长。如果迁移数据量大，可以先试着同步几个目录评估一下整体时间。如果只能在指定时间段内同步，可以将目录切为几个小目录，依次同步。</li> 
+   </ol>
+   <p>5.如果迁移过程中老集群还有写入，可以用-udpate再将变化同步过来。<br>6.一般完全同步，需要有个短暂的业务停写，以启用双写双算或直接将业务切换到新集群上。</p> 
+   <h1>hive meta数据同步</h1> 
+   <p>hive meta数据同步，本质是hive meta db，一般是mysql db的数据同步。和一般的mysql数据同步相比，要注意location改变，和hive版本对齐。</p> 
+   <h2>meta db设置</h2> 
+   <p>meta数据较多时，一般推荐用rds作为meta db。自建集群可能已有一个rds db，由于location不同，一般需要新建一个数据库。最佳实践是跟EMR集群在一个可用区，一个vpc 安全组下新建一个rds 数据库。</p> 
+   <p>登录新集群master节点（如果是ha集群两个master都需要），修改/usr/local/emr/emr-agent/run/meta_db_info.json，把里面的use_local_meta_db设置为false，meta数据库信息的链接地址、用户名和密码换成新建rds的信息。然后重启hive组件的metaserver。</p> 
+   <p>初始化meta的表信息：<br>···<br>cd /usr/lib/hive-current/bin<br>./schematool - initSchema -dbType mysql<br>···</p> 
+   <h2>location</h2> 
+   <p>hive的表，分区等信息是有location信息的，带dfs nameservices前缀，如hdfs://mycluster:8020/，而EMR集群的nameservices前缀是统一的emr-cluster,所以需要订正。订正的最佳方式是先导出数据<code>mysqldump --databases hivemeta --single-transaction -u root –p &gt; hive_databases.sql</code>,用sed替换hdfs://oldcluster:8020/为hdfs://emr-cluster/ ,再导入新db中。<br><code>mysql hivemeta -p &lt; hive_databases.sql</code></p> 
+   <h2>版本对齐</h2> 
+   <p>EMR的hive版本一般是当前社区最新的稳定版，自建集群hive版本可能会更老，所以导入的旧版本数据可能不能直接使用。需要执行hive的升级脚本，<a href="https://github.com/apache/hive/tree/master/metastore/scripts/upgrade/mysql" rel="nofollow">地址</a>。例如hive从1.2升级到2.3.0，需要依次执行upgrade-1.2.0-to-2.0.0.mysql.sql，upgrade-2.0.0-to-2.1.0.mysql.sql，upgrade-2.1.0-to-2.2.0.mysql.sql，upgrade-2.2.0-to-2.3.0.mysql.sql。脚本主要是建表，加字段，改内容，如有表已存在，字段已存在的异常可以忽略。</p> 
+   <h2>验证</h2> 
+   <p>meta数据全部订正后，就可以重启metaserver了。命令行<code>hive</code>，查询库和表，查询数据，验证正确性。</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

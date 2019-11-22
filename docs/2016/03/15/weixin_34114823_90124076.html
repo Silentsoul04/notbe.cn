@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>《Linux内核设计与实现》读书笔记（十一）- 定时器和时间管理【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/wang_yb/archive/2013/05/10/3070373.html    系统中有很多与时间相关的程序（比如定期执行的任务，某一时间执行的任务，推迟一段时间执行的任务），因此，时间的管理对于linux来说非常重要。    &...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/03/15/weixin_34114823_90124076.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">《Linux内核设计与实现》读书笔记（十一）- 定时器和时间管理【转】</h1>
+    <p class="post-meta">Mar 15, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.cnblogs.com/wang_yb/archive/2013/05/10/3070373.html" rel="nofollow">http://www.cnblogs.com/wang_yb/archive/2013/05/10/3070373.html</a></p> 
+   <p>系统中有很多与时间相关的程序（比如定期执行的任务，某一时间执行的任务，推迟一段时间执行的任务），因此，时间的管理对于linux来说非常重要。</p> 
+   <p>&nbsp;</p> 
+   <p><strong>主要内容：</strong></p> 
+   <ul>
+    <li>系统时间</li> 
+    <li>定时器</li> 
+    <li>定时器相关概念</li> 
+    <li>定时器执行流程</li> 
+    <li>实现程序延迟的方法</li> 
+    <li>定时器和延迟的例子</li> 
+   </ul>
+   <p>&nbsp;</p> 
+   <h3>1. 系统时间</h3> 
+   <p>系统中管理的时间有2种：实际时间和定时器。</p> 
+   <h4>1.1&nbsp; 实际时间</h4> 
+   <p>实际时间就是现实中钟表上显示的时间，其实内核中并不常用这个时间，主要是用户空间的程序有时需要获取当前时间，</p> 
+   <p>所以内核中也管理着这个时间。</p> 
+   <p>&nbsp;</p> 
+   <p>实际时间的获取是在开机后，内核初始化时从<strong>RTC</strong>读取的。</p> 
+   <p>内核读取这个时间后就将其放入内核中的&nbsp;<strong>xtime</strong>&nbsp;变量中，并且在系统的运行中不断更新这个值。</p> 
+   <p><strong>注：</strong>RTC就是实时时钟的缩写，它是用来存放系统时间的设备。一般和BIOS一样，由主板上的电池供电的，所以即使关机也可将时间保存。</p> 
+   <p>&nbsp;</p> 
+   <p>实际时间存放的变量&nbsp;<strong>xtime</strong>&nbsp;在文件&nbsp;<em>kernel/time/timekeeping.c</em>中。</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>/* 按照16位对齐，其实就是2个long型的数据 */
+struct timespec xtime __attribute__ ((aligned (16)));
+
+/* timespec结构体的定义如下， 参考 &lt;linux/time.h&gt;  */
+struct timespec {
+    __kernel_time_t    tv_sec;            /* seconds */
+    long        tv_nsec;        /* nanoseconds */
+};
+
+/* _kernel_time_t 定义如下 */
+typedef long        __kernel_time_t;</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>系统读写&nbsp;<strong>xtime</strong>&nbsp;时用的就是顺序锁。</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>/* 写入 xtime 参考 do_sometimeofday 方法 */
+int do_settimeofday(struct timespec *tv)
+{
+/* 省略 。。。。 */
+    write_seqlock_irqsave(&amp;xtime_lock, flags); /* 获取写锁 */
+/* 更新 xtime */
+    write_sequnlock_irqrestore(&amp;xtime_lock, flags); /* 释放写锁 */
+/* 省略 。。。。 */
+    return 0;
+}
+
+/* 读取 xtime 参考 do_gettimeofday 方法 */
+void do_gettimeofday(struct timeval *tv)
+{
+    struct timespec now;
+
+    getnstimeofday(&amp;now); /* 就是在这个方法中获取读锁，并读取 xtime */
+    tv-&gt;tv_sec = now.tv_sec;
+    tv-&gt;tv_usec = now.tv_nsec/1000;
+}
+
+void getnstimeofday(struct timespec *ts)
+{
+/* 省略 。。。。 */
+
+/* 顺序锁中读锁来循环获取 xtime，直至读取过程中 xtime 没有被改变过 */
+    do {
+        seq = read_seqbegin(&amp;xtime_lock);
+
+        *ts = xtime;
+        nsecs = timekeeping_get_ns();
+
+        /* If arch requires, add in gettimeoffset() */
+        nsecs += arch_gettimeoffset();
+
+    } while (read_seqretry(&amp;xtime_lock, seq));
+/* 省略 。。。。 */
+}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>上述场景中，写锁必须要优先于读锁(因为&nbsp;<strong>xtime</strong>&nbsp;必须及时更新)，而且写锁的使用者很少(一般只有系统定期更新<strong>xtime</strong>的线程需要持有这个锁)。</p> 
+   <p>这正是 顺序锁的应用场景。</p> 
+   <p>&nbsp;</p> 
+   <h4>1.2 定时器</h4> 
+   <p>定时器是内核中主要使用的时间管理方法，通过定时器，可以有效的调度程序的执行。</p> 
+   <p>动态定时器是内核中使用比较多的定时器，下面重点讨论的也是动态定时器。</p> 
+   <p>&nbsp;</p> 
+   <h3>2. 定时器</h3> 
+   <p>内核中的定时器有2种，静态定时器和动态定时器。</p> 
+   <p>静态定时器一般执行了一些周期性的固定工作：</p> 
+   <ul>
+    <li>更新系统运行时间</li> 
+    <li>更新实际时间</li> 
+    <li>在SMP系统上，平衡各个处理器上的运行队列</li> 
+    <li>检查当前进程是否用尽了自己的时间片，如果用尽，需要重新调度。</li> 
+    <li>更新资源消耗和处理器时间统计值</li> 
+   </ul>
+   <p>&nbsp;</p> 
+   <p>动态定时器顾名思义，是在需要时（一般是推迟程序执行）动态创建的定时器，使用后销毁（一般都是只用一次）。</p> 
+   <p>一般我们在内核代码中使用的定时器基本都是动态定时器，下面重点讨论动态定时器相关的概念和使用方法。</p> 
+   <p>&nbsp;</p> 
+   <h3>3. 定时器相关概念</h3> 
+   <p>定时器的使用中，下面3个概念非常重要：</p> 
+   <ol>
+    <li>HZ</li> 
+    <li>jiffies</li> 
+    <li>时间中断处理程序</li> 
+   </ol>
+   <p>&nbsp;</p> 
+   <h4>3.1 HZ</h4> 
+   <p>节拍率(HZ)是时钟中断的频率，表示的一秒内时钟中断的次数。</p> 
+   <p>比如 HZ=100 表示一秒内触发100次时钟中断程序。</p> 
+   <p>&nbsp;</p> 
+   <p>HZ的值一般与体系结构有关，x86 体系结构一般定义为 100，参考文件<em>&nbsp;include/asm-generic/param.h</em></p> 
+   <p>HZ值的大小的设置过程其实就是平衡 精度和性能 的过程，并不是HZ值越高越好。</p> 
+   <table border="0">
+    <tbody>
+     <tr>
+      <td valign="top"> <p align="center"><strong>HZ值</strong></p> </td> 
+      <td valign="top"> <p align="center"><strong>优势</strong></p> </td> 
+      <td valign="top"> <p align="center"><strong>劣势</strong></p> </td> 
+     </tr>
+     <tr>
+      <td valign="top">高HZ</td> 
+      <td valign="top">时钟中断程序运行的更加频繁，依赖时间执行的程序更加精确，&nbsp;<br>对资源消耗和系统运行时间的统计更加精确。</td> 
+      <td valign="top">时钟中断执行的频繁，增加系统负担&nbsp;<br>时钟中断占用的CPU时间过多</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p>此外，有一点需要注意，内核中使用的HZ可能和用户空间中定义的HZ值不一致，为了避免用户空间取得错误的时间，</p> 
+   <p>内核中也定义了 USER_HZ，即用户空间使用的HZ值。</p> 
+   <p>一般来说，USER_HZ 和 HZ 都是相差整数倍，内核中通过函数&nbsp;<strong>jiffies_to_clock_t</strong>&nbsp;来将内核来将内核中的 jiffies转为 用户空间 jiffies</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>/* 参见文件： kernel/time.c  *
+//*
+ * Convert jiffies/jiffies_64 to clock_t and back.
+ */
+clock_t jiffies_to_clock_t(unsigned long x)
+{
+#if (TICK_NSEC % (NSEC_PER_SEC / USER_HZ)) == 0
+# if HZ &lt; USER_HZ
+    return x * (USER_HZ / HZ);
+# else
+    return x / (HZ / USER_HZ);
+# endif
+#else
+    return div_u64((u64)x * TICK_NSEC, NSEC_PER_SEC / USER_HZ);
+#endif
+}
+EXPORT_SYMBOL(jiffies_to_clock_t);</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>&nbsp;</p> 
+   <h4>3.2 jiffies</h4> 
+   <p>jiffies用来记录自系统启动以来产生的总节拍数。比如系统启动了 N 秒，那么 jiffies就为 N×HZ</p> 
+   <p>jiffies的相关定义参考头文件&nbsp;<strong>&lt;linux/jiffies.h&gt;</strong>&nbsp;&nbsp;<em>include/linux/jiffies.h</em></p> 
+   <div class="cnblogs_code"> 
+    <pre>/* 64bit和32bit的jiffies定义如下 */
+extern u64 __jiffy_data jiffies_64;
+extern unsigned long volatile __jiffy_data jiffies;</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>使用定时器时一般都是以jiffies为单位来延迟程序执行的，比如延迟5个节拍后执行的话，执行时间就是 jiffies+5</p> 
+   <p>32位的jiffies的最大值为 2^32-1，在使用时有可能会出现回绕的问题。</p> 
+   <p>比如下面的代码：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>unsigned long timeout = jiffies + HZ/2; /* 设置超时时间为 0.5秒 */
+
+while (timeout &lt; jiffies)
+{
+    /* 还没有超时，继续执行任务 */
+}
+
+/* 执行超时后的任务 */</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>正常情况下，上面的代码没有问题。当jiffies接近最大值的时候，就会出现回绕问题。</p> 
+   <p>由于是<strong>unsinged long</strong>类型，所以jiffies达到最大值后会变成0然后再逐渐变大，如下图所示：</p> 
+   <p><a href="https://images0.cnblogs.com/blog/83005/201305/10075541-95313de661534d89974b4467486ed5f2.png" rel="nofollow"><img title="unsigned_jiffies" src="https://yqfile.alicdn.com/img_d9e0d427f9200ee4d0d9e1aa51c7c4bf.png" alt="unsigned_jiffies" width="804" height="104"></a></p> 
+   <p>&nbsp;</p> 
+   <p>所以在上述的循环代码中，会出现如下情况：</p> 
+   <p><a href="https://images0.cnblogs.com/blog/83005/201305/10075542-8125a5242642415e8d91258926deaa6e.png" rel="nofollow"><img title="jiffies_rewind" src="https://yqfile.alicdn.com/img_ad252a72ef063ee50860463ea3a20e17.png" alt="jiffies_rewind" width="804" height="111"></a></p> 
+   <ol>
+    <li>循环中第一次比较时，jiffies = J1，没有超时</li> 
+    <li>循环中第二次比较时，jiffies = J2，实际已经超时了，但是由于jiffies超过的最大值后又从0开始，所以J2远远小于timeout</li> 
+    <li>while循环会执行很长时间(&gt; 2^32-1 个节拍)不会结束，几乎相当于死循环了</li> 
+   </ol>
+   <p>&nbsp;</p> 
+   <p>为了回避回扰的问题，可以使用<strong>&lt;linux/jiffies.h&gt;</strong>头文件中提供的&nbsp;<strong>time_after</strong>，<strong>time_before</strong>等宏</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>#define time_after(a,b)        \
+    (typecheck(unsigned long, a) &amp;&amp; \
+     typecheck(unsigned long, b) &amp;&amp; \
+     ((long)(b) - (long)(a) &lt; 0))
+#define time_before(a,b)    time_after(b,a)
+
+#define time_after_eq(a,b)    \
+    (typecheck(unsigned long, a) &amp;&amp; \
+     typecheck(unsigned long, b) &amp;&amp; \
+     ((long)(a) - (long)(b) &gt;= 0))
+#define time_before_eq(a,b)    time_after_eq(b,a)</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>上述代码的原理其实就是将&nbsp;<strong>unsigned long</strong>&nbsp;类型转换为&nbsp;<strong>long</strong>&nbsp;类型来避免回扰带来的错误，</p> 
+   <p><strong>long</strong>&nbsp;类型超过最大值时变化趋势如下：</p> 
+   <p><a href="https://images0.cnblogs.com/blog/83005/201305/10075542-e6e974f29a8b46a3a202b31acf2c9056.png" rel="nofollow"><img title="signed_jiffies" src="https://yqfile.alicdn.com/img_671d055c5a93eb5a54ad8f1acd9f6c84.png" alt="signed_jiffies" width="804" height="124"></a></p> 
+   <p>&nbsp;</p> 
+   <p><strong>long</strong>&nbsp;型的数据的回绕会出现在 2^31-1 变为 -2^32 的时候，如下图所示：</p> 
+   <p><a href="https://images0.cnblogs.com/blog/83005/201305/10075543-dc3a73ecb64e40e29299d6eba8d04a11.png" rel="nofollow"><img title="long_rewind" src="https://yqfile.alicdn.com/img_fa364c6055dfc084beedaba5eb56480c.png" alt="long_rewind" width="804" height="114"></a></p> 
+   <ol>
+    <li>第一次比较时，jiffies = J1，没有超时</li> 
+    <li>第二次比较时，jiffies = J2，一般 J2 是负数&nbsp;<br>理论上 (long)timeout - (long)J2 = 正数 - 负数 = 正数（result）&nbsp;<br>但是，这个正数（result）一般会大于 2^31 - 1，所以long型的result又发生了一次回绕，变成了负数。&nbsp;<br>除非timeout和J2之间的间隔 &gt; 2^32 个节拍，result的值才会为正数(注1)。</li> 
+   </ol>
+   <p><strong>注1</strong>：result的值为正数时，必须是在result的值 小于 2^31-1 的情况下，大于 2^31-1 会发生回绕。</p> 
+   <p><a href="https://images0.cnblogs.com/blog/83005/201305/10075543-4879a18c9b6c4addbe4f260a4bace383.png" rel="nofollow"><img title="long_result" src="https://yqfile.alicdn.com/img_53eb56c3eec2bfd35e1bf0a201f758df.png" alt="long_result" width="804" height="197"></a></p> 
+   <p>上图中 X + Y 表示timeout 和 J2之间经过的节拍数。</p> 
+   <p>result 小于 2^31-1 ，也就是 timeout - J2 &lt; 2^31 – 1</p> 
+   <p>timeout 和 -J2 表示的节拍数如上图所示。(因为J2是负数，所有-J2表示上图所示范围的值)</p> 
+   <p>因为 timeout + X + Y - J2 = 2^31-1 + 2^32</p> 
+   <p>所以 timeout - J2 &lt; 2^31 - 1 时， X + Y &gt; 2^32</p> 
+   <p>也就是说，当timeout和J2之间经过至少 2^32 个节拍后，result才可能变为正数。</p> 
+   <p>timeout和J2之间相差这么多节拍是不可能的(不信可以用HZ将这些节拍换算成秒就知道了。。。)</p> 
+   <p>&nbsp;</p> 
+   <p>利用time_after宏就可以巧妙的避免回绕带来的超时判断问题，将之前的代码改成如下代码即可：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>unsigned long timeout = jiffies + HZ/2; /* 设置超时时间为 0.5秒 */
+
+while (time_after(jiffies, timeout))
+{
+    /* 还没有超时，继续执行任务 */
+}
+
+/* 执行超时后的任务 */</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>&nbsp;</p> 
+   <h4>3.3 时钟中断处理程序</h4> 
+   <p>时钟中断处理程序作为系统定时器而注册到内核中，体系结构的不同，可能时钟中断处理程序中处理的内容不同。</p> 
+   <p>但是以下这些基本的工作都会执行：</p> 
+   <ul>
+    <li>获得 xtime_lock 锁，以便对访问 jiffies_64 和墙上时间 xtime 进行保护</li> 
+    <li>需要时应答或重新设置系统时钟</li> 
+    <li>周期性的使用墙上时间更新实时时钟</li> 
+    <li>调用 tick_periodic()</li> 
+   </ul>
+   <p>&nbsp;</p> 
+   <p>tick_periodic函数位于：&nbsp;<em>kernel/time/tick-common.c</em>&nbsp;中</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>static void tick_periodic(int cpu)
+{
+    if (tick_do_timer_cpu == cpu) {
+        write_seqlock(&amp;xtime_lock);
+
+        /* Keep track of the next tick event */
+        tick_next_period = ktime_add(tick_next_period, tick_period);
+
+        do_timer(1);
+        write_sequnlock(&amp;xtime_lock);
+    }
+
+    update_process_times(user_mode(get_irq_regs()));
+    profile_tick(CPU_PROFILING);
+}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>其中最重要的是 do_timer 和 update_process_times 函数。</p> 
+   <p>我了解的步骤进行了简单的注释。</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>void do_timer(unsigned long ticks)
+{
+    /* jiffies_64 增加指定ticks */
+    jiffies_64 += ticks;
+    /* 更新实际时间 */
+    update_wall_time();
+    /* 更新系统的平均负载值 */
+    calc_global_load();
+}
+
+void update_process_times(int user_tick)
+{
+    struct task_struct *p = current;
+    int cpu = smp_processor_id();
+
+    /* 更新当前进程占用CPU的时间 */
+    account_process_tick(p, user_tick);
+    /* 同时触发软中断，处理所有到期的定时器 */
+    run_local_timers();
+    rcu_check_callbacks(cpu, user_tick);
+    printk_tick();
+    /* 减少当前进程的时间片数 */
+    scheduler_tick();
+    run_posix_cpu_timers(p);
+}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>&nbsp;</p> 
+   <h3>4. 定时器执行流程</h3> 
+   <p>这里讨论的定时器执行流程是动态定时器的执行流程。</p> 
+   <p>&nbsp;</p> 
+   <h4>4.1 定时器的定义</h4> 
+   <p>定时器在内核中用一个链表来保存的，链表的每个节点都是一个定时器。</p> 
+   <p>参见头文件&nbsp;<strong>&lt;linux/timer.h&gt;</strong></p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>struct timer_list {
+    struct list_head entry;
+    unsigned long expires;
+
+    void (*function)(unsigned long);
+    unsigned long data;
+
+    struct tvec_base *base;
+#ifdef CONFIG_TIMER_STATS
+    void *start_site;
+    char start_comm[16];
+    int start_pid;
+#endif
+#ifdef CONFIG_LOCKDEP
+    struct lockdep_map lockdep_map;
+#endif
+};</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>通过加入条件编译的参数，可以追加一些调试信息。</p> 
+   <p>&nbsp;</p> 
+   <h4>4.2 定时器的生命周期</h4> 
+   <p>一个动态定时器的生命周期中，一般会经过下面的几个步骤：</p> 
+   <p><a href="https://images0.cnblogs.com/blog/83005/201305/10075544-278a7b346677402a861343e0fdce0314.png" rel="nofollow"><img title="timer_life" src="https://yqfile.alicdn.com/img_61301b465b01b06458ab33b028da4f6f.png" alt="timer_life" width="804" height="204"></a></p> 
+   <p>1. 初始化定时器：</p> 
+   <div class="cnblogs_code"> 
+    <pre>struct timer_list my_timer; /* 定义定时器 */
+init_timer(&amp;my_timer);      /* 初始化定时器 */</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>2. 填充定时器：</p> 
+   <div class="cnblogs_code"> 
+    <pre>my_timer.expires = jiffies + delay; /* 定义超时的节拍数 */
+my_timer.data = 0;                  /* 给定时器函数传入的参数 */
+my_timer.function = my_function;    /* 定时器超时时，执行的自定义函数 */
+
+/* 从定时器结构体中，我们可以看出这个函数的原型应该如下所示： */
+void my_function(unsigned long data);</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>3. 激活定时器和修改定时器：</p> 
+   <p>激活定时器之后才会被触发，否则定时器不会执行。</p> 
+   <p>修改定时器主要是修改定时器的延迟时间，修改定时器后，不管原先定时器有没有被激活，都会处于激活状态。</p> 
+   <p>&nbsp;</p> 
+   <p>填充定时器结构之后，可以只激活定时器，也可以只修改定时器，也可以激活定时器后再修改定时器。</p> 
+   <p>所以填充定时器结构和触发定时器之间的步骤，也就是虚线框中的步骤是不确定的。</p> 
+   <div class="cnblogs_code"> 
+    <pre>add_timer(&amp;my_timer);  /* 激活定时器 */
+mod_timer(&amp;my_timer, jiffies + new_delay);  /* 修改定时器，设置新的延迟时间 */</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>4. 触发定时器：</p> 
+   <p>每次时钟中断处理程序会检查已经激活的定时器是否超时，如果超时就执行定时器结构中的自定义函数。</p> 
+   <p>&nbsp;</p> 
+   <p>5. 删除定时器：</p> 
+   <p>激活和未被激活的定时器都可以被删除，已经超时的定时器会自动删除，不用特意去删除。</p> 
+   <div class="cnblogs_code"> 
+    <pre>/*
+ * 删除激活的定时器时，此函数返回1
+ * 删除未激活的定时器时，此函数返回0
+ */
+del_timer(&amp;my_timer);</pre> 
+   </div> 
+   <p>在多核处理器上用 del_timer 函数删除定时器时，可能在删除时正好另一个CPU核上的时钟中断处理程序正在执行这个定时器，于是就形成了竞争条件。</p> 
+   <p>为了避免竞争条件，建议使用 del_timer_sync 函数来删除定时器。</p> 
+   <p>del_timer_sync 函数会等待其他处理器上的定时器处理程序全部结束后，才删除指定的定时器。</p> 
+   <div class="cnblogs_code"> 
+    <pre>/*
+ * 和del_timer 不同，del_timer_sync 不能在中断上下文中执行
+ */
+del_timer_sync(&amp;my_timer);</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <h3>5. 实现程序延迟的方法</h3> 
+   <p>内核中有个利用定时器实现延迟的函数 schedule_timeout</p> 
+   <p>这个函数会将当前的任务睡眠到指定时间后唤醒，所以等待时不会占用CPU时间。</p> 
+   <div class="cnblogs_code"> 
+    <pre>/* 将任务设置为可中断睡眠状态 */
+set_current_state(TASK_INTERRUPTIBLE);
+
+/* 小睡一会儿，“s“秒后唤醒 */
+schedule_timeout(s*HZ);</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>查看 schedule_timeout 函数的实现方法，可以看出是如何使用定时器的。</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>signed long __sched schedule_timeout(signed long timeout)
+{
+    /* 定义一个定时器 */
+    struct timer_list timer;
+    unsigned long expire;
+
+    switch (timeout)
+    {
+    case MAX_SCHEDULE_TIMEOUT:
+        /*
+         * These two special cases are useful to be comfortable
+         * in the caller. Nothing more. We could take
+         * MAX_SCHEDULE_TIMEOUT from one of the negative value
+         * but I' d like to return a valid offset (&gt;=0) to allow
+         * the caller to do everything it want with the retval.
+         */
+        schedule();
+        goto out;
+    default:
+        /*
+         * Another bit of PARANOID. Note that the retval will be
+         * 0 since no piece of kernel is supposed to do a check
+         * for a negative retval of schedule_timeout() (since it
+         * should never happens anyway). You just have the printk()
+         * that will tell you if something is gone wrong and where.
+         */
+        if (timeout &lt; 0) {
+            printk(KERN_ERR "schedule_timeout: wrong timeout "
+                "value %lx\n", timeout);
+            dump_stack();
+            current-&gt;state = TASK_RUNNING;
+            goto out;
+        }
+    }
+
+    /* 设置超时时间 */
+    expire = timeout + jiffies;
+
+    /* 初始化定时器，超时处理函数是 process_timeout，后面再补充说明一下这个函数 */
+    setup_timer_on_stack(&amp;timer, process_timeout, (unsigned long)current);
+    /* 修改定时器，同时会激活定时器 */
+    __mod_timer(&amp;timer, expire, false, TIMER_NOT_PINNED);
+    /* 将本任务睡眠，调度其他任务 */
+    schedule();
+    /* 删除定时器，其实就是 del_timer_sync 的宏
+    del_singleshot_timer_sync(&amp;timer);
+
+    /* Remove the timer from the object tracker */
+    destroy_timer_on_stack(&amp;timer);
+
+    timeout = expire - jiffies;
+
+ out:
+    return timeout &lt; 0 ? 0 : timeout;
+}
+EXPORT_SYMBOL(schedule_timeout);
+
+/* 
+ * 超时处理函数 process_timeout 里面只有一步操作，唤醒当前任务。
+ * process_timeout 的参数其实就是 当前任务的地址
+ */
+static void process_timeout(unsigned long __data)
+{
+    wake_up_process((struct task_struct *)__data);
+}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>schedule_timeout 一般用于延迟时间较长的程序。</p> 
+   <p>这里的延迟时间较长是对于计算机而言的，其实也就是延迟大于 1 个节拍(jiffies)。</p> 
+   <p>&nbsp;</p> 
+   <p>对于某些极其短暂的延迟，比如只有1ms，甚至1us，1ns的延迟，必须使用特殊的延迟方法。</p> 
+   <p>1s = 1000ms = 1000000us = 1000000000ns (1秒=1000毫秒=1000000微秒=1000000000纳秒)</p> 
+   <p>假设 HZ=100，那么 1个节拍的时间间隔是 1/100秒，大概10ms左右。</p> 
+   <p>所以对于那些极其短暂的延迟，schedule_timeout 函数是无法使用的。</p> 
+   <p>好在内核对于这些短暂，精确的延迟要求也提供了相应的宏。</p> 
+   <div class="cnblogs_code"> 
+    <pre>/* 具体实现参见 include/linux/delay.h
+ * 以及 arch/x86/include/asm/delay.h
+ */
+#define mdelay(n) ...
+#define udelay(n) ...
+#define ndelay(n) ...</pre> 
+   </div> 
+   <p>通过这些宏，可以简单的实现延迟，比如延迟 5ns，只需 ndelay(5); 即可。</p> 
+   <p>&nbsp;</p> 
+   <p>这些短延迟的实现原理并不复杂，</p> 
+   <p>首先，内核在启动时就计算出了当前处理器1秒能执行多少次循环，即 loops_per_jiffy</p> 
+   <p>(loops_per_jiffy 的计算方法参见<em>&nbsp;init/main.c</em>&nbsp;文件中的 calibrate_delay 方法)。</p> 
+   <p>然后算出延迟 5ns 需要循环多少次，执行那么多次空循环即可达到延迟的效果。</p> 
+   <p>&nbsp;</p> 
+   <p>loops_per_jiffy 的值可以在启动信息中看到：</p> 
+   <div class="cnblogs_code"> 
+    <pre>[root@vbox ~]# dmesg | grep delay
+Calibrating delay loop (skipped), value calculated using timer frequency.. 6387.58 BogoMIPS (lpj=3193792)</pre> 
+   </div> 
+   <p>我的虚拟机中看到 (lpj=3193792)</p> 
+   <p>&nbsp;</p> 
+   <h3>6. 定时器和延迟的例子</h3> 
+   <p>下面的例子测试了短延迟，自定义定时器以及 schedule_timeout 的使用：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>#include &lt;linux/sched.h&gt;
+#include &lt;linux/timer.h&gt;
+#include &lt;linux/jiffies.h&gt;
+#include &lt;asm/param.h&gt;
+#include &lt;linux/delay.h&gt;
+#include "kn_common.h"
+
+MODULE_LICENSE("Dual BSD/GPL");
+
+static void test_short_delay(void);
+static void test_delay(void);
+static void test_schedule_timeout(void);
+static void my_delay_function(unsigned long);
+
+static int testdelay_init(void)
+{
+    printk(KERN_ALERT "HZ in current system: %dHz\n", HZ);
+
+    /* test short delay */
+    test_short_delay();
+
+    /* test delay */
+    test_delay();
+
+    /* test schedule timeout */
+    test_schedule_timeout();
+
+    return 0;
+}
+
+static void testdelay_exit(void)
+{
+    printk(KERN_ALERT "*************************\n");
+    print_current_time(0);
+    printk(KERN_ALERT "testdelay is exited!\n");
+    printk(KERN_ALERT "*************************\n");
+}
+
+static void test_short_delay()
+{
+    printk(KERN_ALERT "jiffies [b e f o r e] short delay: %lu", jiffies);
+    ndelay(5);
+    printk(KERN_ALERT "jiffies [a f t e r] short delay: %lu", jiffies);
+}
+
+static void test_delay()
+{
+    /* 初始化定时器 */
+    struct timer_list my_timer;
+    init_timer(&amp;my_timer);
+
+    /* 填充定时器 */
+    my_timer.expires = jiffies + 1*HZ; /* 2秒后超时函数执行 */
+    my_timer.data = jiffies;
+    my_timer.function = my_delay_function;
+
+    /* 激活定时器 */
+    add_timer(&amp;my_timer);
+}
+
+static void my_delay_function(unsigned long data)
+{
+    printk(KERN_ALERT "This is my delay function start......\n");
+    printk(KERN_ALERT "The jiffies when init timer: %lu\n", data);
+    printk(KERN_ALERT "The jiffies when timer is running: %lu\n", jiffies);
+    printk(KERN_ALERT "This is my delay function end........\n");
+}
+
+static void test_schedule_timeout()
+{
+    printk(KERN_ALERT "This sample start at : %lu", jiffies);
+
+    /* 睡眠2秒 */
+    set_current_state(TASK_INTERRUPTIBLE);
+    printk(KERN_ALERT "sleep 2s ....\n");
+    schedule_timeout(2*HZ);
+
+    printk(KERN_ALERT "This sample end at : %lu", jiffies);
+}
+
+module_init(testdelay_init);
+module_exit(testdelay_exit);</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>其中用到的 kn_common.h 和 kn_common.c 参见之前的博客&nbsp;<a href="http://www.cnblogs.com/wang_yb/archive/2013/04/16/3023892.html" rel="nofollow">《Linux内核设计与实现》读书笔记（六）- 内核数据结构</a></p> 
+   <p>Makefile如下：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre># must complile on customize kernel
+obj-m += mydelay.o
+mydelay-objs := testdelay.o kn_common.o
+
+#generate the path
+CURRENT_PATH:=$(shell pwd)
+#the current kernel version number
+LINUX_KERNEL:=$(shell uname -r)
+#the absolute path
+LINUX_KERNEL_PATH:=/usr/src/kernels/$(LINUX_KERNEL)
+#complie object
+all:
+    make -C $(LINUX_KERNEL_PATH) M=$(CURRENT_PATH) modules
+    rm -rf modules.order Module.symvers .*.cmd *.o *.mod.c .tmp_versions *.unsigned
+#clean
+clean:
+    rm -rf modules.order Module.symvers .*.cmd *.o *.mod.c *.ko .tmp_versions *.unsigned</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>执行测试命令及查看结果的方法如下：(我的测试系统是 CentOS 6.3 x64)</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>[root@vbox chap11]# make
+[root@vbox chap11]# insmod mydelay.ko 
+[root@vbox chap11]# rmmod mydelay.ko 
+[root@vbox chap11]# dmesg | tail -14
+HZ in current system: 1000Hz
+jiffies [b e f o r e] short delay: 4296079617
+jiffies [a f t e r] short delay: 4296079617
+This sample start at : 4296079619
+sleep 2s ....
+This is my delay function start......
+The jiffies when init timer: 4296079619
+The jiffies when timer is running: 4296080621
+This is my delay function end........
+This sample end at : 4296081622
+*************************
+2013-5-9 23:7:20
+testdelay is exited!
+*************************</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>结果说明：</p> 
+   <p>1. 短延迟只延迟了 5ns，所以执行前后的jiffies是一样的。</p> 
+   <div class="cnblogs_code"> 
+    <pre>jiffies [b e f o r e] short delay: 4296079617
+jiffies [a f t e r] short delay: 4296079617</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p>2. 自定义定时器延迟了1秒后执行自定义函数，由于我的系统 HZ=1000，所以jiffies应该相差1000</p> 
+   <div class="cnblogs_code"> 
+    <pre>The jiffies when init timer: 4296079619
+The jiffies when timer is running: 4296080621</pre> 
+   </div> 
+   <p>实际上jiffies相差了 1002，多了2个节拍</p> 
+   <p>&nbsp;</p> 
+   <p>3. schedule_timeout 延迟了2秒，jiffies应该相差 2000</p> 
+   <div class="cnblogs_code"> 
+    <pre>This sample start at : 4296079619
+This sample end at : 4296081622</pre> 
+   </div> 
+   <p>实际上jiffies相差了 2003，多了3个节拍</p> 
+   <p>&nbsp;</p> 
+   <p>以上结果也说明了定时器的延迟并不是那么精确，差了2,3个节拍其实就是误差2,3毫秒(因为HZ=1000)</p> 
+   <p>如果HZ=100的话，一个节拍是10毫秒，那么定时器的误差可能就发现不了了(误差只有2,3毫秒，没有超多1个节拍)。</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

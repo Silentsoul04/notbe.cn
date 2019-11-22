@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>自助Linux之问题诊断工具strace【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/bangerlee/archive/2012/02/20/2356818.html    &nbsp;    引言    “Oops，系统挂死了..."    “Oops，程序崩溃了..."    “Oops，命令执行报错..."   ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/05/22/weixin_34110749_90134306.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">自助Linux之问题诊断工具strace【转】</h1>
+    <p class="post-meta">May 22, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.cnblogs.com/bangerlee/archive/2012/02/20/2356818.html" rel="nofollow">http://www.cnblogs.com/bangerlee/archive/2012/02/20/2356818.html</a></p> 
+   <p>&nbsp;</p> 
+   <p><strong>引言</strong></p> 
+   <p>“Oops，系统挂死了..."</p> 
+   <p>“Oops，程序崩溃了..."</p> 
+   <p>“Oops，命令执行报错..."</p> 
+   <p>&nbsp;</p> 
+   <p>对于维护人员来说，这样的悲剧每天都在上演。理想情况下，系统或应用程序的错误日志提供了足够全面的信息，通过查看相关日志，维护人员就能很快地定位出问题发生的原因。但现实情况，许多错误日志打印模凌两可，更多地描述了出错时的现象(比如"could not open file"，"connect to XXX time out")，而非出错的原因。</p> 
+   <p>&nbsp;</p> 
+   <p>错误日志不能满足定位问题的需求，我们能从更“深层”的方面着手分析吗？程序或命令的执行，需要通过系统调用(system call)与操作系统产生交互，其实我们可以通过观察这些系统调用及其参数、返回值，界定出错的范围，甚至找出问题出现的根因。</p> 
+   <p>&nbsp;</p> 
+   <p>在Linux中，strace就是这样一款工具。通过它，我们可以跟踪程序执行过程中产生的系统调用及接收到的信号，帮助我们分析程序或命令执行中遇到的异常情况。</p> 
+   <p>&nbsp;</p> 
+   <p><strong>一个简单的例子</strong></p> 
+   <p>如何使用strace对程序进行跟踪，如何查看相应的输出？下面我们通过一个例子来说明。</p> 
+   <p><strong>1.被跟踪程序示例</strong></p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>//main.c<br>#include &lt;sys/types.h&gt;<br>#include &lt;sys/stat.h&gt;<br>#include &lt;fcntl.h&gt;<br>int main( )<br>{<br>　　int fd ;<br>　　int i = 0 ;<br>　　fd = open( “/tmp/foo”, O_RDONLY ) ;<br>　　if ( fd &lt; 0 )<br>　　　　i=5;<br>　　else<br>　　　　i=2;<br>　　return i;<br>}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>以上程序尝试以只读的方式打开/tmp/foo文件，然后退出，其中只使用了open这一个系统调用函数。之后我们对该程序进行编译，生成可执行文件：</p> 
+   <div class="cnblogs_code"> 
+    <pre>lx@LX:~$ gcc main.c -o main</pre> 
+   </div> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>2.strace跟踪输出</strong></p> 
+   <p>使用以下命令，我们将使用strace对以上程序进行跟踪，并将结果重定向至main.strace文件：</p> 
+   <div class="cnblogs_code"> 
+    <pre>lx@LX:~$ strace -o main.strace ./main</pre> 
+   </div> 
+   <p>接下来我们来看main.strace文件的内容：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>lx@LX:~$ cat main.strace<br>1 execve("./main", ["./main"], [/* 43 vars */]) = 0<br>2 brk(0)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 0x9ac4000<br>3 access("/etc/ld.so.nohwcap", F_OK)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = -1 ENOENT (No such file or directory)<br>4 mmap2(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xb7739000<br>5 access("/etc/ld.so.preload", R_OK)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = -1 ENOENT (No such file or directory)<br>6 open("/etc/ld.so.cache", O_RDONLY)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 3<br>7 fstat64(3, {st_mode=S_IFREG|0644, st_size=80682, ...}) = 0<br>8 mmap2(NULL, 80682, PROT_READ, MAP_PRIVATE, 3, 0) = 0xb7725000<br>9 close(3)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 0<br>10 access("/etc/ld.so.nohwcap", F_OK)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = -1 ENOENT (No such file or directory)<br>11 open("/lib/i386-linux-gnu/libc.so.6", O_RDONLY) = 3<br>12 read(3, "\177ELF\1\1\1\0\0\0\0\0\0\0\0\0\3\0\3\0\1\0\0\0\220o\1\0004\0\0\0"..., 512) = 512<br>13 fstat64(3, {st_mode=S_IFREG|0755, st_size=1434180, ...}) = 0<br>14 mmap2(NULL, 1444360, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_DENYWRITE, 3, 0) = 0x56d000<br>15 mprotect(0x6c7000, 4096, PROT_NONE)&nbsp;&nbsp;&nbsp;&nbsp; = 0<br>16 mmap2(0x6c8000, 12288, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x15a) = 0x6c8000<br>17 mmap2(0x6cb000, 10760, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x6cb000<br>18 close(3)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 0<br>19 mmap2(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xb7724000<br>20 set_thread_area({entry_number:-1 -&gt; 6, base_addr:0xb77248d0, limit:1048575, seg_32bit:1, contents:0, read_exec_&nbsp;&nbsp;&nbsp; only:0, limit_in_pages:1, seg_not_present:0, useable:1}) = 0<br>21 mprotect(0x6c8000, 8192, PROT_READ)&nbsp;&nbsp;&nbsp;&nbsp; = 0<br>22 mprotect(0x8049000, 4096, PROT_READ)&nbsp;&nbsp;&nbsp; = 0<br>23 mprotect(0x4b0000, 4096, PROT_READ)&nbsp;&nbsp;&nbsp;&nbsp; = 0<br>24 munmap(0xb7725000, 80682)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 0<br>25 open("/tmp/foo", O_RDONLY)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = -1 ENOENT (No such file or directory)<br>26 exit_group(5)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = ?<br>//标红的行号为方便说明而添加，非strace执行输出</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>看到这一堆输出，是否心生畏难情绪？不用担心，下面我们对输出逐条进行分析。</p> 
+   <p>&nbsp;</p> 
+   <p>strace跟踪程序与系统交互时产生的系统调用，以上每一行就对应一个系统调用，格式为：</p> 
+   <p><strong>系统调用的名称( 参数... ) = 返回值&nbsp; 错误标志和描述</strong></p> 
+   <p>&nbsp;</p> 
+   <p><strong>Line 1</strong>:&nbsp; 对于命令行下执行的程序，execve(或exec系列调用中的某一个)均为strace输出系统调用中的第一个。strace首先调用fork或clone函数新建一个子进程，然后在子进程中调用exec载入需要执行的程序(这里为./main)</p> 
+   <p><strong>Line 2</strong>:&nbsp; 以0作为参数调用brk，返回值为内存管理的起始地址(若在子进程中调用malloc，则从0x9ac4000地址开始分配空间)</p> 
+   <p><strong>Line 3</strong>:&nbsp; 调用access函数检验/etc/ld.so.nohwcap是否存在</p> 
+   <p><strong>Line 4</strong>:&nbsp; 使用mmap2函数进行匿名内存映射，以此来获取8192bytes内存空间，该空间起始地址为0xb7739000，关于匿名内存映射，可以看<a href="http://www.perfgeeks.com/?p=723" rel="nofollow">这里</a></p> 
+   <p><strong>Line 6</strong>:&nbsp; 调用open函数尝试打开/etc/ld.so.cache文件，返回文件描述符为3</p> 
+   <p><strong>Line 7</strong>:&nbsp; fstat64函数获取/etc/ld.so.cache文件信息</p> 
+   <p><strong>Line 8</strong>:&nbsp; 调用mmap2函数将/etc/ld.so.cache文件映射至内存，关于使用mmap映射文件至内存，可以看<a href="http://learn.akae.cn/media/ch28s08.html" rel="nofollow">这里</a></p> 
+   <p><strong>Line 9</strong>:&nbsp; close关闭文件描述符为3指向的/etc/ld.so.cache文件</p> 
+   <p><strong>Line12</strong>:&nbsp; 调用read，从/lib/i386-linux-gnu/libc.so.6该libc库文件中读取512bytes，即读取<a href="http://blogimg.chinaunix.net/blog/upfile2/110307091731.pdf" rel="nofollow">ELF</a>头信息</p> 
+   <p><strong>Line15</strong>:&nbsp; 使用mprotect函数对0x6c7000起始的4096bytes空间进行保护(PROT_NONE表示不能访问，PROT_READ表示可以读取)</p> 
+   <p><strong>Line24</strong>:&nbsp; 调用munmap函数，将/etc/ld.so.cache文件从内存中去映射，与Line 8的mmap2对应</p> 
+   <p><strong>Line25</strong>:&nbsp; 对应源码中使用到的唯一的系统调用——open函数，使用其打开/tmp/foo文件</p> 
+   <p><strong>Line26</strong>:&nbsp; 子进程结束，退出码为5(为什么退出值为5？返回前面程序示例部分看看源码吧：)</p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>3.输出分析</strong></p> 
+   <p>呼呼！看完这么多系统调用函数，是不是有点摸不着北？让我们从整体入手，回到主题strace上来。</p> 
+   <p>从上面输出可以发现，真正能与源码对应上的只有open这一个系统调用(Line25)，其他系统调用几乎都用于进行进程初始化工作：装载被执行程序、载入libc函数库、设置内存映射等。</p> 
+   <p>&nbsp;</p> 
+   <p>源码中的if语句或其他代码在相应strace输出中并没有体现，因为它们并没有唤起系统调用。strace只关心程序与系统之间产生的交互，因而strace不适用于程序逻辑代码的排错和分析。</p> 
+   <p>&nbsp;</p> 
+   <p>对于Linux中几百个系统调用，上面strace输出的几个只是冰山一角，想要更深入地了解Linux系统调用，那就man一下吧！</p> 
+   <div class="cnblogs_code"> 
+    <pre>man 2 系统调用名称<br>man ld.so  //Linux动态链接的manpage</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p><strong>strace常用选项</strong></p> 
+   <p>该节介绍经常用到的几个strace命令选项，以及在何时使用这些选项合适。</p> 
+   <p><strong>1.跟踪子进程</strong></p> 
+   <p>默认情况下，strace只跟踪指定的进程，而不对指定进程中新建的子进程进行跟踪。使用-f选项，可对进程中新建的子进程进行跟踪，并在输出结果中打印相应进程PID：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>mprotect(0x5b1000, 4096, PROT_READ)     = 0<br>munmap(0xb77fc000, 80682)               = 0<br>clone(Process 13600 attached<br>child_stack=0, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0xb77fb938) = 13600<br>[pid 13599] fstat64(1, {st_mode=S_IFCHR|0620, st_rdev=makedev(136, 0), ...}) = 0<br>[pid 13600] fstat64(1, {st_mode=S_IFCHR|0620, st_rdev=makedev(136, 0), ...}) = 0<br>[pid 13599] mmap2(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 &lt;unfinished ...&gt;<br>[pid 13600] mmap2(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xb780f000<br>……</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>对多进程程序、命令和脚本使用strace进行跟踪的时，一般打开-f选项。</p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>2.记录系统调用时间</strong></p> 
+   <p>strace还可以记录程序与系统交互时，各个系统调用发生时的时间信息，有r、t、tt、ttt、T等几个选项，它们记录时间的方式为：</p> 
+   <p>-T:&nbsp;&nbsp; 记录各个系统调用花费的时间，精确到微秒</p> 
+   <p>-r:&nbsp;&nbsp; 以第一个系统调用(通常为execve)计时，精确到微秒</p> 
+   <p>-t:&nbsp;&nbsp; 时：分：秒</p> 
+   <p>-tt:&nbsp; 时：分：秒 . 微秒</p> 
+   <p>-ttt: 计算机纪元以来的秒数 . 微秒</p> 
+   <p>比较常用的为T选项，因为其提供了每个系统调用花费时间。而其他选项的时间记录既包含系统调用时间，又算上用户级代码执行用时，参考意义就小一些。对部分时间选项我们可以组合起来使用，例如：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>strace -Tr ./main<br>0.000000 execve(“./main”, [“main”], [/* 64 vars */]) = 0<br>0.000931 fcntl64(0, F_GETFD)= 0 &lt;0.000012&gt;<br>0.000090 fcntl64(1, F_GETFD)= 0 &lt;0.000022&gt;<br>0.000060 fcntl64(2, F_GETFD)= 0 &lt;0.000012&gt;<br>0.000054 uname({sys=”Linux”, node=”ion”, ...}) = 0 &lt;0.000014&gt;<br>0.000307 geteuid32()= 7903 &lt;0.000011&gt;<br>0.000040 getuid32()= 7903 &lt;0.000012&gt;<br>0.000039 getegid32()= 200 &lt;0.000011&gt;<br>0.000039 getgid32()= 200 &lt;0.000011&gt;<br>……</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>最左边一列为-r选项对应的时间输出，最右边一列为-T选项对应的输出。</p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>3.跟踪正在运行的进程</strong></p> 
+   <p>使用strace对运行中的程序进行跟踪，使用命令“strace -p PID”即可，命令执行之后，被跟踪的进程照常执行，strace的其他选项也适用于运行中的进程跟踪。</p> 
+   <p>&nbsp;</p> 
+   <p><strong>使用strace处理程序挂死</strong></p> 
+   <p>最后我们通过一个程序示例，学习使用strace分析程序挂死的方法。</p> 
+   <p><strong>1.挂死程序源码</strong></p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>//hang.c<br>#include &lt;stdio.h&gt;<br>#include &lt;sys/types.h&gt;<br>#include &lt;unistd.h&gt;<br>#include &lt;string.h&gt;<br><br>int main(int argc, char** argv)<br>{<br>    getpid(); //该系统调用起到标识作用<br>    if(argc &lt; 2)<br>    {<br>        printf("hang (user|system)\n");<br>        return 1;<br>    }<br>    if(!strcmp(argv[1], "user"))<br>        while(1);<br>    else if(!strcmp(argv[1], "system"))<br>        sleep(500);<br>    return 0;<br>}</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>可向该程序传送user和system参数，以上代码使用死循环模拟用户态挂死，调用sleep模拟内核态程序挂死。</p> 
+   <p><br><strong>2.strace跟踪输出</strong></p> 
+   <p>用户态挂死跟踪输出：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>lx@LX:~$ gcc hang.c -o hang<br>lx@LX:~$ strace ./hang user<br>……<br>mprotect(0x8049000, 4096, PROT_READ)    = 0<br>mprotect(0xb59000, 4096, PROT_READ)     = 0<br>munmap(0xb77bf000, 80682)               = 0<br>getpid()                                = 14539</pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p>内核态挂死跟踪输出：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre>lx@LX:~$ strace ./hang system<br>……<br>mprotect(0x8049000, 4096, PROT_READ)    = 0<br>mprotect(0xddf000, 4096, PROT_READ)     = 0<br>munmap(0xb7855000, 80682)               = 0<br>getpid()                                = 14543<br>rt_sigprocmask(SIG_BLOCK, [CHLD], [], 8) = 0<br>rt_sigaction(SIGCHLD, NULL, {SIG_DFL, [], 0}, 8) = 0<br>rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0<br>nanosleep({500, 0}, </pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>3.输出分析</strong></p> 
+   <p>用户态挂死情况下，strace在getpid()一行输出之后没有其他系统调用输出；进程在内核态挂死，最后一行的系统调用nanosleep不能完整显示，这里nanosleep没有返回值表示该调用尚未完成。</p> 
+   <p>&nbsp;</p> 
+   <p>因而我们可以得出以下结论：使用strace跟踪挂死程序，如果最后一行系统调用显示完整，程序在逻辑代码处挂死；如果最后一行系统调用显示不完整，程序在该系统调用处挂死。</p> 
+   <p>&nbsp;</p> 
+   <p>当程序挂死在系统调用处，我们可以查看相应系统调用的man手册，了解在什么情况下该系统调用会出现挂死情况。另外，系统调用的参数也为我们提供了一些信息，例如挂死在如下系统调用：</p> 
+   <div class="cnblogs_code"> 
+    <pre>read(16,</pre> 
+   </div> 
+   <p>那我们可以知道read函数正在对文件描述符为16的文件或socket进行读取，进一步地，我们可以使用lsof工具，获取对应于文件描述符为16的文件名、该文件被哪些进程占用等信息。</p> 
+   <p>&nbsp;</p> 
+   <p><strong>小结</strong></p> 
+   <p>本文对Linux中常用的问题诊断工具strace进行了介绍，通过程序示例，介绍了strace的使用方法、输出格式以及使用strace分析程序挂死问题的方法，另外对strace工具的几个常用选项进行了说明，描述了这几个选项适用的场景。</p> 
+   <p>下次再遇到程序挂死、命令执行报错的问题，如果从程序日志和系统日志中看不出问题出现的原因，先别急着google或找高手帮忙，别忘了一个强大的工具它就在那里，不离不弃，strace一下吧！</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

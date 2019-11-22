@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux下Ｃ语言编程，利用多线程实现socket套接字通讯传输文件 « NotBeCN</title>
+  <meta name="description" content="                  开发环境：deepin 15.10桌面版，GCC版本7.3.0   代码：   服务端：   #include &lt;stdio.h&gt;  #include &lt;stdlib.h&gt;    #include &lt;string.h&gt;         #in...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/1557726222612.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux下Ｃ语言编程，利用多线程实现socket套接字通讯传输文件</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>开发环境：deepin 15.10桌面版，GCC版本7.3.0</p> 
+  <p>代码：</p> 
+  <h2><a id="_3"></a>服务端：</h2> 
+  <pre><code>#include &lt;stdio.h&gt;  
+#include &lt;stdlib.h&gt;    
+#include &lt;string.h&gt;         
+#include &lt;unistd.h&gt;         
+#include &lt;sys/types.h&gt; 
+#include &lt;sys/socket.h&gt; 
+#include &lt;arpa/inet.h&gt;
+#include &lt;dirent.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;netdb.h&gt;
+
+#define true 1
+#define false 0
+#define MAXSIZE 2048
+#define NAMELENTH 20
+#define PORT 2999
+#define BACKLOG 8
+#define MAXTHREAD 8
+
+struct info
+{
+    pthread_t thread_id;//当前线程id
+    int index;//当前clients数组下表
+    int connectfd; //当前连接套接字
+};
+
+
+unsigned int thread_num=0;//用于记录线程数量,当thread_num==MAXTHREAD就应该让新接入的客户端等待了。
+pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER; //线程互斥锁初始化，不确定可用。
+struct info  clients[MAXTHREAD]={0};//保存客户端信息的数组，线程函数中会传入下标，在线程函数中应该使用传入的cur_index而不是thread_num
+int useable[MAXTHREAD];//记录可用的clients下标，创建线程之后将相应下标置0，在线程执行完毕之后应将相应的下标置1；
+
+
+void* client_in(void* cur_index);  //线程函数，参数为当前的线程下标，用于不同线程间的区分。
+void take_order(char* cmd,int cur_index);//执行具体命令，为了方便操作，且因为线程间问题，在执行文件传输中直接对cliens下标进行操作
+void send_msg(const char* msg,int index);//发送消息
+void send_dir(int index);//发送当前目录内容
+void recive_msg(int index);//接收消息
+void recive_cmd(char* cmd_buf,int index);//接收命令
+int recive_choice(int index);//接收选择
+void send_file(char* filename,int index);//发送文件
+void recive_file(char* filename,int index);//接收文件
+
+
+int main()
+{
+    memset(useable,1,sizeof(useable));
+    struct sockaddr_in saddr;
+    int listenfd=socket(AF_INET,SOCK_STREAM,0);
+    if(listenfd&lt;0)
+    {
+        perror("socket");
+        exit(-1);
+    }
+    int opt=SO_REUSEADDR;
+    memset(&amp;saddr,0,sizeof(saddr));
+    saddr.sin_addr.s_addr=htons(INADDR_ANY);
+    saddr.sin_family=AF_INET;
+    saddr.sin_port=htons(PORT);
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &amp;opt, sizeof(opt));
+    if(bind(listenfd,(struct sockaddr*)&amp;saddr,sizeof(struct sockaddr_in))&lt;0)
+    {
+        perror("bind");
+        exit(-1);
+    }
+    if((listen(listenfd,BACKLOG))&lt;0)
+    {
+        perror("listen");
+        exit(-1);
+    }
+    printf("------------------------------------------------\n");
+    printf(" |server started, waiting for clients conncet|\n");
+    printf("------------------------------------------------\n");
+     
+    while(1)
+    {
+        struct sockaddr_in caddr;
+        memset(&amp;caddr,0,sizeof(caddr));
+        int n= sizeof(caddr);
+        int fd=accept(listenfd,(struct sockaddr*)&amp;caddr,&amp;n);
+        if(fd&lt;0)
+            {perror("connect");exit(-1);}
+        printf("client has connected:%s",inet_ntoa(caddr.sin_addr));
+        if(thread_num&lt;=MAXTHREAD)
+        {
+            int index;
+            for(index=0;index&lt;MAXTHREAD;index++)
+            {
+                if(useable[index])
+                    break;
+            }
+            send_msg("\0",index);
+            int num=pthread_create(&amp;(clients[index].thread_id),NULL,&amp;client_in,&amp;index);
+            if(num&lt;0)
+            {
+                printf("thread create fail!");
+                exit(-1);
+            }
+            clients[index].connectfd=fd;
+            clients[index].index=index;
+            useable[index]=0;
+            thread_num++;
+        }
+        else
+        {
+            printf("there is one client be hold!");
+            //send(fd,"server is busy now ,retry later",MAXSIZE,0);//线程队列满，向客户端发送消息。
+        }
+    }
+    close(listenfd);
+    return 0;
+}
+
+void* client_in(void* cur_index)
+{
+    int is_continue=1;
+    int index=*((int*)cur_index);
+    char * cmd=(char*)malloc(MAXSIZE);
+    send_msg("Hello!you has been connected with our server\nNow you can input your order:\n",index);
+    while(is_continue)
+    {
+        recive_cmd(cmd,index);
+        send_msg("recive your command, try to analyze....\n",index);
+        take_order(cmd,index);
+        send_msg("Wanna take another order?[Y/N]?\n",index);
+        memset(cmd,0,MAXSIZE);
+        is_continue=recive_choice(index);
+        if(is_continue&lt;0)
+        {
+            send_msg("wrong choice",index);
+            break;
+        }
+    }
+    close(clients[index].connectfd);
+    useable[clients[index].index]=1;
+    return ;
+}
+
+void take_order(char* cmd,int index)
+{
+    if(strncmp(cmd,"exit",4)==0)
+	{
+		pthread_cancel(clients[index].thread_id);
+	}
+	else if(strncmp(cmd,"ls",2)==0)
+	{
+        send_dir(index);
+	}
+	else if(strncmp(cmd,"get",3)==0)
+	{
+        char filename[MAXSIZE];
+        memset(filename,0,MAXSIZE);
+        strcat(filename,cmd+4);
+        send_file(filename,index);
+	}
+	else if(strncmp(cmd,"put",4)==0)
+	{
+        char filename[MAXSIZE];
+        memset(filename,0,MAXSIZE);
+        strcat(filename,cmd+4);
+        recive_file(filename,index);
+	}
+    else
+    {
+        send_msg("missing order!\n",index);
+    }
+}
+
+
+void send_msg(const char* msg,int index)
+{
+    if(send(clients[index].connectfd,msg,MAXSIZE,0)&lt;0)
+       perror("send");
+}
+
+void send_dir(int index)
+{
+    int fd;
+    int bakfd=dup(1);
+    close(1);
+    dup(fd);
+    system("ls .");
+    char buf[MAXSIZE];
+    memset(buf,0,MAXSIZE);
+    do
+    {
+    if(read(fd,buf,MAXSIZE)&lt;0) perror("read");
+	send_msg(buf,index);
+    }
+    while(buf[MAXSIZE-1]=='\0');
+    close(fd);
+    dup(bakfd);
+}
+
+void recive_msg(int index)
+{
+    char buf[MAXSIZE];
+    do
+    {
+    memset(buf,0,MAXSIZE);
+    if(recv(clients[index].connectfd,buf,MAXSIZE,0)&lt;0)
+          perror("recv");
+    printf("%s",buf);
+    }
+    while(buf[MAXSIZE]=='\0');
+}
+
+void recive_cmd(char* cmd_buf,int index)
+{
+    memset(cmd_buf,0,MAXSIZE);
+    if(recv(clients[index].connectfd,cmd_buf,MAXSIZE,0)&lt;0)
+           perror("recv");
+    printf("recive commands:[%s]",cmd_buf);
+}
+int recive_choice(int index)
+{
+    char buf[MAXSIZE];
+    memset(buf,0,MAXSIZE);
+    if(recv(clients[index].connectfd,buf,MAXSIZE,0)&lt;0)
+           perror("recv");
+    if(!strncmp("Y",buf,1)||!strncmp("y",buf,1))
+       return true;
+    else if(!strncmp("N",buf,1)||!strncmp("n",buf,1))
+       return false;
+    else   
+       return -1;
+}
+
+void send_file(char* filename,int index)
+{
+    char buf[MAXSIZE];
+    int fd= open(filename,O_RDONLY);
+    if(fd&lt;0)
+        perror("open");
+    do
+    {
+        memset(buf,0,MAXSIZE);
+        if(read(fd,buf,MAXSIZE)&lt;0) perror("read");
+        if(send(clients[index].connectfd,buf,MAXSIZE,0)&lt;0) perror("send");
+    }
+    while(buf[MAXSIZE-1]=='\0');
+}
+
+void recive_file(char*filename,int index)
+{
+    printf("restore file :%s",filename);
+    char buf[MAXSIZE];
+    int fd=open(filename,O_RDWR|O_CREAT);
+    if(fd&lt;0)  perror("open");
+    do
+    {
+        memset(buf,0,MAXSIZE);
+        if(recv(clients[index].connectfd,buf,MAXSIZE,0)&lt;0) perror("recv");
+        if(write(fd,buf,MAXSIZE)&lt;0) perror("write");
+        lseek(fd,MAXSIZE,SEEK_SET);
+    }
+    while(buf[MAXSIZE-1]=='\0');
+}
+
+
+
+</code></pre> 
+  <h2><a id="_269"></a>客户端：</h2> 
+  <pre><code>#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sys/types.h&gt; 
+#include &lt;sys/socket.h&gt; 
+#include &lt;arpa/inet.h&gt;
+#include &lt;netinet/in.h&gt;     
+#include &lt;fcntl.h&gt;     
+#include &lt;netdb.h&gt;
+
+#define MAXSIZE 2048
+#define PORT 2999
+
+int sockfd=-1;
+
+void recive_msg()//接受消息
+{
+    char buf[MAXSIZE];
+    do
+    {
+    memset(buf,0,MAXSIZE);
+    if(recv(sockfd,buf,MAXSIZE,0)&lt;0)
+       perror("recv");
+    printf("%s",buf);
+    } while (buf[MAXSIZE-1]=='\0');
+
+};
+
+void recive_file(char *filename)//接受文件
+{
+    
+    printf("restore file with name : %s",filename);
+    char buf[MAXSIZE];
+    int fd = open(filename,O_RDWR|O_CREAT);
+    if(fd&lt;0)
+       perror("open");
+    do
+    {
+    memset(buf,0,MAXSIZE);
+    if(recv(sockfd,buf,MAXSIZE,0)&lt;0)
+       perror("recv");
+    if(write(fd,buf,MAXSIZE)&lt;0)
+       perror("write");
+    lseek(fd,MAXSIZE,SEEK_SET);
+    }
+    while(buf[MAXSIZE-1]=='\0');
+
+}
+
+void send_msg(const char* msg)//发送消息
+{
+    if(send(sockfd,msg,MAXSIZE,0)&lt;0)
+       perror("send");
+}
+
+void send_file(char* filename)//发送文件
+{
+    printf("send %s to server",filename);
+    int fd= open(filename,O_RDONLY);
+    if(fd&lt;0)
+     {perror("open");exit(-1);}
+    char buf[MAXSIZE];
+    do
+    {
+        memset(buf,0,MAXSIZE);
+        if(read(fd,buf,MAXSIZE)&lt;0)
+           perror("read");
+        if(send(sockfd,buf,MAXSIZE,0)&lt;0)
+           perror("send");
+    }
+    while(buf[MAXSIZE-1]=='\0');
+    
+}
+
+void send_order(char * cmd)
+{
+    if(strncmp(cmd,"exit",4)==0)
+	{
+		send_msg(cmd);
+	}
+	else if(strncmp(cmd,"ls",2)==0)
+	{
+        send_msg(cmd);
+	}
+	else if(strncmp(cmd,"get",3)==0)
+	{
+        char filename[MAXSIZE];
+        memset(filename,0,MAXSIZE);
+        strcat(filename,cmd+4);
+        recive_file(filename);
+	}
+	else if(strncmp(cmd,"put",4)==0)
+	{
+        char filename[MAXSIZE];
+        memset(filename,0,MAXSIZE);
+        strcat(filename,cmd+4);
+        send_file(filename);
+	}
+}
+
+
+
+int main()
+{
+    fflush(stdin);
+    char * buf=(char*)malloc(MAXSIZE);
+    memset(buf,0,MAXSIZE);
+    printf("Try to login server,please input the address of server:");
+    scanf("%s",buf);
+
+    sockfd=socket(AF_INET,SOCK_STREAM,0);
+    if(sockfd&lt;0){perror("socket");exit(-1);}
+    struct sockaddr_in saddr;
+    struct hostent * host;
+
+    if((host=gethostbyname(buf))==NULL)
+    {
+        printf("name solution fail\n");
+        exit(-1);
+    }
+
+    memset(&amp;saddr,0,sizeof(saddr));
+    saddr.sin_addr=*((struct in_addr *)host-&gt;h_addr_list[0]);
+    saddr.sin_family=AF_INET;
+    saddr.sin_port=htons(PORT);
+if(connect(sockfd,(struct sockaddr*)&amp;saddr,sizeof(saddr))&lt;0)
+   {
+       perror("connect");exit(-1);
+   }
+    while(1)
+   {
+       memset(buf,0,MAXSIZE);
+       recv(sockfd,buf,MAXSIZE,0);
+       if(buf[0]!='\0')
+       {
+           printf("%s",buf);
+       }
+       else break;
+   }
+   memset(buf,0,MAXSIZE);
+    while(1)
+   {
+       recive_msg();
+       memset(buf,0,MAXSIZE);
+       fflush(stdin);
+       fgets(buf,MAXSIZE,stdin);
+       buf[strlen(buf)-1]='\0';
+       send_order(buf);
+   }
+}
+
+
+</code></pre> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

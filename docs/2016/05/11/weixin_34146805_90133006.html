@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux设备模型(3)_Uevent【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.wowotech.net/device_model/uevent.html     1. Uevent的功能    Uevent是Kobject的一部分，用于在Kobject状态发生改变时，例如增加、移除等，通知用户空间程序。用户空间程序收到这样的事件后，会做...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/05/11/weixin_34146805_90133006.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux设备模型(3)_Uevent【转】</h1>
+    <p class="post-meta">May 11, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h4>转自：<a href="http://www.wowotech.net/device_model/uevent.html" rel="nofollow">http://www.wowotech.net/device_model/uevent.html</a> </h4> 
+   <h4>1. Uevent的功能</h4> 
+   <p>Uevent是Kobject的一部分，用于在Kobject状态发生改变时，例如增加、移除等，通知用户空间程序。用户空间程序收到这样的事件后，会做相应的处理。</p> 
+   <p>该机制通常是用来支持热拔插设备的，例如U盘插入后，USB相关的驱动软件会动态创建用于表示该U盘的device结构（相应的也包括其中的kobject），并告知用户空间程序，为该U盘动态的创建/dev/目录下的设备节点，更进一步，可以通知其它的应用程序，将该U盘设备mount到系统中，从而动态的支持该设备。</p> 
+   <h4>2. Uevent在kernel中的位置</h4> 
+   <p>下面图片描述了Uevent模块在内核中的位置：</p> 
+   <p><a href="http://www.wowotech.net/content/uploadfile/201403/272229a8f5b5912c352e857e119e516320140311063951.gif" rel="nofollow"><img title="uevent" src="https://yqfile.alicdn.com/img_aa01d8fd993bd89df75f729fd5bacfcb.gif" alt="uevent" width="359" height="409"></a></p> 
+   <p>由此可知，Uevent的机制是比较简单的，设备模型中任何设备有事件需要上报时，会触发Uevent提供的接口。Uevent模块准备好上报事件的格式后，可以通过两个途径把事件上报到用户空间：一种是通过kmod模块，直接调用用户空间的可执行文件；另一种是通过netlink通信机制，将事件从内核空间传递给用户空间。</p> 
+   <p>注1：有关kmod和netlink，会在其它文章中描述，因此本文就不再详细说明了。</p> 
+   <h4>3. Uevent的内部逻辑解析</h4> 
+   <h5>3.1 Source Code位置</h5> 
+   <p>Uevent的代码比较简单，主要涉及kobject.h和kobject_uevent.c两个文件，如下：</p> 
+   <ul>
+    <li>include/linux/kobject.h</li> 
+    <li>lib/kobject_uevent.c</li> 
+   </ul>
+   <h5>3.2 数据结构描述</h5> 
+   <p>kobject.h定义了uevent相关的常量和数据结构，如下：</p> 
+   <ul>
+    <li>kobject_action</li> 
+   </ul>
+   <div> 
+    <div> 
+     <pre><span> 1: /* include/linux/kobject.h, line 50 */</span></pre> 
+     <pre><span> 2: enum kobject_action {   </span></pre> 
+     <pre><span> 3: &nbsp;&nbsp;&nbsp;&nbsp;KOBJ_ADD,</span></pre> 
+     <pre><span> 4: &nbsp;&nbsp;&nbsp;&nbsp;KOBJ_REMOVE,    </span></pre> 
+     <pre><span> 5: &nbsp;&nbsp;&nbsp;&nbsp;KOBJ_CHANGE, </span></pre> 
+     <pre><span> 6: &nbsp;&nbsp;&nbsp;&nbsp;KOBJ_MOVE,</span></pre> 
+     <pre><span> 7: &nbsp;&nbsp;&nbsp;&nbsp;KOBJ_ONLINE, </span></pre> 
+     <pre><span> 8: &nbsp;&nbsp;&nbsp;&nbsp;KOBJ_OFFLINE,</span></pre> 
+     <pre><span> 9: &nbsp;&nbsp;&nbsp;&nbsp;KOBJ_MAX </span></pre> 
+     <pre><span> 10: };</span></pre> 
+    </div> 
+   </div> 
+   <p>kobject_action定义了event的类型，包括：</p> 
+   <blockquote> 
+    <p>ADD/REMOVE，Kobject（或上层数据结构）的添加/移除事件。</p> 
+    <p>ONLINE/OFFLINE，Kobject（或上层数据结构）的上线/下线事件，其实是是否使能。</p> 
+    <p>CHANGE，Kobject（或上层数据结构）的状态或者内容发生改变。</p> 
+    <p>MOVE，Kobject（或上层数据结构）更改名称或者更改Parent（意味着在sysfs中更改了目录结构）。</p> 
+    <p>CHANGE，如果设备驱动需要上报的事件不再上面事件的范围内，或者是自定义的事件，可以使用该event，并携带相应的参数。</p> 
+   </blockquote> 
+   <ul>
+    <li>kobj_uevent_env</li> 
+   </ul>
+   <div> 
+    <div> 
+     <pre><span> 1: /* include/linux/kobject.h, line 31 */</span></pre> 
+     <pre><span> 2: #define UEVENT_NUM_ENVP         32 /* number of env pointers */</span></pre> 
+     <pre><span> 3: #define UEVENT_BUFFER_SIZE      2048 /* buffer for the variables */</span></pre> 
+     <pre><span> 4:&nbsp; </span></pre> 
+     <pre><span> 5: /* include/linux/kobject.h, line 116 */</span></pre> 
+     <pre><span> 6: struct kobj_uevent_env {</span></pre> 
+     <pre><span> 7: &nbsp;&nbsp;&nbsp;&nbsp;char *envp[UEVENT_NUM_ENVP];</span></pre> 
+     <pre><span> 8: &nbsp;&nbsp;&nbsp;&nbsp;int envp_idx;</span></pre> 
+     <pre><span> 9: &nbsp;&nbsp;&nbsp;&nbsp;char buf[UEVENT_BUFFER_SIZE];</span></pre> 
+     <pre><span> 10:&nbsp;&nbsp;&nbsp;&nbsp;int buflen;</span></pre> 
+     <pre><span> 11: };</span></pre> 
+    </div> 
+   </div> 
+   <p>前面有提到过，在利用Kmod向用户空间上报event事件时，会直接执行用户空间的可执行文件。而在Linux系统，可执行文件的执行，依赖于环境变量，因此kobj_uevent_env用于组织此次事件上报时的环境变量。</p> 
+   <blockquote> 
+    <p>envp，指针数组，用于保存每个环境变量的地址，最多可支持的环境变量数量为UEVENT_NUM_ENVP。</p> 
+    <p>envp_idx，用于访问环境变量指针数组的index。</p> 
+    <p>buf，保存环境变量的buffer，最大为UEVENT_BUFFER_SIZE。</p> 
+    <p>buflen，访问buf的变量。</p> 
+   </blockquote> 
+   <ul>
+    <li>kset_uevent_ops</li> 
+   </ul>
+   <div> 
+    <div> 
+     <pre><span> 1: /* include/linux/kobject.h, line 123 */</span></pre> 
+     <pre><span> 2: struct kset_uevent_ops {</span></pre> 
+     <pre><span> 3: &nbsp;&nbsp;&nbsp;&nbsp;int (* const filter)(struct kset *kset, struct kobject *kobj);</span></pre> 
+     <pre><span> 4: &nbsp;&nbsp;&nbsp;&nbsp;const char *(* const name)(struct kset *kset, struct kobject *kobj);</span></pre> 
+     <pre><span> 5: &nbsp;&nbsp;&nbsp;&nbsp;int (* const uevent)(struct kset *kset, struct kobject *kobj,</span></pre> 
+     <pre><span> 6: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;struct kobj_uevent_env *env);</span></pre> 
+     <pre><span> 7: };</span></pre> 
+    </div> 
+   </div> 
+   <p>kset_uevent_ops是为kset量身订做的一个数据结构，里面包含filter和uevent两个回调函数，用处如下：</p> 
+   <blockquote> 
+    <p>filter，当任何Kobject需要上报uevent时，它所属的kset可以通过该接口过滤，阻止不希望上报的event，从而达到从整体上管理的目的。</p> 
+    <p>name，该接口可以返回kset的名称。如果一个kset没有合法的名称，则其下的所有Kobject将不允许上报uvent</p> 
+    <p>uevent，当任何Kobject需要上报uevent时，它所属的kset可以通过该接口统一为这些event添加环境变量。因为很多时候上报uevent时的环境变量都是相同的，因此可以由kset统一处理，就不需要让每个Kobject独自添加了。</p> 
+   </blockquote> 
+   <h5>3.3 内部动作</h5> 
+   <p>通过kobject.h，uevent模块提供了如下的API（这些API的实现是在"lib/kobject_uevent.c”文件中）：</p> 
+   <div> 
+    <div> 
+     <pre><span> 1: /* include/linux/kobject.h, line 206 */</span></pre> 
+     <pre><span> 2: int kobject_uevent(struct kobject *kobj, enum kobject_action action);</span></pre> 
+     <pre><span> 3: int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,</span></pre> 
+     <pre><span> 4: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;char *envp[]);</span></pre> 
+     <pre><span> 5:&nbsp; </span></pre> 
+     <pre><span> 6: __printf(2, 3)</span></pre> 
+     <pre><span> 7: int add_uevent_var(struct kobj_uevent_env *env, const char *format, ...);</span></pre> 
+     <pre><span> 8:&nbsp; </span></pre> 
+     <pre><span> 9: int kobject_action_type(const char *buf, size_t count,</span></pre> 
+     <pre><span> 10: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;enum kobject_action *type);</span></pre> 
+    </div> 
+   </div> 
+   <blockquote> 
+    <p>kobject_uevent_env，以envp为环境变量，上报一个指定action的uevent。环境变量的作用是为执行用户空间程序指定运行环境。具体动作如下：</p> 
+    <ul>
+     <li>查找kobj本身或者其parent是否从属于某个kset，如果不是，则报错返回（注2：由此可以说明，如果一个kobject没有加入kset，是不允许上报uevent的）</li> 
+     <li>查看kobj-&gt;uevent_suppress是否设置，如果设置，则忽略所有的uevent上报并返回（注3：由此可知，可以通过Kobject的uevent_suppress标志，管控Kobject的uevent的上报）</li> 
+     <li>如果所属的kset有uevent_ops-&gt;filter函数，则调用该函数，过滤此次上报（注4：这佐证了3.2小节有关filter接口的说明，kset可以通过filter接口过滤不希望上报的event，从而达到整体的管理效果）</li> 
+     <li>判断所属的kset是否有合法的名称（称作subsystem，和前期的内核版本有区别），否则不允许上报uevent</li> 
+     <li>分配一个用于此次上报的、存储环境变量的buffer（结果保存在env指针中），并获得该Kobject在sysfs中路径信息（用户空间软件需要依据该路径信息在sysfs中访问它）</li> 
+     <li>调用add_uevent_var接口（下面会介绍），将Action、路径信息、subsystem等信息，添加到env指针中</li> 
+     <li>如果传入的envp不空，则解析传入的环境变量中，同样调用add_uevent_var接口，添加到env指针中</li> 
+     <li>如果所属的kset存在uevent_ops-&gt;uevent接口，调用该接口，添加kset统一的环境变量到env指针</li> 
+     <li>根据ACTION的类型，设置kobj-&gt;state_add_uevent_sent和kobj-&gt;state_remove_uevent_sent变量，以记录正确的状态</li> 
+     <li>调用add_uevent_var接口，添加格式为"SEQNUM=%llu”的序列号</li> 
+     <li>如果定义了"CONFIG_NET”，则使用netlink发送该uevent</li> 
+     <li>以uevent_helper、subsystem以及添加了标准环境变量（HOME=/，PATH=/sbin:/bin:/usr/sbin:/usr/bin）的env指针为参数，调用kmod模块提供的call_usermodehelper函数，上报uevent。&nbsp;<br>其中uevent_helper的内容是由内核配置项CONFIG_UEVENT_HELPER_PATH(位于./drivers/base/Kconfig)决定的(可参考lib/kobject_uevent.c, line 32)，该配置项指定了一个用户空间程序（或者脚本），用于解析上报的uevent，例如"/sbin/hotplug”。&nbsp;<br>call_usermodehelper的作用，就是fork一个进程，以uevent为参数，执行uevent_helper。</li> 
+    </ul>
+    <p>kobject_uevent，和kobject_uevent_env功能一样，只是没有指定任何的环境变量。</p> 
+    <p>add_uevent_var，以格式化字符的形式（类似printf、printk等），将环境变量copy到env指针中。</p> 
+    <p>kobject_action_type，将enum kobject_action类型的Action，转换为字符串。</p> 
+   </blockquote> 
+   <p>&nbsp;</p> 
+   <table style="width:658px;" border="1">
+    <tbody>
+     <tr>
+      <td valign="top"><strong>说明：怎么指定处理uevent的用户空间程序(简称uevent helper)？&nbsp;<br><br>上面介绍kobject_uevent_env的内部动作时，有提到，Uevent模块通过Kmod上报Uevent时，会通过call_usermodehelper函数，调用用户空间的可执行文件（或者脚本，简称<strong>uevent helper</strong>&nbsp;）处理该event。而该uevent helper的路径保存在<strong>uevent_helper数组中。&nbsp;<br><br>可以在编译内核时，通过CONFIG_UEVENT_HELPER_PATH配置项，静态指定uevent helper。但这种方式会为每个event fork一个进程，随着内核支持的设备数量的增多，这种方式在系统启动时将会是致命的（可以导致内存溢出等）。因此只有在早期的内核版本中会使用这种方式，现在内核不再推荐使用该方式。因此内核编译时，需要把该配置项留空。&nbsp;<br><br>在系统启动后，大部分的设备已经ready，可以根据需要，重新指定一个uevent helper，以便检测系统运行过程中的热拔插事件。这可以通过把helper的路径写入到"/sys/kernel/uevent_helper”文件中实现。实际上，内核通过sysfs文件系统的形式，将<strong><strong>uevent_helper数组开放到用户空间，供用户空间程序修改访问，具体可参考"</strong></strong>./kernel/ksysfs.c”中相应的代码，这里不再详细描述。</strong></strong></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p><em>原创文章，转发请注明出处。蜗窝科技，<a href="http://www.wowotech.net/linux_kenrel/uevent.html" rel="nofollow">www.wowotech.net</a>。</em></p> 
+   <p>标签: <a href="http://www.wowotech.net/tag/Linux" rel="nofollow">Linux</a> <a href="http://www.wowotech.net/tag/Kernel" rel="nofollow">Kernel</a> <a href="http://www.wowotech.net/tag/%E5%86%85%E6%A0%B8" rel="nofollow">内核</a> <a href="http://www.wowotech.net/tag/%E8%AE%BE%E5%A4%87%E6%A8%A1%E5%9E%8B" rel="nofollow">设备模型</a> <a href="http://www.wowotech.net/tag/Uevent" rel="nofollow">Uevent</a></p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

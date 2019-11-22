@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Hystrix中fallBack过程源码分析 « NotBeCN</title>
+  <meta name="description" content="                  Hystrix是SpringCloud全家桶中的熔断和隔离器，可实现服务的降级策咯、隔离策略、批量请求等等功能。   一般使用方法：   1.pom.xml中添加：   &lt;dependency&gt;    &lt;groupId&gt;org.springframewo...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/11/weixin_39992480_90116220.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Hystrix中fallBack过程源码分析</h1>
+    <p class="post-meta">May 11, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-tomorrow-night-eighties"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>Hystrix是SpringCloud全家桶中的熔断和隔离器，可实现服务的降级策咯、隔离策略、批量请求等等功能。</p> 
+  <p>一般使用方法：</p> 
+  <p>1.pom.xml中添加：</p> 
+  <pre><code>&lt;dependency&gt;
+    &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-cloud-starter-hystrix&lt;/artifactId&gt;
+&lt;/dependency&gt;
+</code></pre> 
+  <p>2.Application添加注解@EnableCircuitBreaker</p> 
+  <pre><code>@SpringBootApplication
+@EnableCircuitBreaker
+public class Application {
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+}
+</code></pre> 
+  <p>3.controller增加注解@HystrixCommand</p> 
+  <pre><code>@RestController
+public class MyController {
+    @HystrixCommand(fallbackMethod = "error")
+    @RequestMapping(value = "/hello", method = RequestMethod.GET)
+    public String start(){
+        throw new RuntimeException();
+//        return "start";
+    }
+
+    public String error(){
+        return "error";
+    }
+}
+</code></pre> 
+  <p>@HystrixCommand注解</p> 
+  <pre><code>@Target({ElementType.METHOD})
+@Retention(RetentionPolicy.RUNTIME)
+@Inherited
+@Documented
+public @interface HystrixCommand {
+    // 命令组key，用于将报告、报警、仪表盘等命令分组
+    String groupKey() default "";
+    // Hystrix命令key，默认为被修饰方法名
+    String commandKey() default "";
+    // HystrixThreadPool线程池的key，该key便于标识监控、度量发布、缓存中的线程池
+    String threadPoolKey() default "";
+    // 自定义的fallback方法
+    String fallbackMethod() default "";
+    // commandProperties相关参数
+    HystrixProperty[] commandProperties() default {};
+    // threadPoolProperties相关参数
+    HystrixProperty[] threadPoolProperties() default {};
+    // 可忽略的异常
+    Class&lt;? extends Throwable&gt;[] ignoreExceptions() default {};
+    // 分为LAZY和EAGER两种模式
+    ObservableExecutionMode observableExecutionMode() default ObservableExecutionMode.EAGER;
+    // 添加Hystrix执行期间所包含的想要抛出的异常
+    HystrixException[] raiseHystrixExceptions() default {};
+    // 默认fallback方法
+    String defaultFallback() default "";
+}
+</code></pre> 
+  <p>@HystrixCommand注解执行过程</p> 
+  <p>该注解也是基于aop实现的，其修饰的方法会进入HystrixCommandAspect中的methodsAnnotatedWithHystrixCommand()方法，该Aspect中仅实现了切面的Around方式。源码如下：</p> 
+  <pre><code>@Pointcut("@annotation(com.netflix.hystrix.contrib.javanica.annotation.HystrixCommand)")
+public void hystrixCommandAnnotationPointcut() {
+}
+
+@Pointcut("@annotation(com.netflix.hystrix.contrib.javanica.annotation.HystrixCollapser)")
+public void hystrixCollapserAnnotationPointcut() {
+}
+
+@Around("hystrixCommandAnnotationPointcut() || hystrixCollapserAnnotationPointcut()")
+public Object methodsAnnotatedWithHystrixCommand(final ProceedingJoinPoint joinPoint) throws Throwable {
+    // 获取切点方法
+    Method method = getMethodFromTarget(joinPoint);
+    // 被修饰方法不能为null
+    Validate.notNull(method, "failed to get method from joinPoint: %s", joinPoint);
+    // @HystrixCommand和@HystrixCollapser不能同时使用
+    if (method.isAnnotationPresent(.class) &amp;&amp; method.isAnnotationPresent(HystrixCollapser.class)) {
+        throw new IllegalStateException("method cannot be annotated with HystrixCommand and HystrixCollapser " +
+                "annotations at the same time");
+    }
+    // 构造metaHolderFactory根据类型（COMMAND和COLLAPSER）
+    MetaHolderFactory metaHolderFactory = META_HOLDER_FACTORY_MAP.get(HystrixPointcutType.of(method));
+    // 创建metaHolder，其中包含了各种必要信息，如注解的方法包含的各种信息以及fallback方法的各种信息，下面有源码
+    MetaHolder metaHolder = metaHolderFactory.create(joinPoint);
+    // 创建一个可执行器，下面有源码
+    HystrixInvokable invokable = HystrixCommandFactory.getInstance().create(metaHolder);
+    // 设置类型SYNCHRONOUS、ASYNCHRONOUS、OBSERVABLE
+    ExecutionType executionType = metaHolder.isCollapserAnnotationPresent() ?
+            metaHolder.getCollapserExecutionType() : metaHolder.getExecutionType();
+
+    Object result;
+    try {
+        if (!metaHolder.isObservable()) {
+            // 默认会执行这里，根据不同情况返回结果，也是通过Futrue方式执行请求，通过get()方法获取结果，下面有源码
+            result = CommandExecutor.execute(invokable, executionType, metaHolder);
+        } else {
+            result = executeObservable(invokable, executionType, metaHolder);
+        }
+    } catch (HystrixBadRequestException e) {
+        throw e.getCause() != null ? e.getCause() : e;
+    } catch (HystrixRuntimeException e) {
+        throw hystrixRuntimeExceptionToThrowable(metaHolder, e);
+    }
+    return result;
+}
+</code></pre> 
+  <p>metaHolderFactory.create(joinPoint)调用的create是MetaHolderFactory的重构方法，实际上是调用下面的create方法。</p> 
+  <pre><code>public abstract MetaHolder create(Object proxy, Method method, Object obj, Object[] args, final ProceedingJoinPoint joinPoint);
+
+MetaHolder.Builder metaHolderBuilder(Object proxy, Method method, Object obj, Object[] args, final ProceedingJoinPoint joinPoint) {
+    MetaHolder.Builder builder = MetaHolder.builder()
+            .args(args).method(method).obj(obj).proxyObj(proxy)
+            .joinPoint(joinPoint);
+    // 此处就是添加fallback方法
+    setFallbackMethod(builder, obj.getClass(), method);
+    builder = setDefaultProperties(builder, obj.getClass(), joinPoint);
+    return builder;
+}
+</code></pre> 
+  <p>HystrixCommandFactory.getInstance().create(metaHolder)调用的create方法</p> 
+  <pre><code>public HystrixInvokable create(MetaHolder metaHolder) {
+    HystrixInvokable executable;
+    if (metaHolder.isCollapserAnnotationPresent()) {
+        executable = new CommandCollapser(metaHolder);
+    } else if (metaHolder.isObservable()) {
+        executable = new GenericObservableCommand(HystrixCommandBuilderFactory.getInstance().create(metaHolder));
+    } else {
+        // 默认情况都会执行这里
+        executable = new GenericCommand(HystrixCommandBuilderFactory.getInstance().create(metaHolder));
+    }
+    return executable;
+}
+</code></pre> 
+  <p>最终的方法执行</p> 
+  <pre><code>public static Object execute(HystrixInvokable invokable, ExecutionType executionType, MetaHolder metaHolder) throws RuntimeException {
+    Validate.notNull(invokable);
+    Validate.notNull(metaHolder);
+
+    switch (executionType) {
+        case SYNCHRONOUS: {
+            // 最终会执行这里的execute()方法，实际上调用的是queue().get()
+            return castToExecutable(invokable, executionType).execute();
+        }
+        case ASYNCHRONOUS: {
+            HystrixExecutable executable = castToExecutable(invokable, executionType);
+            if (metaHolder.hasFallbackMethodCommand()
+                    &amp;&amp; ExecutionType.ASYNCHRONOUS == metaHolder.getFallbackExecutionType()) {
+                return new FutureDecorator(executable.queue());
+            }
+            return executable.queue();
+        }
+        case OBSERVABLE: {
+            HystrixObservable observable = castToObservable(invokable);
+            return ObservableExecutionMode.EAGER == metaHolder.getObservableExecutionMode() ? observable.observe() : observable.toObservable();
+        }
+        default:
+            throw new RuntimeException("unsupported execution type: " + executionType);
+    }
+}
+</code></pre> 
+  <p>getFallback方法</p> 
+  <p>上面一直没提到getFallback()方法，这个方法是在全流程中出现异常时，自动跳入的，源码中也有相关说明</p> 
+  <pre><code>/**
+* The fallback is performed whenever a command execution fails.
+*/
+@Override
+protected Object getFallback() {
+    // 获取fallback方法的执行器
+    final CommandAction commandAction = getFallbackAction();
+    // 如果获取到了则执行
+    if (commandAction != null) {
+        try {
+            return process(new Action() {
+                @Override
+                Object execute() {
+                    MetaHolder metaHolder = commandAction.getMetaHolder();
+                    Object[] args = createArgsForFallback(metaHolder, getExecutionException());
+                    return commandAction.executeWithArgs(metaHolder.getFallbackExecutionType(), args);
+                }
+            });
+        } catch (Throwable e) {
+            LOGGER.error(FallbackErrorMessageBuilder.create()
+                    .append(commandAction, e).build());
+            throw new FallbackInvocationException(unwrapCause(e));
+        }
+    } else {
+        return super.getFallback();
+    }
+}
+</code></pre> 
+  <p>HystrixCommandExecutionHook</p> 
+  <p>可能看了源码很多人也都有疑问，为什么出现异常就会转入getFallback方法，这是由于Hystrix使用了hook钩子，中包含了很多未实现的抽象方法。仔细看源码会发现在最开始初始化各个Hystrix参数的时候就初始化了hook。</p> 
+  <pre><code>protected AbstractCommand(HystrixCommandGroupKey group, HystrixCommandKey key, HystrixThreadPoolKey threadPoolKey, HystrixCircuitBreaker circuitBreaker, HystrixThreadPool threadPool,
+        HystrixCommandProperties.Setter commandPropertiesDefaults, HystrixThreadPoolProperties.Setter threadPoolPropertiesDefaults,
+        HystrixCommandMetrics metrics, TryableSemaphore fallbackSemaphore, TryableSemaphore executionSemaphore,
+        HystrixPropertiesStrategy propertiesStrategy, HystrixCommandExecutionHook executionHook) {
+
+    this.commandGroup = initGroupKey(group);
+    this.commandKey = initCommandKey(key, getClass());
+    this.properties = initCommandProperties(this.commandKey, propertiesStrategy, commandPropertiesDefaults);
+    this.threadPoolKey = initThreadPoolKey(threadPoolKey, this.commandGroup, this.properties.executionIsolationThreadPoolKeyOverride().get());
+    this.metrics = initMetrics(metrics, this.commandGroup, this.threadPoolKey, this.commandKey, this.properties);
+    this.circuitBreaker = initCircuitBreaker(this.properties.circuitBreakerEnabled().get(), circuitBreaker, this.commandGroup, this.commandKey, this.properties, this.metrics);
+    this.threadPool = initThreadPool(threadPool, this.threadPoolKey, threadPoolPropertiesDefaults);
+
+    //Strategies from plugins
+    this.eventNotifier = HystrixPlugins.getInstance().getEventNotifier();
+    this.concurrencyStrategy = HystrixPlugins.getInstance().getConcurrencyStrategy();
+    HystrixMetricsPublisherFactory.createOrRetrievePublisherForCommand(this.commandKey, this.commandGroup, this.metrics, this.circuitBreaker, this.properties);
+    this.executionHook = initExecutionHook(executionHook);
+
+    this.requestCache = HystrixRequestCache.getInstance(this.commandKey, this.concurrencyStrategy);
+    this.currentRequestLog = initRequestLog(this.properties.requestLogEnabled().get(), this.concurrencyStrategy);
+
+    /* fallback semaphore override if applicable */
+    this.fallbackSemaphoreOverride = fallbackSemaphore;
+
+    /* execution semaphore override if applicable */
+    this.executionSemaphoreOverride = executionSemaphore;
+}
+</code></pre> 
+  <p>最终的实现都是在ExecutionHookDeprecationWrapper类中实现的具体逻辑，该类是HystrixCommandExecutionHook抽象类的子类。</p> 
+  <p>这就是Hystrix中getFallback方法的实现原理。</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

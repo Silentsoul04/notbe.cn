@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>记一次JVM线程池配置不合理导致的JVM挂掉问题排查 « NotBeCN</title>
+  <meta name="description" content="          原则一   ——尽一切可能保护有限的资源。   问题描述   现场反馈,服务启动起来有一段时间就自己挂掉了,大概几十秒到几分钟,技支反馈日志突然就中断了,看不到任何错误的迹象;   原因预估   我确信,经验不同的人排查问题的思路差异是非常大的,庆幸的是这些可以借鉴，我们应该总结自己的经验，借...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/u010820702_90138593.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">记一次JVM线程池配置不合理导致的JVM挂掉问题排查</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p><strong>原则一</strong></p> 
+  <p style="text-indent:50px;">——尽一切可能保护有限的资源。</p> 
+  <p><strong>问题描述</strong></p> 
+  <p style="text-indent:50px;">现场反馈,服务启动起来有一段时间就自己挂掉了,大概几十秒到几分钟,技支反馈日志突然就中断了,看不到任何错误的迹象;</p> 
+  <p style="text-indent:0;"><strong>原因预估</strong></p> 
+  <p style="text-indent:50px;">我确信,经验不同的人排查问题的思路差异是非常大的,庆幸的是这些可以借鉴，我们应该总结自己的经验，借鉴旁人的经验；</p> 
+  <ol>
+   <li> <p style="text-indent:0;">我当时就想怎么会没日志呢！是不是他们找错地方了！我得亲自看看！</p> </li> 
+   <li> <p style="text-indent:0;">日志里面一定能找到我需要的，肯定是哪个组件又挂掉了，这是我见得最多的导致服务挂掉的问题之一</p> </li> 
+  </ol>
+  <p style="text-indent:50px;">事实证明，错的有点离谱！ 此后我又多了一条经验法则。</p> 
+  <p style="text-indent:0;"><strong>处理过程</strong></p> 
+  <ol>
+   <li> <p style="text-indent:0;">习惯性的，看一下日志文件，的确同技支反馈的一样，突然就日志就中断了——确实没有日志。</p> </li> 
+   <li> <p style="text-indent:0;">自己对JVM是比较了解的[前提],我检查了服务的内存配置,-Xmx在4G左右,对这个服务来说这是一个很富裕的配置了；——当前的内存配置是很合理的;</p> </li> 
+   <li> <p style="text-indent:0;">我决定重启一下服务,使用我的杀手锏[jmap、jinfo、jstack]，因为服务会很快挂掉,重启后就立即进行了JVM的一系列排查,看了内存分配，看了垃圾收集，在这段时间内表现都良好，看了线程栈没发现什么大问题[实际上这里有问题，道行不够没看出来当时]——这下麻烦了，剧情反转的很快，推荐学习一下《深入理解Java虚拟机》</p> </li> 
+   <li> <p style="text-indent:0;">有点失望,突然想起一个事情来,JVM在奔溃是会释放一个hs_err_pid文件描述JVM奔溃是JVM的内部状态;——找到这个文件</p> </li> 
+   <li> <p style="text-indent:0;">在用户路径下我找到了这个文件hs_err_pid28332,28332是当时JVM的进程号——剩下的就是分析这个文件了</p> </li> 
+   <li> <p style="text-indent:0;">很遗憾，文件我看了，资料我也查了，没找到具体问题，还是找到了一些东西，后边展开说。——好吧，我要去看源码了。</p> </li> 
+   <li> <p style="text-indent:0;">很快我就找到问题了，问题出自以下代码</p> <pre class="has">
+<code class="language-java">private ExecutorService pool = Executors.newCachedThreadPool();</code></pre> <p>补充一下，当时系统的负载较高，每秒50条左右的记录[日志里面看出来的]，这些记录被并发的入库，用的就是这个线程池，或许你已经想到了——入库的速率小于输入的速率,会不断的有数据积压，意味着上面这个线程池会不断的创建新的线程，内存中允许积压不受限制的任务。</p> </li> 
+   <li> <p style="text-indent:0;">接下来就是处理问题了，两点，第一点:业务系统有问题,正常情况下不会有这么大的流量，重置了业务系统的状态解决了，第二点：控制线程池资源；以下作为参考,关于线程池相关的内容这节不展开；</p> <pre class="has">
+<code class="language-java">public final int corePoolSize = 10;
+public final int maximumPoolSize = 10;
+public final long keepAliveTime = 120;
+public final int capacity = 20;
+
+public DataBaseImpl() {
+	ArrayBlockingQueue&lt;Runnable&gt; queue = new ArrayBlockingQueue&lt;&gt;(capacity);
+	pool = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, keepAliveTime, TimeUnit.MILLISECONDS, queue,
+			new CallerRunsPolicy());
+}</code></pre> <p>&nbsp;</p> </li> 
+   <li> <p style="text-indent:0;">补充一下自己的经验法则。回头在看一下堆栈信息,线程数基本稳定。</p> </li> 
+  </ol>
+  <p style="text-indent:0;"><strong>关于hs_err_pid</strong></p> 
+  <p style="text-indent:50px;">这个文件比较大，我拿到的在6M左右,大概有以下内容，这里也不具体展开，有机会单独写一篇</p> 
+  <ol>
+   <li> <p style="text-indent:0;">概述信息，大概能看出来是因为申请了一块64字节的本地内存被拒绝了，明确告诉我们是内存溢出。</p> <pre class="has">
+<code>#
+# There is insufficient memory for the Java Runtime Environment to continue.
+# Native memory allocation (malloc) failed to allocate 65536 bytes for committing reserved memory.
+# Possible reasons:
+#   The system is out of physical RAM or swap space
+#   In 32 bit mode, the process size limit was hit
+# Possible solutions:
+#   Reduce memory load on the system
+#   Increase physical memory or swap space
+#   Check if swap backing store is full
+#   Use 64 bit Java on a 64 bit OS
+#   Decrease Java heap size (-Xmx/-Xms)
+#   Decrease number of Java threads
+#   Decrease Java thread stack sizes (-Xss)
+#   Set larger code cache with -XX:ReservedCodeCacheSize=
+# This output file may be truncated or incomplete.
+#
+#  Out of Memory Error (os_linux.cpp:2756), pid=28332, tid=139638808086272
+#
+# JRE version: Java(TM) SE Runtime Environment (7.0_75-b13) (build 1.7.0_75-b13)
+# Java VM: Java HotSpot(TM) 64-Bit Server VM (24.75-b04 mixed mode linux-amd64 compressed oops)
+# Failed to write core dump. Core dumps have been disabled. To enable core dumping, try "ulimit -c unlimited" before starting Java again
+#</code></pre> </li> 
+   <li>线程信息，可以看到JVM奔溃前各个线程的状态,下面是其中一部分,我观察到线程池"pool-3"总共创建了3万多个线程，并且都是blocked状态。特意查了一下，JVM中不能无限制的创建线程，最多10000左右就要出问题. <pre class="has">
+<code>Java Threads: ( =&gt; current thread )
+  0x00007ef1b01fd800 JavaThread "pool-3-thread-32071" [_thread_blocked, id=4026, stack(0x00007ef1a1718000,0x00007ef1a1819000)]
+  0x00007ef1b01fb800 JavaThread "pool-3-thread-32070" [_thread_blocked, id=4025, stack(0x00007ef1a1819000,0x00007ef1a191a000)]
+  0x00007ef1b01f9800 JavaThread "pool-3-thread-32069" [_thread_blocked, id=4024, stack(0x00007ef1a191a000,0x00007ef1a1a1b000)]
+  0x00007ef1b01f7800 JavaThread "pool-3-thread-32068" [_thread_blocked, id=4023, stack(0x00007ef1a1a1b000,0x00007ef1a1b1c000)]
+  0x00007ef1b01f5000 JavaThread "pool-3-thread-32067" [_thread_blocked, id=4022, stack(0x00007ef1a1b1c000,0x00007ef1a1c1d000)]
+  0x00007ef1b01f3000 JavaThread "pool-3-thread-32066" [_thread_blocked, id=4021, stack(0x00007ef1a1c1d000,0x00007ef1a1d1e000)]
+  0x00007ef1b01f1000 JavaThread "pool-3-thread-32065" [_thread_blocked, id=4020, stack(0x00007ef1a1d1e000,0x00007ef1a1e1f000)]
+  0x00007ef1b01ef000 JavaThread "pool-3-thread-32064" [_thread_blocked, id=4019, stack(0x00007ef1a1e1f000,0x00007ef1a1f20000)]
+  0x00007ef1b01ed000 JavaThread "pool-3-thread-32063" [_thread_blocked, id=4018, stack(0x00007ef1a1f20000,0x00007ef1a2021000)]
+  0x00007ef1b01eb000 JavaThread "pool-3-thread-32062" [_thread_blocked, id=4017, stack(0x00007ef1a2021000,0x00007ef1a2122000)]
+  0x00007ef1b01e9000 JavaThread "pool-3-thread-32061" [_thread_blocked, id=4016, stack(0x00007ef1a2122000,0x00007ef1a2223000)]
+  0x00007ef1b01e6800 JavaThread "pool-3-thread-32060" [_thread_blocked, id=4015, stack(0x00007ef1a2223000,0x00007ef1a2324000)]
+  0x00007ef1b01e4800 JavaThread "pool-3-thread-32059" [_thread_blocked, id=4014, stack(0x00007ef1a2324000,0x00007ef1a2425000)]
+  0x00007ef1b01e2800 JavaThread "pool-3-thread-32058" [_thread_blocked, id=4013, stack(0x00007ef1a2425000,0x00007ef1a2526000)]
+  0x00007ef1b01e0800 JavaThread "pool-3-thread-32057" [_thread_blocked, id=4012, stack(0x00007ef1a2526000,0x00007ef1a2627000)]
+  0x00007ef1</code></pre> <p>&nbsp;</p> </li> 
+   <li>Java堆内存信息,比较正常,没看出来明显信息 <pre class="has">
+<code>Heap
+ PSYoungGen      total 2272768K, used 1476410K [0x0000000755500000, 0x0000000800000000, 0x0000000800000000)
+  eden space 2098176K, 67% used [0x0000000755500000,0x00000007ac5a64f0,0x00000007d5600000)
+  from space 174592K, 28% used [0x00000007d5600000,0x00000007d8728410,0x00000007e0080000)
+  to   space 174592K, 0% used [0x00000007f5580000,0x00000007f5580000,0x0000000800000000)
+ ParOldGen       total 2796544K, used 24K [0x0000000600000000, 0x00000006aab00000, 0x0000000755500000)
+  object space 2796544K, 0% used [0x0000000600000000,0x0000000600006000,0x00000006aab00000)
+ PSPermGen       total 21504K, used 14511K [0x00000005fae00000, 0x00000005fc300000, 0x0000000600000000)
+  object space 21504K, 67% used [0x00000005fae00000,0x00000005fbc2bd20,0x00000005fc300000)
+
+Card table byte_map: [0x00007f00bcd24000,0x00007f00bdd4e000] byte_map_base: 0x00007f00b9d4d000
+
+Polling page: 0x00007f00c0547000
+
+Code Cache  [0x00007f00b5000000, 0x00007f00b5270000, 0x00007f00b8000000)
+ total_blobs=1111 nmethods=781 adapters=281 free_code_cache=46698Kb largest_free_block=47781248</code></pre> <p>&nbsp;</p> </li> 
+   <li>编译事件,和JDBC操作相关的比较多，可以帮助我们定位当时的操作 <pre class="has">
+<code>Compilation events (10 events):
+Event: 113.499 Thread 0x00007f00b80e4800  792             oracle.jdbc.driver.T4C8Oall::setOptions (402 bytes)
+Event: 113.499 Thread 0x00007f00b80e7800  793             oracle.jdbc.driver.T4C8Oall::marshalAll (460 bytes)
+Event: 113.505 Thread 0x00007f00b80e4800 nmethod 792 0x00007f00b5261a90 code [0x00007f00b5261c00, 0x00007f00b5261ed8]
+Event: 113.505 Thread 0x00007f00b80e4800  794             oracle.jdbc.driver.T4C8Oall::marshal (636 bytes)
+Event: 113.523 Thread 0x00007f00b80e4800 nmethod 794 0x00007f00b526b350 code [0x00007f00b526b520, 0x00007f00b526bcf8]
+Event: 113.523 Thread 0x00007f00b80e4800  795             oracle.jdbc.driver.T4CTTIrxd::init (6 bytes)
+Event: 113.523 Thread 0x00007f00b80e4800 nmethod 795 0x00007f00b51e8c50 code [0x00007f00b51e8d80, 0x00007f00b51e8dd8]
+Event: 113.523 Thread 0x00007f00b80e4800  796             oracle.jdbc.driver.DBConversion::getNCharSetId (5 bytes)
+Event: 113.523 Thread 0x00007f00b80e4800 nmethod 796 0x00007f00b51e89d0 code [0x00007f00b51e8b00, 0x00007f00b51e8b58]
+Event: 113.523 Thread 0x00007f00b80e4800  797             oracle.jdbc.driver.T4CConnection::sendPiggyBackedClose (69 bytes)
+</code></pre> <p>&nbsp;</p> </li> 
+   <li>GC信息,保留了最后的几条,看着也比较正常，每次GC后都能释放大部分资源.</li> 
+  </ol>
+  <p style="text-indent:0px;"><strong>总结</strong></p> 
+  <p style="text-indent:50px;">为自己增加一条编程法则,——添加对有限资源的访问的保护、完善自己的经验法则。常见的连接池、线程池、缓存、限流、熔断等等。</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

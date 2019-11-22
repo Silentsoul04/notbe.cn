@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux设备驱动归纳总结（三）：3面向对象思想和lseek、container_of、write、read 【转】... « NotBeCN</title>
+  <meta name="description" content="             linux设备驱动归纳总结（三）：3.设备驱动面向对象思想和lseek的实现    &nbsp;转自：http://blog.chinaunix.net/uid-25014876-id-59418.html    &nbsp;    一、结构体struct file和struct ino...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/10/15/weixin_34297704_90124762.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux设备驱动归纳总结（三）：3面向对象思想和lseek、container_of、write、read 【转】...</h1>
+    <p class="post-meta">Oct 15, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p><span style="font-family:'DejaVu Serif', serif;">linux</span>设备驱动归纳总结（三）：<span style="font-family:'DejaVu Serif', serif;">3.</span>设备驱动面向对象思想和<span style="font-family:'DejaVu Serif', serif;">lseek</span>的实现</p> 
+   <p>&nbsp;转自：<a href="http://blog.chinaunix.net/uid-25014876-id-59418.html" rel="nofollow">http://blog.chinaunix.net/uid-25014876-id-59418.html</a></p> 
+   <p>&nbsp;</p> 
+   <p>一、结构体<span style="font-family:'DejaVu Serif', serif;">struct file</span>和<span style="font-family:'DejaVu Serif', serif;">struct inode</span></p> 
+   <p>&nbsp;</p> 
+   <p>在之前写的函数，全部是定义了一些零散的全局变量。有没有办法整合成到一个结构体当中？这样的话，看起来和用起来都比较方便。接下来就要说这方面的问题。</p> 
+   <p>&nbsp;</p> 
+   <p>不过先要介绍一下除了<span style="font-family:'DejaVu Serif', serif;">fops</span>以外的两个比较重要的结构体：</p> 
+   <p>&nbsp;</p> 
+   <p><span style="color:#ff0000;"><span style="font-family:'DejaVu Serif', serif;">1)struct file</span></span></p> 
+   <p>在内核中，<span style="font-family:'DejaVu Serif', serif;">file</span>结构体是用来维护打开的文件的。<span style="color:#ff0000;">每打开一次文件，内核空间里就</span></p> 
+   <p><span style="color:#ff0000;">会多增加一个<span style="font-family:'DejaVu Serif', serif;">file</span></span><span style="color:#ff0000;">来维护，当文件关闭是释放</span>。</p> 
+   <p>所以，在内核中可以存在同一个文件的多个<span style="font-family:'DejaVu Serif', serif;">file</span>，因为该文件被应用程序打开被打</p> 
+   <p>开。</p> 
+   <p>&nbsp;</p> 
+   <p>在<span style="font-family:'DejaVu Serif', serif;">struct file</span>中有几个重要的成员：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">1)loff_t f_pos;</span></p> 
+   <p>这是用来记录文件的偏移量。在应用程序中，打开文件时偏移量为<span style="font-family:'DejaVu Serif', serif;">0</span>，<span style="color:#ff0000;">每次的读写操作都会使偏移量增加</span>。</p> 
+   <p>从这个原因可以看出为什么每打开一次文件就新建一个<span style="font-family:'DejaVu Serif', serif;">file</span>结构体了。不然的话，每个打开文件的读写操作都修改同一个偏移量，那读写岂不是乱套了吗？</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">2)void *private_data;</span></p> 
+   <p><span style="color:#ff0000;">这是空类型的指针可以用于存放任何数据</span>，我会用这个指针来存放待会要定义的结构体指针。</p> 
+   <p>回想一下，文件操作结构体<span style="font-family:'DejaVu Serif', serif;">fops</span>中所有的函数成员里面都有一个参数是<span style="font-family:'DejaVu Serif', serif;">file</span>结构体，所以每个函数都可以在<span style="font-family:'DejaVu Serif', serif;">file-&gt;private_data</span>中拿到我自己定义的结构体了。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">3)struct file_operations *fops;</span></p> 
+   <p>打开文件后，内核会把<span style="font-family:'DejaVu Serif', serif;">fops</span>存放在这里，以后的操作就在这里在这里找函数了。</p> 
+   <p>&nbsp;</p> 
+   <p><span style="color:#ff0000;"><span style="font-family:'DejaVu Serif', serif;">2)struct inode</span></span></p> 
+   <p>这个结构体是用来保存一个文件的基本信息的结构体，<span style="color:#ff0000;">即使打开多个相同的文件，也只会有一个对应的<span style="font-family:'DejaVu Serif', serif;">inode</span></span>。</p> 
+   <p>它也有两个常用的成员：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">1)dev_t i_rdev;</span></p> 
+   <p>这里存放着这个文件的设备号。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">2)struct cdev *i_cdev;</span></p> 
+   <p>这个结构体很熟悉吧，这就是注册设备时用的<span style="font-family:'DejaVu Serif', serif;">cdev</span>就存在这。这个结构体的用处现在我还不好说，待会看程序就知道了。</p> 
+   <p>&nbsp;</p> 
+   <p>二、面向对象的思想</p> 
+   <p>&nbsp;</p> 
+   <p>接下来就封装一下之前程序的数据类型吧：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">18 struct _test_t{</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">19 char kbuf[DEV_SIZE]; //</span>这里存放数据</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">20 unsigned int major; //</span>这里存放主设备号</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">21 unsigned int minor; //</span>这里存放次设备号</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">22 unsigned int cur_size; //</span>这里存放当前的<span style="font-family:'DejaVu Serif', serif;">kbuf</span>的大小</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">23 dev_t devno; //</span>这里存放设备号</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">24 struct cdev test_cdev; //</span>这里存放<span style="font-family:'DejaVu Serif', serif;">cdev</span>结构体</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">25 };</span></p> 
+   <p>定义了这样的一个结构体后，在<span style="color:#ff0000;">操作函数中怎么拿到这个结构体的指针</span>呢？</p> 
+   <p>先来个函数：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">#define container_of(ptr, type, member) ({ \</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">const typeof( ((type *)0)-&gt;member ) *__mptr = (ptr); \</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">(type *)( (char *)__mptr - offsetof(type,member) );})</span></p> 
+   <p>使用：</p> 
+   <p>已知一个结构体里面一个成员的指针<span style="font-family:'DejaVu Serif', serif;">ptr</span>，同时，这个成员也是另外一个结构体类型中的一个成员，这个结构体的类型是<span style="font-family:'DejaVu Serif', serif;">type</span>，而这个成员以<span style="font-family:'DejaVu Serif', serif;">member</span>这个名字命名。就可以通过这个函数找到指向类型是<span style="font-family:'DejaVu Serif', serif;">type</span>的结构体的指针。</p> 
+   <p>返回值：</p> 
+   <p>返回值就是指向<span style="font-family:'DejaVu Serif', serif;">type</span>结构体类型的数据的指针。</p> 
+   <p>&nbsp;</p> 
+   <p>如：现在定义这样的两个结构体：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">struct A {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">int *xiaobai_a;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">};</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">struct B {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">int xiaobai_b;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">};</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">struct A a;</span></p> 
+   <p>在遥远的另一处有这样的定义：<span style="font-family:'DejaVu Serif', serif;">struct B b;</span></p> 
+   <p>并且，<span style="font-family:'DejaVu Serif', serif;">a.xiaobai_a = &amp;b.xiaobai_b;</span></p> 
+   <p>这样，在不知道<span style="font-family:'DejaVu Serif', serif;">b</span>只知道<span style="font-family:'DejaVu Serif', serif;">a</span>的情况下也可以找到<span style="font-family:'DejaVu Serif', serif;">b</span>的位置：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">struct B *bb = container_of(a.xiaobai_a, struct B, xiaobai_b);</span></p> 
+   <p>估计被上面的解释说晕了吧。我还是举个例比较方便：</p> 
+   <p>&nbsp;</p> 
+   <p>虽然一个函数不值得说这么久，但是我觉得这种思想很不错，内核中很多时候都用到这个函数，如在内核链表中。</p> 
+   <p>来个邪恶的例子名字——老板与小秘：</p> 
+   <p><img src="https://yqfile.alicdn.com/img_492200e38c91df1864faf3e5fa750c31.png" alt=""></p> 
+   <p>老板他请了个年轻的小秘，他就跟客户说：“我电话号码经常换，你记着我小秘的电话，想找我嘛，找我小秘就可以了！”</p> 
+   <p>于是，客户想找老板了，就打通小秘的电话，说：“我知道你是秘书小红，我想找你老板小黑，麻烦给他的电话号码我。”</p> 
+   <p>这样，客户就拿到了老板最新的电话号码了。</p> 
+   <p>想象老板和客户是个结构体，秘书和他的电话号码是个各自成员，电话号码想象成指针：</p> 
+   <p>老板的电话&nbsp;<span style="font-family:'DejaVu Serif', serif;">= container_of(</span>秘书的电话， 老板，小秘<span style="font-family:'DejaVu Serif', serif;">)</span></p> 
+   <p>&nbsp;</p> 
+   <p>说了半天还没进入正题，这个函数用在哪里呢？谁当小秘呢？</p> 
+   <p>就是那个说了半天都不知道能做什么还经常出现的<span style="font-family:'DejaVu Serif', serif;">struct cdev</span>！</p> 
+   <p>而我把<span style="font-family:'DejaVu Serif', serif;">cdev</span>添加到了我自己建的结构体<span style="font-family:'DejaVu Serif', serif;">struct _test_t</span>中，所哟<span style="font-family:'DejaVu Serif', serif;">struct _test_t</span>就是老板！</p> 
+   <p>而<span style="font-family:'DejaVu Serif', serif;">struct inode</span>就是客户了，因为它的成员里面有小秘的电话号码：<span style="font-family:'DejaVu Serif', serif;">struct cdev *i_cdev;</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="color:#ff0000;">所以，如果想得到<span style="font-family:'DejaVu Serif', serif;">_test_t</span></span><span style="color:#ff0000;">，只要调用这个函数就行了。</span></p> 
+   <p>下面看一下改良后的<span style="font-family:'DejaVu Serif', serif;">open</span>函数</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">27 int test_open(struct inode *node, struct file *filp)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">28 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">29 struct _test_t *dev;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">30&nbsp;<span style="color:#ff0000;">dev = container_of(node-&gt;i_cdev, struct _test_t, test_cdev);</span></span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">31&nbsp;<span style="color:#ff0000;">filp-&gt;private_data = dev;</span></span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">32 return 0;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">33 }</span></p> 
+   <p>上面还有一句，将获得的结构体指针存放到<span style="font-family:'DejaVu Serif', serif;">filp</span>的<span style="font-family:'DejaVu Serif', serif;">private_data</span>中。</p> 
+   <p>&nbsp;</p> 
+   <p>这是因为，<span style="font-family:'DejaVu Serif', serif;">struct file_operations</span>中的<span style="color:#ff0000;">每个函数的第一个参数就是<span style="font-family:'DejaVu Serif', serif;">struct file,</span></span>只要有<span style="font-family:'DejaVu Serif', serif;"><span style="color:#ff0000;">file</span></span><span style="color:#ff0000;">，每个函数都可以从<span style="font-family:'DejaVu Serif', serif;">private_data</span></span><span style="color:#ff0000;">中得到数据了</span>。相反，<span style="font-family:'DejaVu Serif', serif;">struct inode</span>这个参数并不是<span style="font-family:'DejaVu Serif', serif;">file_operations</span>中所有的函数都有。</p> 
+   <p>&nbsp;</p> 
+   <p>下面贴上部分代码：<span style="font-family:'DejaVu Serif', serif;">1st/test.c</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">18 struct _test_t{</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">19 char kbuf[DEV_SIZE];</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">20 unsigned int major;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">21 unsigned int minor;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">22 unsigned int cur_size;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">23 dev_t devno;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">24 struct cdev test_cdev;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">25 };</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">26</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">27 int test_open(struct inode *node, struct file *filp)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">28 {/*open</span>操作需要给把拿到的结构体指针赋值给<span style="font-family:'DejaVu Serif', serif;">private_data*/</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">29 struct _test_t *dev;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">30 dev = container_of(node-&gt;i_cdev, struct _test_t, test_cdev);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">31 filp-&gt;private_data = dev;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">32 return 0;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">33 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">34</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">35 int test_close(struct inode *node, struct file *filp)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">36 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">37 return 0;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">38 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">39</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">40 ssize_t test_read(struct file *filp, char __user *buf, size_t count, loff_t *offset)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">41 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">42 int ret;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">43 struct _test_t *dev = filp-&gt;private_data;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">44</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">45 if(!dev-&gt;cur_size){</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">46 return 0;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">47 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">48</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">49 if (copy_to_user(buf, dev-&gt;kbuf, count)){</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">50 ret = - EFAULT;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">51 }else{/*read</span>函数成功读取后要修改<span style="font-family:'DejaVu Serif', serif;">cur_size*/</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">52 ret = count;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">53 dev-&gt;cur_size -= count;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">54 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">55 P_DEBUG("cur_size:[%d]\n", dev-&gt;cur_size);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">56</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">57 return ret;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">58 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">59</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">60 ssize_t test_write(struct file *filp, const char __user *buf, size_t count, loff_t *offset)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">61 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">62 int ret;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">63 struct _test_t *dev = filp-&gt;private_data;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">64</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">65 if(copy_from_user(dev-&gt;kbuf, buf, count)){</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">66 ret = - EFAULT;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">67 }else{/*write</span>函数成功写入后也要修改<span style="font-family:'DejaVu Serif', serif;">cur_size*/</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">68 ret = count;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">69 dev-&gt;cur_size += count;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">70 P_DEBUG("kbuf is [%s]\n", dev-&gt;kbuf);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">71 P_DEBUG("cur_size:[%d]\n", dev-&gt;cur_size);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">72 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">73</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">74 return ret; //</span>返回实际写入的字节数或错误号</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">75 }</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="color:#ff0000;">上面的程序其实就多了比上一个程序多了三步：</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">1)</span>封装了一个结构体。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">2)open</span>函数要获得结构体并存放到<span style="font-family:'DejaVu Serif', serif;">private_data</span>中。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">3)read</span>和<span style="font-family:'DejaVu Serif', serif;">write</span>函数成功后要更新<span style="font-family:'DejaVu Serif', serif;">cur_size</span>这个值。</p> 
+   <p>&nbsp;</p> 
+   <p>这样，一个像样点的程序出来了，写个应用程序验证一下：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">1 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">2 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">3 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">4 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">5</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">6 int main(void)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">7 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">8 char buf[20];</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">9 int fd;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">10 fd = open("/dev/test", O_RDWR);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">11 if(fd &lt; 0)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">12 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">13 perror("open");</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">14 return -1;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">15 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">16</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">17 read(fd, buf, 10);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">18 printf("buf is [%s]\n", buf);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">19</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">20 write(fd, "xiao bai", 10);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">21</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">22 read(fd, buf, 10);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">23 printf("buf is [%s]\n", buf);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">24</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">25 close(fd);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">26 return 0;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">27 }</span></p> 
+   <p>&nbsp;</p> 
+   <p>运行一下：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[root: 1st]# insmod test.ko</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">major[253] minor[0]</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">hello kernel</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[root: 1st]# mknod /dev/test c 253 0</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[root: 1st]# ./app</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">buf is [] //</span>第一次读取时<span style="font-family:'DejaVu Serif', serif;">cur_size==0</span>，没数据就会返回</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_write]kbuf is [xiao bai] //</span>成功写入</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_write]cur_size:[10] //</span>更新<span style="font-family:'DejaVu Serif', serif;">cur_size</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_read]cur_size:[0] //read</span>读取成功，跟新<span style="font-family:'DejaVu Serif', serif;">cur_size</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">buf is [xiao bai] //</span>应用程序返回读到的内容</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[root: 1st]#</span></p> 
+   <p>&nbsp;</p> 
+   <p>三、<span style="font-family:'DejaVu Serif', serif;">read</span>、<span style="font-family:'DejaVu Serif', serif;">write</span>的改进</p> 
+   <p>&nbsp;</p> 
+   <p>上面的函数还是不完善的，想象一下，平时的<span style="font-family:'DejaVu Serif', serif;">read</span>、<span style="font-family:'DejaVu Serif', serif;">write</span>函数会增加偏移量，但上面的函数是不会的。这是因为还有一个参数我没用上，就是<span style="font-family:'DejaVu Serif', serif;">"loff_t offset"</span>。</p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">"loff_t offset"</span>这个参数是内核在调用函数时，从<span style="font-family:'DejaVu Serif', serif;">"struct file"</span>的成员<span style="font-family:'DejaVu Serif', serif;">"f_ops"</span>拿到指针并当作参数传入。这样的做法让用户不用再从<span style="font-family:'DejaVu Serif', serif;">"struct file"</span>提取成员，直接拿参数用就行了！</p> 
+   <p>&nbsp;</p> 
+   <p><span style="color:#ff0000;">通过这个参数，我们就可以改进并且实现三个函数：</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">1test_read</span>：当应用程序调用<span style="font-family:'DejaVu Serif', serif;">read</span>时内核会调用<span style="font-family:'DejaVu Serif', serif;">test_read</span>。读取数据的同时，偏移量会增加。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">2test_write</span>：当应用程序调用<span style="font-family:'DejaVu Serif', serif;">write</span>时内核会调用<span style="font-family:'DejaVu Serif', serif;">test_write</span>。写入数据的同时，偏移量也会增加。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">3test_llseek</span>：这是跟应用程序的<span style="font-family:'DejaVu Serif', serif;">lseek</span>对应的，用来修改偏移量的位置。</p> 
+   <p>&nbsp;</p> 
+   <p>有了上面的三个函数的功能，这样才算是个像样的函数！</p> 
+   <p>&nbsp;</p> 
+   <p>先改进一下<span style="font-family:'DejaVu Serif', serif;">read</span>、<span style="font-family:'DejaVu Serif', serif;">write</span>函数</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">40 ssize_t test_read(struct file *filp, char __user *buf, size_t count, loff_t *offset)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">41 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">42 int ret;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">43 struct _test_t *dev = filp-&gt;private_data;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">44</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">45 if(*offset &gt;= DEV_SIZE){//</span>如果偏移量已经超过了数组的容量</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">46 return count ? - ENXIO : 0; //count</span>为<span style="font-family:'DejaVu Serif', serif;">0</span>则返回<span style="font-family:'DejaVu Serif', serif;">0</span>，表示读取<span style="font-family:'DejaVu Serif', serif;">0</span>个数据成功</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">47 } //count</span>不为<span style="font-family:'DejaVu Serif', serif;">0</span>则分会错误号，地址越界</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">48 if(*offset + count &gt; DEV_SIZE){ //</span>如果读取字节数超过了最大偏移量</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">49 count = DEV_SIZE - *offset; //</span>则减少读取字节数。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">50 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">51 /*copy_to_user</span>的参数也要改一下<span style="font-family:'DejaVu Serif', serif;">*/</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">52 if (copy_to_user(buf, dev-&gt;kbuf + *offset, count)){</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">53 ret = - EFAULT;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">54 }else{</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">55 ret = count;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">56 dev-&gt;cur_size -= count; //</span>读取后数组的字节数减少</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">57&nbsp;<span style="color:#ff0000;">*offset += count; //</span></span><span style="color:#ff0000;">偏移量增加</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">58 P_DEBUG("read %d bytes, cur_size:[%d]\n", count, dev-&gt;cur_size);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">59 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">60</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">61 return ret; //</span>返回实际写入的字节数或错误号</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">62 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">63</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">64 ssize_t test_write(struct file *filp, const char __user *buf, size_t count, loff_t *offset)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">65 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">66 int ret;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">67 struct _test_t *dev = filp-&gt;private_data;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">68 /*copy_from_user</span>的参数也要改一下<span style="font-family:'DejaVu Serif', serif;">*/</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">69 if(*offset &gt;= DEV_SIZE){//</span>如果偏移量已经超过了数组的容量</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">70 return count ? - ENXIO : 0; //count</span>为<span style="font-family:'DejaVu Serif', serif;">0</span>则返回<span style="font-family:'DejaVu Serif', serif;">0</span>，表示读取<span style="font-family:'DejaVu Serif', serif;">0</span>个数据成功</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">71 } //count</span>不为<span style="font-family:'DejaVu Serif', serif;">0</span>则分会错误号，地址越界</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">72 if(*offset + count &gt; DEV_SIZE){ //</span>如果读取字节数超过了最大偏移量</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">73 count = DEV_SIZE - *offset; //</span>则减少读取字节数。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">74 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">75</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">76 if(copy_from_user(dev-&gt;kbuf, buf, count)){</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">77 ret = - EFAULT;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">78 }else{</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">79 ret = count;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">80 dev-&gt;cur_size += count; //</span>写入后数组的字节数增加</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">81&nbsp;<span style="color:#ff0000;">*offset += count; //</span></span><span style="color:#ff0000;">偏移量增加</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">82 P_DEBUG("write %d bytes, cur_size:[%d]\n", count, dev-&gt;cur_size);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">83 P_DEBUG("kbuf is [%s]\n", dev-&gt;kbuf);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">84 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">85</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">86 return ret; //</span>返回实际写入的字节数或错误号</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">87 }</span></p> 
+   <p>&nbsp;</p> 
+   <p>话说得好，越是需要检测出错，代码就会几何级增加，如果不想看这么多代码，把这两个函数前面的两个<span style="font-family:'DejaVu Serif', serif;">if(45-50</span>、<span style="font-family:'DejaVu Serif', serif;">69-74)</span>都删掉！反正写应用程序的时候小心翼翼一点就好了。这个程序只是为了验证<span style="font-family:'DejaVu Serif', serif;">"offset"</span>的作用。</p> 
+   <p>&nbsp;</p> 
+   <p>再来个小心翼翼的应用程序：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">1 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">2 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">3 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">4 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">5</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">6 int main(void)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">7 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">8 char buf[20];</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">9 int fd;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">10 fd = open("/dev/test", O_RDWR);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">11 if(fd &lt; 0)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">12 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">13 perror("open");</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">14 return -1;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">15 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">16</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">17 write(fd, "xiao bai", 10);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">18</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">19 read(fd, buf, 10);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">20 printf("buf is [%s]\n", buf);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">21</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">22 close(fd);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">23 return 0;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">24 }</span></p> 
+   <p>&nbsp;</p> 
+   <p>验证一下：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[root: 2nd]# insmod test.ko</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">major[253] minor[0]</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">hello kernel</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[root: 2nd]# mknod /dev/test c 253 0</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[root: 2nd]# ./app</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_write]write 10 bytes, cur_size:[10]//</span>写入</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_write]kbuf is [xiao bai]</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_read]read 10 bytes, cur_size:[0]//</span>但读不出，因为偏移量增加</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">buf is []</span></p> 
+   <p>&nbsp;</p> 
+   <p>上面的<span style="font-family:'DejaVu Serif', serif;">read</span>函数根本读不出数据，这是因为偏移量增加了。这个时候需要一个函数来把偏移量移到开头，<span style="font-family:'DejaVu Serif', serif;">lseek</span>函数就用上场了。下面就讲一下。</p> 
+   <p>&nbsp;</p> 
+   <p>四、<span style="font-family:'DejaVu Serif', serif;">lseek</span>函数的实现</p> 
+   <p>&nbsp;</p> 
+   <p>应用层的函数<span style="font-family:'DejaVu Serif', serif;">lseek</span>函数对应驱动的函数是<span style="font-family:'DejaVu Serif', serif;">llseek(</span>为什么多了一个<span style="font-family:'DejaVu Serif', serif;">l</span>我也想不懂<span style="font-family:'DejaVu Serif', serif;">)</span>。</p> 
+   <p>内核驱动：<span style="font-family:'DejaVu Serif', serif;">loff_t (*llseek) (struct file * filp, loff_t offset, int whence);</span></p> 
+   <p>对应应用层：<span style="font-family:'DejaVu Serif', serif;">off_t lseek(int fd, off_t offset, int whence);</span></p> 
+   <p>使用：</p> 
+   <p>一看参数就知道，这两个函数的第二和第三个参数就是对应的，当应用层调用函数时，对应的参数就会让内核传给驱动的函数<span style="font-family:'DejaVu Serif', serif;">llseek</span>。</p> 
+   <p>参数：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">offset</span>：一看这个参数不是指针，就知道和<span style="font-family:'DejaVu Serif', serif;">read</span>、<span style="font-family:'DejaVu Serif', serif;">write</span>的参数不一样。这是应用层传来的参数，并不是<span style="font-family:'DejaVu Serif', serif;">"struct file"</span>的偏移量<span style="font-family:'DejaVu Serif', serif;">"f_ops"</span>。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">whence</span>：这个也跟应用层的参数一样，指定从哪个位置开始偏移。</p> 
+   <p>从开头位置：<span style="font-family:'DejaVu Serif', serif;">#define SEEK_SET 0</span></p> 
+   <p>从当前位置：<span style="font-family:'DejaVu Serif', serif;">#define SEEK_CUR 1</span></p> 
+   <p>从文件末端：<span style="font-family:'DejaVu Serif', serif;">#define SEEK_END 2</span></p> 
+   <p>返回值：成功返回当前的更新的偏移量，失败返回错误号，而应用层会返回<span style="font-family:'DejaVu Serif', serif;">-1</span>。</p> 
+   <p>&nbsp;</p> 
+   <p>下面来个程序：<span style="font-family:'DejaVu Serif', serif;">/3rd_char/3rd_char_3/3rd/test.c</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">/*test_llseek*/</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">89 loff_t test_llseek (struct file *filp, loff_t offset, int whence)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">90 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">91 loff_t new_pos; //</span>新偏移量</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">92 loff_t old_pos = filp-&gt;f_pos; //</span>旧偏移量</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">93</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">94 switch(whence){</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">95 case SEEK_SET:</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">96 new_pos = offset;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">97 break;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">98 case SEEK_CUR:</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">99 new_pos = old_pos + offset;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">100 break;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">101 case SEEK_END:</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">102 new_pos = DEV_SIZE + offset;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">103 break;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">104 default:</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">105 P_DEBUG("unknow whence\n");</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">106 return - EINVAL;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">107 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">108</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">109 if(new_pos &lt; 0 || new_pos &gt; DEV_SIZE){ //</span>如果偏移量越界，返回错误号</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">110 P_DEBUG("f_pos failed\n");</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">111 return - EINVAL;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">112 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">113</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">114 filp-&gt;f_pos = new_pos;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">115 return new_pos; //</span>正确返回新的偏移量</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">116 }</span></p> 
+   <p>&nbsp;</p> 
+   <p>再来个应用程序：<span style="font-family:'DejaVu Serif', serif;">/3rd_char/3rd_char_3/3rd/app.c</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">1 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">2 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">3 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">4 #include</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">5</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">6 int main(void)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">7 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">8 char buf[20];</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">9 int fd;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">10 int ret;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">11</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">12 fd = open("/dev/test", O_RDWR);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">13 if(fd &lt; 0)</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">14 {</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">15 perror("open");</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">16 return -1;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">17 }</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">18</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">19 write(fd, "xiao bai", 10);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">20 /*</span>让偏移量移至开头，这样才能读取数据<span style="font-family:'DejaVu Serif', serif;">*/</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">21 ret = lseek(fd, 0, SEEK_SET);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">22</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">23 read(fd, buf, 10);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">24 printf("buf is [%s]\n", buf);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">25</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">26 close(fd);</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">27 return 0;</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">28 }</span></p> 
+   <p>&nbsp;</p> 
+   <p>验证一下：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[root: 2nd]# ./app</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_write]write 10 bytes, cur_size:[10]</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_write]kbuf is [xiao bai]</span></p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">[test_read]read 10 bytes, cur_size:[0] //</span>读到数据了！</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">buf is [xiao bai] //</span>读到数据了！</p> 
+   <p>&nbsp;</p> 
+   <p>五、总结</p> 
+   <p>&nbsp;</p> 
+   <p>拉风的时序图我就不画了。</p> 
+   <p>上面讲的东西不多：</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">1)container_of</span>的使用</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">2)</span>怎么使用偏移量<span style="font-family:'DejaVu Serif', serif;">"filp-&gt;f_ops"</span>。</p> 
+   <p><span style="font-family:'DejaVu Serif', serif;">3)llseek</span>的编写。</p> 
+   <p>=========================================================</p> 
+   <p>源代码：<a href="http://blog.chinaunix.net/attachment/attach/25/01/48/7625014876ccf971e1ef87255cb187acf41404bb60.rar" rel="nofollow"><img src="http://blog.chinaunix.net/blog/image/attachicons/rar.gif" alt="">&nbsp;3rd_char_3.rar&nbsp;</a>&nbsp;&nbsp;</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

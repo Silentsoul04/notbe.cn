@@ -1,0 +1,4865 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核跟踪之ring buffer的实现【转】 « NotBeCN</title>
+  <meta name="description" content="                       &nbsp;              转自：http://blog.chinaunix.net/uid-20543183-id-1930845.html              ------------------------------------------ ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/12/23/weixin_34061042_90131329.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核跟踪之ring buffer的实现【转】</h1>
+    <p class="post-meta">Dec 23, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">转自：<a href="http://blog.chinaunix.net/uid-20543183-id-1930845.html" rel="nofollow">http://blog.chinaunix.net/uid-20543183-id-1930845.html</a></span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">------------------------------------------</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">本文系本站原创,欢迎转载!</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">转载请注明出处:http://ericxiao.cublog.cn/</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">------------------------------------------</span>
+    </div> 
+    <div> 
+     <div>
+      一: 前言
+     </div> 
+     <div>
+      Ring buffer是整个trace系统使用缓存管理的一种方式, 由于trace可能在内核运行的任何时候发生, 这种kernel的不确定状态决定了ring buffer的写操作中不能有任何引起睡眠的操作, 而且ring buffer的操作频率极高,所以在ring buffer实现里有很多高效的方式来处理多处理器, 读写同步的机制. 理解ring buffer是我们理解整个kernel trace的基础. 本文分析的源代码版本为linux kernel 2.6.30, 分析的代码基本位于kernel/trace/ring_buffer.c中.另外,为了描述的方便,下文ring buffer用RB来代替.
+     </div> 
+     <div>
+      &nbsp;
+     </div> 
+     <div>
+      二: ring buffer的基本数据结构
+     </div> 
+     <div>
+      在深入到代码之前,我们先来看一下RB所用到的几个基本的数据结构,这样我们对RB就会有一个全局性的了解.整个RB的数据结构框架如下所示:
+     </div> 
+     <div>
+      <img src="http://blogimg.chinaunix.net/blog/upfile2/090610014857.jpg" alt="">
+     </div> 
+    </div> 
+   </div> 
+   <div> 
+    <div>
+     ring buffer用struct ring_buffer来表示,数据结构定义如下:
+    </div> 
+    <div>
+     struct ring_buffer {
+    </div> 
+    <div>
+     &nbsp;&nbsp; /*RB中的页面数*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pages;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*RB的标志,目前只有RB_FL_OVERWRITE可用*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; flags;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*ring buffer中包含的cpu个数*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpus;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*整个ring buffer的禁用标志,用原子操作了防止竞争*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; atomic_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; record_disabled;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* cpu位图*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpumask_var_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpumask;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*RB访问锁*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct mutex&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mutex;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*CPU的缓存区页面,每个CPU对应一项*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu&nbsp; **buffers;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     #ifdef CONFIG_HOTPLUG_CPU
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*多CPU情况下的cpu hotplug 通知链表*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct notifier_block&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_notify;
+    </div> 
+    <div>
+     #endif
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*RB所用的时间,用来计数时间戳*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u64&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*clock)(void);
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     在RB的操作中,我们可以禁止全局的RB操作,例如,完全禁用掉Trace功能后,整个RB都是不允许再操做的,这时,就可以将原子变量record_disabled 加1.相反的,如果启用的话,将其减1即可.只有当record_disabled的值等于0时,才允许操作RB.
+    </div> 
+    <div>
+     同时,有些时候,要对RB的一些数据进行更新,比如,我要重新设置一下RB的缓存区大小,这都需要串行操作,因此,在ring_buffer结构中有mutex成员,用来避免这些更改RB的操作的竞争.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     每个cpu的缓存区结构为:
+    </div> 
+    <div>
+     struct ring_buffer_per_cpu {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*该cpu buffer所在的CPU*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*cpu buffer所属的RB*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*读锁,用了避免读者的操行操作,有时在
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*写者切换页面的时候,也需要持有此锁
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; spinlock_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reader_lock; /* serialize readers */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; raw_spinlock_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lock;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct lock_class_key&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lock_key;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*cpu buffer的页面链表*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct list_head&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pages;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*起始读位置*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_page&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *head_page; /* read from head */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*写位置*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_page&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *tail_page; /* write to tail */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*提交位置,只有当被写的页面提交过后
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*才允许被读
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_page&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *commit_page;&nbsp;&nbsp; /* committed pages */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*reader页面, 用来交换读页面*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_page&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *reader_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nmi_dropped;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; commit_overrun;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; overrun;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; read;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; entries;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*最新的页面commit时间*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u64&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; write_stamp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*最新的页面read时间*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u64&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; read_stamp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*cpu buffer的禁用启用标志*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; atomic_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; record_disabled;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     首先,对每一个cpu的操作限制是由ring_buffer_per_cpu-&gt;record_disabled来实现的.同ring_buffer一样,禁用加1,启用减1.
+    </div> 
+    <div>
+     从上图的全局结构关联图中,我们也可以看到,每个cpu都有一系列的页面,这样页面都链入在pages中.
+    </div> 
+    <div>
+     该页面的结构如下:
+    </div> 
+    <div>
+     struct buffer_page {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*用来形成链表*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct list_head list;&nbsp; &nbsp;&nbsp;&nbsp; /* list of buffer pages */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*写的位置*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_t&nbsp;&nbsp;&nbsp;&nbsp; write;&nbsp;&nbsp;&nbsp;&nbsp; /* index for next write */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*读的位置*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned&nbsp;&nbsp;&nbsp; read;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* index for next read */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*页面中有多少项数据*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_t&nbsp;&nbsp;&nbsp;&nbsp; entries;&nbsp;&nbsp; /* entries on this page */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_data_page *page;&nbsp; /* Actual data page */
+    </div> 
+    <div>
+     };
+    </div> 
+    <div>
+     具体的缓存区是由struct buffer_data_page指向的,实际上,它是具体页面的管理头部,结构如下:
+    </div> 
+    <div>
+     struct buffer_data_page {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*页面第一次被写时的时间戳*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u64&nbsp;&nbsp;&nbsp;&nbsp; time_stamp;&nbsp;&nbsp;&nbsp; /* page time stamp */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*提交的位置*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_t&nbsp;&nbsp;&nbsp;&nbsp; commit;&nbsp;&nbsp;&nbsp; /* write committed index */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*用来存放数据的缓存区*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned char&nbsp;&nbsp; data[];&nbsp;&nbsp;&nbsp; /* data of buffer page */
+    </div> 
+    <div>
+     };
+    </div> 
+    <div>
+     这里就有一个疑问了,为什么提交页面要放到struct buffer_date_page中,而不放到struct buffer_page呢?
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     三: ring buffer的初始化
+    </div> 
+    <div>
+     Ring buffer的初始化函数为ring_buffer_alloc(). 代码如下:
+    </div> 
+    <div>
+     struct ring_buffer *ring_buffer_alloc(unsigned long size, unsigned flags)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer *buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int bsize;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int cpu;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* Paranoid! Optimizes out when all is well */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果struct buffer_page的大小超过了struct page的大小,编译时会报错
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*因为ring_buffer_page_too_big()其实并不存在.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (sizeof(struct buffer_page) &gt; sizeof(struct page))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_page_too_big();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* keep it in its own cache line */
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*alloc and init struct ring_buffer*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer = kzalloc(ALIGN(sizeof(*buffer), cache_line_size()),
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;GFP_KERNEL);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!buffer)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*init cpumask*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!alloc_cpumask_var(&amp;buffer-&gt;cpumask, GFP_KERNEL))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail_free_buffer;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*BUF_PAGE_SIZE means the data size of per page,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*size/BUF_PAGE_SIZE can calculate page number of per cpu.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;pages = DIV_ROUND_UP(size, BUF_PAGE_SIZE);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;flags = flags;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* buffer-&gt;clock is the timestap of local cpu*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;clock = trace_clock_local;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* need at least two pages */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (buffer-&gt;pages == 1)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buffer-&gt;pages++;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* In case of non-hotplug cpu, if the ring-buffer is allocated
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* in early initcall, it will not be notified of secondary cpus.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* In that off case, we need to allocate for all possible cpus.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     #ifdef CONFIG_HOTPLUG_CPU
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; get_online_cpus();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpumask_copy(buffer-&gt;cpumask, cpu_online_mask);
+    </div> 
+    <div>
+     #else
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpumask_copy(buffer-&gt;cpumask, cpu_possible_mask);
+    </div> 
+    <div>
+     #endif
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*number of cpu*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;cpus = nr_cpu_ids;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* alloc and init buffer for per cpu,Notice:buffer-&gt;buffers is a double pointer*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; bsize = sizeof(void *) * nr_cpu_ids;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;buffers = kzalloc(ALIGN(bsize, cache_line_size()),
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; GFP_KERNEL);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!buffer-&gt;buffers)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail_free_cpumask;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; for_each_buffer_cpu(buffer, cpu) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buffer-&gt;buffers[cpu] =
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_allocate_cpu_buffer(buffer, cpu);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!buffer-&gt;buffers[cpu])
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail_free_buffers;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     #ifdef CONFIG_HOTPLUG_CPU
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;cpu_notify.notifier_call = rb_cpu_notify;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;cpu_notify.priority = 0;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; register_cpu_notifier(&amp;buffer-&gt;cpu_notify);
+    </div> 
+    <div>
+     #endif
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; put_online_cpus();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; mutex_init(&amp;buffer-&gt;mutex);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return buffer;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;fail_free_buffers:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; for_each_buffer_cpu(buffer, cpu) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (buffer-&gt;buffers[cpu])
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_free_cpu_buffer(buffer-&gt;buffers[cpu]);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; kfree(buffer-&gt;buffers);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;fail_free_cpumask:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; free_cpumask_var(buffer-&gt;cpumask);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; put_online_cpus();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;fail_free_buffer:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; kfree(buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     结合我们上面分析的数据结构,来看这个函数,应该很简单,首先,我们在这个函数中遇到的第一个疑问是:
+    </div> 
+    <div>
+     为什么RB至少需要二个页面呢?
+    </div> 
+    <div>
+     我们来假设一下只有一个页面的情况,RB开始写,因为head和tail是重合在一起的,当写完一个页面的时候,tail后移,因为只有一个页面,还是会指向这个页面,这样还是跟head重合在一起,如果带有RB_FL_OVERWRITE标志的话,head会后移试图清理这个页面,但后移之后还是指向这个页面,也就是说tail跟head还是会重合.假设此时有读操作,读完了head的数据,造成head后移,同样head和tail还是重合在一起.因此就造成了,第一次写完这个页面,就永远无法再写了,因为这时候永远都是一个满的状态.
+    </div> 
+    <div>
+     也就是说,这里需要两个页面是为了满足缓存区是否满的判断,即tail-&gt;next == head
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     然后,我们面临的第二个问题是,RB怎么处理hotplug cpu的情况呢?
+    </div> 
+    <div>
+     看下面的代码:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*number of cpu*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;cpus = nr_cpu_ids;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* alloc and init buffer for per cpu,Notice:buffer-&gt;buffers is a double pointer*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; bsize = sizeof(void *) * nr_cpu_ids;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;buffers = kzalloc(ALIGN(bsize, cache_line_size()),
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; GFP_KERNEL);
+    </div> 
+    <div>
+     从上面的代码看到,在初始化RB的时候,它为每个可能的CPU都准备了一个 “框”,下面来看下这个 “框”的初始化:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; for_each_buffer_cpu(buffer, cpu) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buffer-&gt;buffers[cpu] =
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_allocate_cpu_buffer(buffer, cpu);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!buffer-&gt;buffers[cpu])
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail_free_buffers;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     从此可以看到,它只为当时存在的CPU分配了缓存区.
+    </div> 
+    <div>
+     到这里,我们大概可以猜到怎么处理hotplug cpu的情况了: 在有CPU加入时,为这个CPU对应的 “框”对应分配内存,在CPU拨除或掉线的情况下,释放掉该CPU对应的内存. 到底是不是跟我们所想的一样呢? 我们继续看代码:
+    </div> 
+    <div>
+     #ifdef CONFIG_HOTPLUG_CPU
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;cpu_notify.notifier_call = rb_cpu_notify;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer-&gt;cpu_notify.priority = 0;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; register_cpu_notifier(&amp;buffer-&gt;cpu_notify);
+    </div> 
+    <div>
+     #endif
+    </div> 
+    <div>
+     如上代码片段,它为hotplug CPU注册了一个notifier, 它对优先级是0,对应的处理函数是rb_cpu_notify,代码如下:
+    </div> 
+    <div>
+     static int rb_cpu_notify(struct notifier_block *self,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;unsigned long action, void *hcpu)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer *buffer =
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; container_of(self, struct ring_buffer, cpu_notify);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; long cpu = (long)hcpu;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; switch (action) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*CPU处理active 的notify*/&nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case CPU_UP_PREPARE:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case CPU_UP_PREPARE_FROZEN:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*如果cpu已经位于RB的cpu位图,说明已经为其准备好了
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*缓存区,直接退出
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cpu_isset(cpu, *buffer-&gt;cpumask))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NOTIFY_OK;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*否则,它是一个新的CPU, 则为其分配缓存，如果
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*分配成功，则将其在cpu位图中置位*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buffer-&gt;buffers[cpu] =
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_allocate_cpu_buffer(buffer, cpu);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!buffer-&gt;buffers[cpu]) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN(1, "failed to allocate ring buffer on CPU %ld\n",
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; cpu);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NOTIFY_OK;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; smp_wmb();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_set(cpu, *buffer-&gt;cpumask);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case CPU_DOWN_PREPARE:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case CPU_DOWN_PREPARE_FROZEN:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Do nothing.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*&nbsp; If we were to free the buffer, then the user would
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*&nbsp; lose any trace that was in the buffer.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;/*如果是CPU处于deactive的notify，则不需要将其占的缓存
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*释放，因为一旦释放，我们将失去该cpu上的trace 信息*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; default:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return NOTIFY_OK;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     首先,RB的结构体中内嵌了struct notifier_block,所以,我们利用其位移差就可以取得对应的RB结构,上面的代码比较简单,不过,与我们之前的估计有点差别,即,在CPU处理deactive状态的时候,并没有将其对应的缓存释放,这是为了避免丢失该CPU上的trace信息.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     接下来我们看一下对每个CPU对应的缓存区的初始化,它是在rb_allocate_cpu_buffer()中完成的,代码如下:
+    </div> 
+    <div>
+     static struct ring_buffer_per_cpu *
+    </div> 
+    <div>
+     rb_allocate_cpu_buffer(struct ring_buffer *buffer, int cpu)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_page *bpage;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long addr;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int ret;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* alloc and init a struct ring_buffer_per_cpu */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer = kzalloc_node(ALIGN(sizeof(*cpu_buffer), cache_line_size()),
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; GFP_KERNEL, cpu_to_node(cpu));
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!cpu_buffer)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;cpu = cpu;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;buffer = buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; spin_lock_init(&amp;cpu_buffer-&gt;reader_lock);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;lock = (raw_spinlock_t)__RAW_SPIN_LOCK_UNLOCKED;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; INIT_LIST_HEAD(&amp;cpu_buffer-&gt;pages);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* alloc and init cpubuffer-&gt;reader_page */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; bpage = kzalloc_node(ALIGN(sizeof(*bpage), cache_line_size()),
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; GFP_KERNEL, cpu_to_node(cpu));
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!bpage)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail_free_buffer;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;reader_page = bpage;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; addr = __get_free_page(GFP_KERNEL);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!addr)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail_free_reader;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; bpage-&gt;page = (void *)addr;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; rb_init_page(bpage-&gt;page);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; INIT_LIST_HEAD(&amp;cpu_buffer-&gt;reader_page-&gt;list);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* alloc and init the page list,&nbsp; head_page, tail_page and commit_page are all point to the fist page*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; ret = rb_allocate_pages(cpu_buffer, buffer-&gt;pages);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (ret &lt; 0)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail_free_reader;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;head_page
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = list_entry(cpu_buffer-&gt;pages.next, struct buffer_page, list);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;tail_page = cpu_buffer-&gt;commit_page = cpu_buffer-&gt;head_page;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;fail_free_reader:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; free_buffer_page(cpu_buffer-&gt;reader_page);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;fail_free_buffer:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; kfree(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     这段代码的逻辑比较清晰,首先,它分配并初始化了ring_buffer_per_cpu结构,然后对其缓存区进行初始化.在这里我们需要注意,reader_page单独占一个页面,并末与其它页面混在一起.初始化状态下,head_pages,commit_page,tail_page都指向同一个页面,即ring_buffer_per_cpu-&gt;pages链表中的第一个页面.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     四:ring buffer的写操作
+    </div> 
+    <div>
+     一般来说,trace子系统往ring buffer中写数据通常分为两步,一是从ring buffer是取出一块缓冲区,然后再将数据写入到缓存区,然后再将缓存区提交.当然ring buffer也提供了一个接口直接将数据写入ring buffer,两种方式的实现都是一样的,在这里我们分析第一种做法,后一种方式对应的接口为ring_buffer_write().可自行对照分析.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     4.1:ring_buffer_lock_reserver()分析
+    </div> 
+    <div>
+     ring_buffer_lock_reserve()用于从ring buffer中取出一块缓存,函数如下:
+    </div> 
+    <div>
+     struct ring_buffer_event *
+    </div> 
+    <div>
+     ring_buffer_lock_reserve(struct ring_buffer *buffer, unsigned long length)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int cpu, resched;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* jude wheter ring buffer is off ,can use trace_on/trace_off to enable/disable it */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (ring_buffer_flags != RB_BUFFERS_ON)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* if the ring buffer is disabled, maybe some have other operate in this ring buffer currently */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (atomic_read(&amp;buffer-&gt;record_disabled))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* If we are tracing schedule, we don't want to recurse */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; resched = ftrace_preempt_disable();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu = raw_smp_processor_id();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* not trace this cpu? */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!cpumask_test_cpu(cpu, buffer-&gt;cpumask))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*get the cpu buffer which associated with this CPU*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer = buffer-&gt;buffers[cpu];
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* if the cpu buffer is disabled */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (atomic_read(&amp;cpu_buffer-&gt;record_disabled))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* change the data length to ring buffer length, include a head in this buffer */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; length = rb_calculate_event_length(length);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (length &gt; BUF_PAGE_SIZE)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* get the length buffer from cpu_buffer */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event = rb_reserve_next_event(cpu_buffer, RINGBUF_TYPE_DATA, length);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!event)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Need to store resched state on this cpu.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Only the first needs to.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* if the preempt is enable and need sched in this cpu, set the resched bit */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (preempt_count() == 1)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; per_cpu(rb_need_resched, cpu) = resched;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;out:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; ftrace_preempt_enable(resched);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     在进行写操作之前,要首先确认RB是否能被所在的CPU操作. 在这里要经过四个步骤的确认:
+    </div> 
+    <div>
+     1: 确认全局ring_buffer_flags标志是否为RB_BUFFERS_ON.
+    </div> 
+    <div>
+     &nbsp;&nbsp; 该标志是一个全局的RB控制,它控制着任何一个RB的操作,
+     <span style="font-size:medium;">&nbsp;</span>RB_BUFFERS_ON为允许,
+     <span style="font-size:medium;">&nbsp;</span>RB_BUFFERS_OFF为禁用.对应的接口为trace_on()和trace_off().
+    </div> 
+    <div>
+     2: 确认该RB的record_disabled是否为0.
+    </div> 
+    <div>
+     &nbsp;&nbsp; 我们在前面分析RB的结构体时分析过,该成员是控制对应RB的操作
+    </div> 
+    <div>
+     3:确认所在的CPU是否在RB的CPU位图中.
+    </div> 
+    <div>
+     &nbsp;&nbsp; 所在不在RB的CPU位图,表示还尚末为这个CPU分配缓存,暂时不能进行任何操作
+    </div> 
+    <div>
+     4:确认该CPU对应的ring_buffer_per_cpu-&gt;record_disabled是否为0.
+    </div> 
+    <div>
+     &nbsp;&nbsp; 它是对单个CPU的控制
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     此外,在RB中的禁用/启用抢占也很有意思,如下代码片段如示:
+    </div> 
+    <div>
+     ......
+    </div> 
+    <div>
+     /* If we are tracing schedule, we don't want to recurse */
+    </div> 
+    <div>
+     resched = ftrace_preempt_disable();
+    </div> 
+    <div>
+     ......
+    </div> 
+    <div>
+     ......
+    </div> 
+    <div>
+     /* if the preempt is enable and need sched in this cpu, set the resched bit */
+    </div> 
+    <div>
+     if (preempt_count() == 1)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; per_cpu(rb_need_resched, cpu) = resched;
+    </div> 
+    <div>
+     ......
+    </div> 
+    <div>
+     这段代码的逻辑是:
+    </div> 
+    <div>
+     在禁用抢占之前先检查当前进程是否有抢占,如果有,resched为1,否则为0.然后禁止抢占
+    </div> 
+    <div>
+     在操作完了之后,如果当前是第一次禁止抢占,则将resched保存在RB的per-cpu变量中.
+    </div> 
+    <div>
+     为什么要弄得如此复杂呢? 我们来看一下ftrace_preempt_disable()的代码就明白了:
+    </div> 
+    <div>
+     /**
+    </div> 
+    <div>
+     &nbsp;* ftrace_preempt_disable - disable preemption scheduler safe
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;* When tracing can happen inside the scheduler, there exists
+    </div> 
+    <div>
+     &nbsp;* cases that the tracing might happen before the need_resched
+    </div> 
+    <div>
+     &nbsp;* flag is checked. If this happens and the tracer calls
+    </div> 
+    <div>
+     &nbsp;* preempt_enable (after a disable), a schedule might take place
+    </div> 
+    <div>
+     &nbsp;* causing an infinite recursion.
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;* To prevent this, we read the need_resched flag before
+    </div> 
+    <div>
+     &nbsp;* disabling preemption. When we want to enable preemption we
+    </div> 
+    <div>
+     &nbsp;* check the flag, if it is set, then we call preempt_enable_no_resched.
+    </div> 
+    <div>
+     &nbsp;* Otherwise, we call preempt_enable.
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;* The rational for doing the above is that if need_resched is set
+    </div> 
+    <div>
+     &nbsp;* and we have yet to reschedule, we are either in an atomic location
+    </div> 
+    <div>
+     &nbsp;* (where we do not need to check for scheduling) or we are inside
+    </div> 
+    <div>
+     &nbsp;* the scheduler and do not want to resched.
+    </div> 
+    <div>
+     &nbsp;*/
+    </div> 
+    <div>
+     static inline int ftrace_preempt_disable(void)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int resched;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; resched = need_resched();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; preempt_disable_notrace();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return resched;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     这段代码的注释说得很明显了,它是为了防止了无限递归的trace scheduler和防止在原子环境中有进程切换的动作.
+    </div> 
+    <div>
+     其实,说白了,它做这么多动作,就是为了防止在启用抢占的时候,避免调用schedule()进行进程切换.
+    </div> 
+    <div>
+     那,就有一个疑问了,既然无论在当前是否有抢占都要防止有进程切换,为什么不干脆调用preempt_enable_no_resched()来启用抢占呢?
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     我们要分配长度为length的数据长度,那是否它在RB中占的长度就是length呢?肯定不是,因为RB中的数据还是自己的管理头部.至少,在RB中读数据的时候,它需要知道这个数据有多长.
+    </div> 
+    <div>
+     那它究竟在RB中占用多少的长度呢?我们来跟踪rb_calculate_event_length():
+    </div> 
+    <div>
+     static unsigned rb_calculate_event_length(unsigned length)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event event; /* Used only for sizeof array */
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* zero length can cause confusions */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!length)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; length = 1;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* if length is more than RB_MAX_SMALL_DATA,it need arry[0] to store the data length */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (length &gt; RB_MAX_SMALL_DATA)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; length += sizeof(event.array[0]);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* add the length of struct ring_buffer_event */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; length += RB_EVNT_HDR_SIZE;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* must align by 4 */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; length = ALIGN(length, RB_ALIGNMENT);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return length;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     别看这个函数很短小,却暗含乾坤.从代码中看到,其实我们存入到RB中的数据都是用struct ring_buffer_event来表示的,理解了这个数据结构,上面的代码逻辑自然就清晰了.
+    </div> 
+    <div>
+     该结构体定义如下:
+    </div> 
+    <div>
+     struct ring_buffer_event {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp; type:2, len:3, time_delta:27;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp; array[];
+    </div> 
+    <div>
+     };
+    </div> 
+    <div>
+     Type表示这块数据的类型,len有时是表示这块数据的长度,time_delta表示这块数据与上一块数据的时间差.从上面的定义可以看出: struct ring_buffer_event的len定义只占三位.它最多只能表示0xb11100的数据大小.另外,在RB中有一个约束,event中的数据必须按4对齐的,那么数据长度的低二位肯定为0,那么ring_buffer_event中的len只能表示从0xb0~0xb11100的长度,即0~28的长度,那么,如果数据长度超过了28,那应该要怎么表示呢?
+    </div> 
+    <div>
+     在数据长度超过28的情况下,会使用ring_buffer_event中的arry[0]表示里面的数据长度,即从后面的数据部份取出4字来额外表示它的长度.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     Ring buffer event有以下面这几种类型,也就是type的可能值:
+    </div> 
+    <div>
+     enum ring_buffer_type {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; RINGBUF_TYPE_PADDING,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; RINGBUF_TYPE_TIME_EXTEND,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* FIXME: RINGBUF_TYPE_TIME_STAMP not implemented */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; RINGBUF_TYPE_TIME_STAMP,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; RINGBUF_TYPE_DATA,
+    </div> 
+    <div>
+     };
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     RINGBUF_TYPE_PADDING: 是指往ring buffer中填充的数据, 这用在页面有剩余或者当前event无效的情况.
+    </div> 
+    <div>
+     RINGBUF_TYPE_TIME_EXTEND: 表示附加的时间差信息,这个信息会存放在arry[0]中.
+    </div> 
+    <div>
+     RINGBUF_TYPE_TIME_STAMP: 表示存放的是时间戳信息, array[0]用来存放tv_nsec, array[1..2]中存放 tv_sec.在现在的代码中还末用到.
+    </div> 
+    <div>
+     RINGBUF_TYPE_DATA:表示里面填充的数据,数据的长度表示方式在前面已经分析过了,这里就不再赘述了.
+    </div> 
+    <div>
+     好了,返回rb_calculate_event_length():
+    </div> 
+    <div>
+     RB_MAX_SMALL_DATA =&nbsp; 28也就是我们上面分析的event中的最小长度,如果要存入的长度大于这个长度的,那么,就需要数据部份的一个32位数用来存放它的长度,因此这种情况下,需要增加sizeof(event.array[0])的长度.另外,event本身也要占用RB的长度,所以需要加上event占的空间,也就是代码中的RB_EVNT_HDR_SIZE. 最后,数据要按4即RB_ALIGNMENT对齐.
+    </div> 
+    <div>
+     那,我们来思考一下,为什么在length为0的情况,需要将其设为1呢?
+    </div> 
+    <div>
+     我们来做个假设,如果length为0,且末做调整,因为event占的大小是两个32位,也就是8.它跟4已经是对齐的了.此时加上length,也就是0.经过4对齐后,它计算出来的长度仍然是event的大小.
+    </div> 
+    <div>
+     在rb_update_event()中对event的各项数据进行赋值时,它的len对象为0.
+    </div> 
+    <div>
+     而对于数据长度超过RB_MAX_SMALL_DATA来说,它的len对象也为0.
+    </div> 
+    <div>
+     此时就无法区别这个对象是长度超过RB_MAX_SMALL_DATA的对象,还是长度为0的对象,也就是无法确定数据后面的一个32位的空间是否是属于这个对象(这里提到了rb_update_event(),我们在后面遇到它再进行详细分析,在这里只需要知道就是调用它来对event的各成员进行初始化就可以了).
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     现在要到ring buffer中去分配存放的空间了,它是在rb_reserve_next_event()中完成的.
+    </div> 
+    <div>
+     可以说,这个函数就是ring buffer的精华部份了.首先,我们要明确一下,ring buffer它要实现的功能是什么?
+    </div> 
+    <div>
+     Ring buffer是用来做存放trace信息用的,既然是做trace.那它就不能对执行效率产生过多的影响,但是它可以占据稍微多一点的空间.然后,每个CPU的每个执行路径trace数据都是放在同一个buffer中的,所以在写数据的时候,要考虑多CPU的竞争情况.
+    </div> 
+    <div>
+     另外,只要我们稍加注意就会发现,
+     <span style="font-size:medium;">&nbsp;</span>ring_buffer_lock_reserve()中调用的rb_reserve_next_event()函数是在所在CPU对应的缓存区上进行操作的.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     ring_buffer_lock_reserve()和ring_buffer_unlock_commit()是一对函数.从这两个函数的字面意思看来,一个是lock,另一个是unlock.这里的lock机制不是我们之前所讲的类似于mutex, spin_lock之类的lock.因为每个cpu都对应一个缓存区(struct ring_buffer_per_cpu),每个CPU只能读写属于它的缓存区,这样就不需要考虑SMP上的竞争了.因此就不需要使用spinlock, 在这里也不能使用mutex.因为trace在很多不确定情况下会用到,例如function tracer 在每个函数里都会用到,这样就会造成CPU上的所有执行线程去抢用一个mutex的情况.这样会大大降低系统效率,甚至会造成CPU空运转.另外,如果使用mutex,可能会在原子环境中引起睡眠操作.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     Ring buffer中的lock是指内核抢占,在调用ring_buffer_lock_reserver()时禁止内核抢占,在调用ring_buffer_unlock_commit()是恢复内核抢占.这样在竞争的时候,就只需要考虑中断和NMI了.在这里要注意中断抢占的原则:只有高优先的中断才能抢占低优先级的中断.也就是中断是不能相互嵌套的.例如,A线程正在执行,中断线程B发生了,因此从AàB.在B没有执行完的时候是不可能会切换到A的.如下所示:
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     <img src="http://blogimg.chinaunix.net/blog/upfile2/090610015342.jpg" alt="">
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     另外,在代码注释中经常看到first commit,这个first commit 到底是什么意思呢?
+    </div> 
+    <div>
+     其实它就表示对应CPU缓存区commit之后,第一个从缓存区中的取动作. 对应到上图的 “正常的中断抢占序列”, A是first commit,它被B中断了,B就不是fist commit.
+    </div> 
+    <div>
+     判断是否是first commit是通过下列语句来判断的,代码如下:
+    </div> 
+    <div>
+     cpu_buffer-&gt;tail_page == cpu_buffer-&gt;commit_page &amp;&amp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; rb_page_write(cpu_buffer-&gt;tail_page) ==
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; rb_commit_index(cpu_buffer)
+    </div> 
+    <div>
+     在上面我们分析过,每个CPU的缓存区是从tail页面开始写,从head页面开始读,commit_page则是表示已经提交到的页面.
+    </div> 
+    <div>
+     上面的语句中,如果提交页面是写页面,写序号等于提交序号.就表示当前的位置就是commit的位置也就是first commit.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     经过上面的分析,相信对该函数的流程有大概的了解了,下面来分析下具体的代码,可以说该函数的每一句代码都值得推敲,采用分段分析的方法,如下:
+    </div> 
+    <div>
+     static struct ring_buffer_event *
+    </div> 
+    <div>
+     rb_reserve_next_event(struct ring_buffer_per_cpu *cpu_buffer,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned type, unsigned long length)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u64 ts, delta;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int commit = 0;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int nr_loops = 0;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;again:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* We allow for interrupts to reenter here and do a trace.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* If one does, it will cause this original code to loop
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* back here. Even with heavy interrupts happening, this
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* should only happen a few times in a row. If this happens
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* 1000 times in a row, there must be either an interrupt
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* storm or we have something buggy.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Bail!
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer, ++nr_loops &gt; 1000))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     在这里,在调用这个函数之前禁止了抢止,中断和NMI在这里存在着竞争,因此在下面的运行中,随时都会被中断/NMI所抢占. 由于在从struct ring_buffer_per_cpu中取页面的时候,会有当前页面空间不足,需要前进一个页面的情况.每次前进一个页面都会跳转到again,此时nr_loops都会增加1, 如果在一次请求中,这样的情况出现了1000次,说明中断抢占的次数太多了,很可能是由于中断风暴(interrupte storm)或者是bug造成的.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*取当前的时间戳*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; ts = ring_buffer_time_stamp(cpu_buffer-&gt;cpu);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Only the first commit can update the timestamp.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Yes there is a race here. If an interrupt comes in
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* just after the conditional and it traces too, then it
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* will also check the deltas. More than one timestamp may
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* also be made. But only the entry that did the actual
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* commit will be something other than zero.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;/*只有第一次处于提交状态的请求才能够更新cpu_buffer-&gt;write_stamp*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (cpu_buffer-&gt;tail_page == cpu_buffer-&gt;commit_page &amp;&amp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; rb_page_write(cpu_buffer-&gt;tail_page) ==
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; rb_commit_index(cpu_buffer)) {
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; delta = ts - cpu_buffer-&gt;write_stamp;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* make sure this delta is calculated here */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; barrier();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Did the write stamp get updated already? */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*如果之前取的当前时间戳小于cpu_buffer-&gt;write_stamp说明
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*ring_buffer的write_stamp已经更新过了,也就是在发生了抢占
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* ----------NOTIC HERE----------*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (unlikely(ts &lt; cpu_buffer-&gt;write_stamp))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; delta = 0;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* 如果更新时间差值大于1 &lt;&lt; 27,那就必须要插入一个表示时间
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*&nbsp; 的ring_buffer_event
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (test_time_stamp(delta)) {
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; commit = rb_add_time_stamp(cpu_buffer, &amp;ts, &amp;delta);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (commit == -EBUSY)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (commit == -EAGAIN)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RB_WARN_ON(cpu_buffer, commit &lt; 0);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; } else
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Non commits have zero deltas */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*在commit时发生的抢占,它的time stamp delta为0*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; delta = 0;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     从上面的if判断可以看到,只有在fist commit的时候才会计算delta,其它的情况下,delta都是0.
+    </div> 
+    <div>
+     我们来思考一下,为什么在确认了是fist commit,进入到了if,还需要进行:
+    </div> 
+    <div>
+     if (unlikely(ts &lt; cpu_buffer-&gt;write_stamp))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; delta = 0;
+    </div> 
+    <div>
+     的判断呢? 什么情况下会有当前时间戳小于cpu_buffer最新提交时的时间戳呢?
+    </div> 
+    <div>
+     对应到上面的”正常中断抢占序列”的图,只有在A处才会计算delta时间,在被B,C抢占后,它的delta是为0的.
+    </div> 
+    <div>
+     这个delta到底是用来做什么的呢?它为什么要用这样的判断方式呢?
+    </div> 
+    <div>
+     我们在之前说过,在ring_buffer_per_cpu中的每一块数据都带有一个event的头部,即:
+    </div> 
+    <div>
+     struct ring_buffer_event {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp; type:2, len:3, time_delta:27;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp; array[];
+    </div> 
+    <div>
+     };
+    </div> 
+    <div>
+     它里面有一个time_delta的成员,占27位.
+    </div> 
+    <div>
+     在每一个页面的头部,即Struct buffer_data_page里面也有一个时间戳,即:
+    </div> 
+    <div>
+     struct buffer_data_page {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; u64&nbsp;&nbsp;&nbsp;&nbsp; time_stamp;&nbsp;&nbsp;&nbsp; /* page time stamp */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_t&nbsp;&nbsp;&nbsp;&nbsp; commit;&nbsp;&nbsp;&nbsp; /* write commited index */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned char&nbsp;&nbsp; data[];&nbsp;&nbsp;&nbsp; /* data of buffer page */
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     那这几个时间戳有什么样的关联呢?
+    </div> 
+    <div>
+     在ring_buffer_per_cpu中有一个timestamp,它表示最近commit时的时间戳.
+    </div> 
+    <div>
+     每次切换进一个新页面时,该页面对应的:
+    </div> 
+    <div>
+     buffer_data_page-&gt;time_stamp会记录当前的时间戳.
+    </div> 
+    <div>
+     即buffer_date_page-&gt;time_stamp记录页面被切换成写页面时的时间戳.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     而ring_buffer_event-&gt;time_delta表示当前时间和上一次commit时间即ring_buffer_per_cpu-&gt;time_stamp的差值.
+    </div> 
+    <div>
+     综上所述,存在以下关系:
+    </div> 
+    <div>
+     页面中的第一个event, event1在进行写操作时的时间戳为:
+    </div> 
+    <div>
+     buffer_data_page-&gt;time_stamp + ring_buffer_event1-&gt;time_delta.
+    </div> 
+    <div>
+     第二个event,event2在进行写操作时的时间戳为:
+    </div> 
+    <div>
+     buffer_data_page-&gt;time_stamp+ring_buffer_event1-&gt;time_delta+
+    </div> 
+    <div>
+     ring_buffer_event2-&gt;time_delta.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     依次类推,不过有种情况是特别的,即RINGBUF_TYPE_TIME_EXTEND类型的EVENT,它是为了有时delta时间超过27位时,扩展了一个32位用来存放的时间戳.这也就是上面代码中的if (test_time_stamp(delta)).另外需要注意,这里的返回值commit,只有在fist commit的时候才会为1.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     这段代码有个值得思考的地方,也就是上面代码的”----------NOTIC HERE----------“注释处.
+    </div> 
+    <div>
+     在这里判断了它是first commit,为什么会有可能出现当前的时间戳比最近提交的时间戳还要小呢?
+    </div> 
+    <div>
+     试想一下,如果在”----------NOTIC HERE----------”处发生了中断,这个中断执行路径反而会先从RB中取得空间,然后commit,就会出现这样的情况了.因此,我们要注意,fist commit是指最近commit后的一个状态,而不是第一个进入rb_reserve_next_event()的状态.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     上面代码中的rb_add_time_stamp()子函数的执行流程跟我们在后面要分析的部份差不多,因此在这里就不对它进行详细分析了.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     /*从ring_buffer中取出event*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event = __rb_reserve_next(cpu_buffer, type, length, &amp;ts);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (PTR_ERR(event) == -EAGAIN)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!event) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (unlikely(commit))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Ouch! We needed a timestamp and it was commited. But
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* we didn't get our event reserved.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_set_commit_to_write(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* If the timestamp was commited, make the commit our entry
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* now so that we will update it when needed.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (commit)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_set_commit_event(cpu_buffer, event);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; else if (!rb_is_commit(cpu_buffer, event))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; delta = 0;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*event-&gt;time_delta表示的是距离上次commit时的时间差*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event-&gt;time_delta = delta;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return event
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     剩下的代码就很好理解了,如果取得的event为空,说明发生了错误,另外在commit为1的情况下是必须要commit的,因为它已经更新了ring_buffer_per_cpu.
+    </div> 
+    <div>
+     另外,在上面的:
+     <br>if (commit)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_set_commit_event(cpu_buffer, event);
+    </div> 
+    <div>
+     else if (!rb_is_commit(cpu_buffer, event))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; delta = 0;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     为什么需要再次判断rb_is_commit()呢?
+    </div> 
+    <div>
+     这是因为,可能在__rb_reserve_next()之前有中断抢占了当前执行路径,而先从RB取得空间,这种情况下,先取得RB空间的,成了first commit.
+    </div> 
+    <div>
+     注意在这里的条件是”
+     <span style="font-family:'Times New Roman';font-size:medium;">&nbsp;</span>__rb_reserve_next()”之前,因为在后面我们会看到,在__rb_reserve_next()中是用原子操作来避免竞争的,实际上,__rb_reserve_next()使写操作串行化,即一个一个按顺序通过它.因为只有第一个通过__rb_reserve_next()才会是first commit状态,所以,在它的后面的话,就无所谓抢占了.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     这个函数就分析到这里了,在里面有一个重要的子函数,即__rb_reserve_next(),代码较长,用分段分析的方式如下:
+    </div> 
+    <div>
+     static struct ring_buffer_event *
+    </div> 
+    <div>
+     __rb_reserve_next(struct ring_buffer_per_cpu *cpu_buffer,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; unsigned type, unsigned long length, u64 *ts)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_page *tail_page, *head_page, *reader_page, *commit_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long tail, write;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer *buffer = cpu_buffer-&gt;buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long flags;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; commit_page = cpu_buffer-&gt;commit_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* we just need to protect against interrupts */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; barrier();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; tail_page = cpu_buffer-&gt;tail_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*local_add_return()是一个原子操作,起保护作用.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*write是加上了length之后的位置,tail是之前的位置
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; write = local_add_return(length, &amp;tail_page-&gt;write);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; tail = write - length;
+    </div> 
+    <div>
+     注意这里的临界条件,对struct buffer_page-&gt;write的更新是采用的原子操作,即它的操作是不能被打断的,这也是一种临界区的保护方式.
+    </div> 
+    <div>
+     在这里的临界操作,需要注意:
+    </div> 
+    <div>
+     write = local_add_return(length, &amp;tail_page-&gt;write);
+    </div> 
+    <div>
+     tail = write - length;
+    </div> 
+    <div>
+     它是先进行原子加,然后再write-length取得加之前的位置,这样就保证tail对应的刚好是取出来的那缓存区.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* See if we shot pass the end of this buffer page */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果超过了一个页面,那就需要前进一个页面了*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (write &gt; BUF_PAGE_SIZE) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct buffer_page *next_page = tail_page;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*因此这里要更改tail_page的指向了,不能再有竞争的情况了
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*因为调用local_irq_save()来禁止中断,调用__raw_spin_lock()来保护
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*ring_buffer 的读操作
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*---------NOTICE HERE----------*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_irq_save(flags);
+    </div> 
+    <div>
+     /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Since the write to the buffer is still not
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* fully lockless, we must be careful with NMIs.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* The locks in the writers are taken when a write
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* crosses to a new page. The locks protect against
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* races with the readers (this will soon be fixed
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* with a lockless solution).
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Because we can not protect against NMIs, and we
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* want to keep traces reentrant, we need to manage
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* what happens when we are in an NMI.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* NMIs can happen after we take the lock.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* If we are in an NMI, only take the lock
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* if it is not already taken. Otherwise
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* simply fail.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (unlikely(in_nmi())) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!__raw_spin_trylock(&amp;cpu_buffer-&gt;lock))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_reset;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } else
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __raw_spin_lock(&amp;cpu_buffer-&gt;lock);
+    </div> 
+    <div>
+     如果write &gt; BUF_PAGE_SIZE,说明当前的页面已经不够空间来存放一个event了,因此,我们需要切换到下一个页面.既然要切换页面,那就需要有同步措施了,在这里采用的是禁中断和自旋锁cpu_buffer-&gt;lock, reader在读RB的时候也会持有该锁,这样就同步了写者与读者. 在这里要注意,禁中断只是禁止外部设备的中断响应,并不能禁止NMI, 所以在这里还需要NMI的情况特殊考虑,如果是在NMI的情况,如果自旋锁被占用,就立即返回,我们不能在这个里面等待太久.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*使next_page指向tail_page的下一个页面*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_inc_page(cpu_buffer, &amp;next_page);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; head_page = cpu_buffer-&gt;head_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reader_page = cpu_buffer-&gt;reader_page;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* we grabbed the lock before incrementing */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer, next_page == reader_page))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_unlock;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* If for some reason, we had an interrupt storm that made
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* it all the way around the buffer, bail, and warn
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* about it.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;/*可能是前进的次数太多了也可能是因为ring_buffer的页面太少了
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; *导致了next_page和commit_page重合的情况
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (unlikely(next_page == commit_page)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON_ONCE(1);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_unlock;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     进入到自旋锁的保护区之后,我们就可以前进一个页面了.这里有几种情况:
+    </div> 
+    <div>
+     1: 前进之后的页面不可能和reader_page重合, 我们在后面可以看到,reader_page是一个孤立的页
+    </div> 
+    <div>
+     面,不位于cpu_buffer-&gt;pages链表中.
+    </div> 
+    <div>
+     2: commit页面与前进之后的页面重合,这有可能是前进次数太多,即中断次数太多(还来不及commit),也有可能是RB的页面数目太少.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*前进一个页面之后碰到了head_page,即ring_buffer已经满了*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*如果带有RB_FL_OVEWRITE标志,就将旧的数据清除掉*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (next_page == head_page) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!(buffer-&gt;flags &amp; RB_FL_OVERWRITE))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_unlock;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* tail_page has not moved yet? */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (tail_page == cpu_buffer-&gt;tail_page) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* count overflows */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_update_overflow(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_inc_page(cpu_buffer, &amp;head_page);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_buffer-&gt;head_page = head_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_buffer-&gt;head_page-&gt;read = 0;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     如果前进一个页面之后,跟head_page重合了,说明cpu buffer已经满了,如果带有RB_FL_OVERWRITE标志的话,我们就可以将head_page中的数据冲刷掉.
+    </div> 
+    <div>
+     在这里需要注意,为什么这里要再判断?
+    </div> 
+    <div>
+     if (tail_page == cpu_buffer-&gt;tail_page)
+    </div> 
+    <div>
+     这是因为在持有自旋锁之前是有竞争的,在上面代码的
+    </div> 
+    <div>
+     ”/*---------NOTICE HERE----------*/”注释处,我们来考虑一下,如果此时有路径 A运行到了NOTICE HERE,发生了中断,中断路径B也进入了NOTICE HERE,然后更新了cpu_buffer-&gt;tail_page,而后退出.此时再切换回路径A,A会继续往下执行,实际上,这时候cpu_buffer-&gt;tail_page已经更新过了.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     如果出现重合的现象,我们只需要将head_page前移就可以了,这里不需要将head_page的内容清空,因为在取到下一个页面的时候,会调用:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_set(&amp;next_page-&gt;write, 0);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_set(&amp;next_page-&gt;page-&gt;commit, 0);
+    </div> 
+    <div>
+     将其重置.
+    </div> 
+    <div>
+     我们跟踪看一下rb_update_overflow()函数的代码片段,这个函数很简单,但里面有一个值得我们注意的地方:
+    </div> 
+    <div>
+     static void rb_update_overflow(struct ring_buffer_per_cpu *cpu_buffer)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; ......
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; for (head = 0; head &lt; rb_head_size(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; head += rb_event_length(event)) {
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event = __rb_page_index(cpu_buffer-&gt;head_page, head);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer, rb_null_event(event)))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;．．．．．．
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     疑问,这通外里为什么不可能遍历出是null的event呢?
+    </div> 
+    <div>
+     Null的event是指:
+    </div> 
+    <div>
+     event-&gt;type == RINGBUF_TYPE_PADDING &amp;&amp; event-&gt;time_delta == 0;
+    </div> 
+    <div>
+     它是一个页面不足以存放一个event后的填充数据.
+    </div> 
+    <div>
+     我们来看一下它的循环判断条件:
+    </div> 
+    <div>
+     head &lt; rb_head_size(cpu_buffer);
+    </div> 
+    <div>
+     rb_head_size()定义如下:
+    </div> 
+    <div>
+     static inline unsigned rb_head_size(struct ring_buffer_per_cpu *cpu_buffer)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return rb_page_commit(cpu_buffer-&gt;head_page);
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     即commit的位置.
+    </div> 
+    <div>
+     其实,这里断定不可能出现null event的原因是,在commit的时候,不会commit 填充数据.它只会commit有效数据,这在我们后面的分析中可以得到确认.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* If the tail page is still the same as what we think
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* it is, then it is up to us to update the tail
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* pointer.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;/*如果tail_page没有发生更改,就可以更改tail_page的指向了
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; *即前进一个页面
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (tail_page == cpu_buffer-&gt;tail_page) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_set(&amp;next_page-&gt;write, 0);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_set(&amp;next_page-&gt;page-&gt;commit, 0);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_buffer-&gt;tail_page = next_page;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* reread the time stamp */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*更新页面转入写页面时的时间戳*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ts = ring_buffer_time_stamp(cpu_buffer-&gt;cpu);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_buffer-&gt;tail_page-&gt;page-&gt;time_stamp = *ts;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     分析这小段代码要结合在上段代码中的抢占分析,如果没有抢占,或者是第一个递增此页面,就可以更新cpu_buffer-&gt;tail_page的指向了.在这里要注意,对每个取到的页面都是进行初始化,但没必要将整个页面都清零.只需要将它的写位置和提交位置置为0就可以了.
+    </div> 
+    <div>
+     另外,我们在这里也可以看到,我们将这个页面的时间戳置为了该页面切换成写页面的时间戳.这个时间戳后面还会调整,接着看.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* The actual tail page has moved forward.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;/*ring_buffer后还有一段空闲的区域,将它赋为RINGBUF_TYPE_PADDING*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (tail &lt; BUF_PAGE_SIZE) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Mark the rest of the page with padding */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event = __rb_page_index(tail_page, tail);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;type = RINGBUF_TYPE_PADDING;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* 恢复tail_page-&gt;write的值,因为在local_add_return()之后存在竞争,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* 即在很多个执行路径中多次相加后,才会有禁中断
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* 和自旋锁保护
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (tail &lt;= BUF_PAGE_SIZE)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Set the write back to the previous setting */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_set(&amp;tail_page-&gt;write, tail);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* If this was a commit entry that failed,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* increment that too
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;/*如果是一个fist commit状态的页面,commit it*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (tail_page == cpu_buffer-&gt;commit_page &amp;&amp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; tail == rb_commit_index(cpu_buffer)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_set_commit_to_write(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*更新状态完成,释放临界区*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __raw_spin_unlock(&amp;cpu_buffer-&gt;lock);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_irq_restore(flags);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* fail and let the caller try again */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*返回EAGAIN,表示重新到ring_buffer中分配event*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ERR_PTR(-EAGAIN);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     可能看到这里,大家都有点疑问,为什么需要对tail做这么多次判断呢?
+    </div> 
+    <div>
+     这是因为,这里有个特殊的情况,如下图示:
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     当运行到1的时候,是会有竞争情况的,如下示:
+    </div> 
+    <div>
+     1:执行路径A运行到1的时候,有write &gt; BUF_PAGE_SIZE的情况,假设A是在这次执行中,最先发生write &gt; BUF_PAGE_SIZE的.这时竞争发生,有其它的中断过来了.
+    </div> 
+    <div>
+     2:执行路径B抢占了执行路径A, 此时经过local_add_return()计算后,仍然会有:
+    </div> 
+    <div>
+     write &gt;BUF_PAGE_SIZE的情况.,运行到1处,又有其它中断过来了.其实它这里计算出来的write值是在上一次的基础上计算出来的
+    </div> 
+    <div>
+     3:执行路径C抢点了执行路径B, ......
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     经过上面的分析,我们可得知,只有A,也就是第一个发生write &gt; BUF_PAGE_SIZE的路径的tail才会小于BUF_PAGE_SIZE,因为其它的路径都是在超过BUF_PAGE_SIZE的基础上计算出来的.
+    </div> 
+    <div>
+     正是因为这样,所以在2处才有tail &lt; BUG_PAGE_SIZE的判断,并且更新tail_page-&gt;write.这样,在恢复到A的时候,就会将tail_page-&gt;write回复到原始值了.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* We reserved something on the buffer */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*不可能会出现write &gt; BUF_PAGE_SIZE的情况*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer, write &gt; BUF_PAGE_SIZE))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*取出并更新event*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event = __rb_page_index(tail_page, tail);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; rb_update_event(event, type, length);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* If this is a commit and the tail is zero, then update
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* this page's time stamp.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;/* 如果当前是一个新页面,而且是一个fist commit.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp; * 则更新Struct buffer_data_page -&gt; time_stamp,即该页面开始写时的时间戳
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp; */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!tail &amp;&amp; rb_is_commit(cpu_buffer, event))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_buffer-&gt;commit_page-&gt;page-&gt;time_stamp = *ts;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;out_unlock:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* reset write */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (tail &lt;= BUF_PAGE_SIZE)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_set(&amp;tail_page-&gt;write, tail);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; __raw_spin_unlock(&amp;cpu_buffer-&gt;lock);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_irq_restore(flags);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     剩下的代码就简单了,运行到这里,表明当前页面有足够的空间容纳要分配的event, 直接取得tail对应的空间即可.
+    </div> 
+    <div>
+     在这里需要注意的是,如果是第一次从这个页面分配空间且处于first commit的状态,需要将页面的时间戳更改成当前的时间戳.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     4.2: ring_buffer_unlock_commit()分析
+    </div> 
+    <div>
+     在前面的分析中,
+     <span style="font-family:'Times New Roman';font-size:medium;">&nbsp;</span>ring_buffer_lock_reserve()从RB中取出了空间,可以调用rb_event_data()返回event中实际存放数据的位置,将数据写入event之后,我们就需要进行commit了.这个动作就是在ring_buffer_unlock_commit()中完成的,代码如下:
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     int ring_buffer_unlock_commit(struct ring_buffer *buffer,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct ring_buffer_event *event,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned long flags)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int cpu = raw_smp_processor_id();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer = buffer-&gt;buffers[cpu];
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; rb_commit(cpu_buffer, event);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Only the last preempt count needs to restore preemption.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (preempt_count() == 1)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ftrace_preempt_enable(per_cpu(rb_need_resched, cpu));
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; else
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; preempt_enable_no_resched_notrace();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return 0;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     Ftrace中的抢占恢复我们在前面分析ring_buffer_lock_reserve()的时候就已经分析过了,这里就不再重复,然后调用rb_commit()进行具体的commit动作,包括更新cpu_buffer的write_tamp,将commit迁移到write位置,这个函数比较简单,这里就不做详细分析了.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     五: ring_buffer的读操作
+    </div> 
+    <div>
+     RB的读操作没有写操作那么复杂,具体的读操作有两种方式,一种是迭代器的读,另一种采用reader_page进行切换读,下面分别对这两种方式进行详细的分析.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     5.1: 迭代器方式的读操作
+    </div> 
+    <div>
+     这种读操作从它的名称上就可以看出来,它就是遍历每一个commit页面,然后将页数中的event读出来,这种读方式不会更改RB中的数据,下面看一下具体的实现:
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     5.1.1: ring_buffer_read_start()
+    </div> 
+    <div>
+     ring_buffer_read_start()用来初始化一个读ring buffer的迭代器,代码如下:
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     struct ring_buffer_iter *
+    </div> 
+    <div>
+     ring_buffer_read_start(struct ring_buffer *buffer, int cpu)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_iter *iter;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long flags;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果该CPU不是ring buffer的有效CPU,非法*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!cpumask_test_cpu(cpu, buffer-&gt;cpumask))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*分配一个迭代器*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; iter = kmalloc(sizeof(*iter), GFP_KERNEL);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!iter)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* 取得对应cpu的ring_buffer_per_cpu */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer = buffer-&gt;buffers[cpu];
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*迭代器的cpu_buffer指向对应CPU的ring_buffer_per_cpu*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; iter-&gt;cpu_buffer = cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*禁止该buffer的写操作*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; atomic_inc(&amp;cpu_buffer-&gt;record_disabled);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*等待所有的写操作退出*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; synchronize_sched();
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* 读操作加锁, 因为可以从不同的CPU上读因此
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* 需要持有cpu_buffer-&gt;reader_lock
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*另外,为了避免对ring_buffer_per_cpu的竞争操作,需要
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*持有cpu_buffer-&gt;lock
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; spin_lock_irqsave(&amp;cpu_buffer-&gt;reader_lock, flags);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; __raw_spin_lock(&amp;cpu_buffer-&gt;lock);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*初始化迭代器,即将iter-&gt;head_page指向读页面
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*iter-&gt;head指向读页面的读取位置*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; rb_iter_reset(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; __raw_spin_unlock(&amp;cpu_buffer-&gt;lock);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; spin_unlock_irqrestore(&amp;cpu_buffer-&gt;reader_lock, flags);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return iter;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     该操作比较简单,就是分配并初始化了一个ring_buffer_iter, 我们来看一下具体的初始化过程:
+    </div> 
+    <div>
+     static void rb_iter_reset(struct ring_buffer_iter *iter)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer = iter-&gt;cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* Iterator usage is expected to have record disabled */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果reader_page-&gt;list里空的,就将读的起始页面
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*指向head_page
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*否则指向reader_page
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (list_empty(&amp;cpu_buffer-&gt;reader_page-&gt;list)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;head_page = cpu_buffer-&gt;head_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;head = cpu_buffer-&gt;head_page-&gt;read;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; } else {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;head_page = cpu_buffer-&gt;reader_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;head = cpu_buffer-&gt;reader_page-&gt;read;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果该页面已经操作了, 取cpu_buffer-&gt;read_stamp,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*否则取page-&gt;timer_stamp
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (iter-&gt;head)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;read_stamp = cpu_buffer-&gt;read_stamp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; else
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;read_stamp = iter-&gt;head_page-&gt;page-&gt;time_stamp;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     从我们上面分析的ring_buffer初始化过程中看到,reader_page是一个单独的面面,且它的链表初始化是为空的,如果没有对reader_page进行特殊操作的话,那就是从head_page开始读. 那这个read_page怎么用呢? 它是用来做reader方式的读操作的,我们在后面再来进行分析.
+    </div> 
+    <div>
+     再来看一下时间戳的信息,如果页面没有被读过,那就将read_stamp置为页面的时间戳.在上面已经分析过,页面的时间戳,是将页面切换成写页面时的时间戳(或者是页面第一次写时的时间戳),那就是这个页面的时间起始点.
+    </div> 
+    <div>
+     那cpu_buffer-&gt;read_stamp是什么意思呢? 先将它放一边,接下来继续看它的读操作.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     5.1.2: ring_buffer_iter_peek()
+    </div> 
+    <div>
+     在上面初始化了一个迭代器后,现在就要开始真正的读操作了,代码如下:
+    </div> 
+    <div>
+     struct ring_buffer_event *
+    </div> 
+    <div>
+     ring_buffer_iter_peek(struct ring_buffer_iter *iter, u64 *ts)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer = iter-&gt;cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long flags;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;again:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; spin_lock_irqsave(&amp;cpu_buffer-&gt;reader_lock, flags);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event = rb_iter_peek(iter, ts);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; spin_unlock_irqrestore(&amp;cpu_buffer-&gt;reader_lock, flags);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*这个event是填充数据,比如一个页面已经容不下
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*一个event了,这时,它的剩余空间就是RINGBUF_TYPE_PADDING
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*类型
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*遇到这样的情况,继续读下一个即可
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (event &amp;&amp; event-&gt;type == RINGBUF_TYPE_PADDING) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_relax();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     一眼就可以看出,它的实际操作是在rb_iter_peek()中完成的,代码如下:
+    </div> 
+    <div>
+     static struct ring_buffer_event *
+    </div> 
+    <div>
+     rb_iter_peek(struct ring_buffer_iter *iter, u64 *ts)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer *buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int nr_loops = 0;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果CPU buffer的数据已经读完了*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (ring_buffer_iter_empty(iter))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer = iter-&gt;cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer = cpu_buffer-&gt;buffer;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;again:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* We repeat when a timestamp is encountered. It is possible
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* to get multiple timestamps from an interrupt entering just
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* as one timestamp is about to be written. The max times
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* that this can happen is the number of nested interrupts we
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* can have. Nesting 10 deep of interrupts is clearly
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* an anomaly.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;/*如果重试次数超过了10次,那表示ring buffer中有太多的
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp; * 的附加数据(比如忽略的数据,时间戳数据,等)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp; */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer, ++nr_loops &gt; 10))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*&nbsp; 如果该CPU buffer已经空了*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (rb_per_cpu_empty(cpu_buffer))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*取iter-&gt;head_page对应的第一个event*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event = rb_iter_head_event(iter);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; switch (event-&gt;type) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果是一段填充数据*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_PADDING:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*是一段完全的空闲整充区*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (rb_null_event(event)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_inc_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*是被忽略的内容*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果附加的是一段时间戳*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_TIME_EXTEND:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Internal data, OK to advance */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_TIME_STAMP:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* FIXME: not implemented */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*取出来的是一段数据*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_DATA:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*取到数据了,更新时间戳之后退出*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ts) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ts = iter-&gt;read_stamp + event-&gt;time_delta;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_normalize_time_stamp(buffer,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;cpu_buffer-&gt;cpu, ts);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; default:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BUG();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     这段代码比较简单,就是从ring buffer中取数据,然后更新时间戳.在这里我们需要注意一种RINGBUF_TYPE_PADDING类型的特例,如下所示:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_PADDING:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*是一段完全的空闲整充区*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (rb_null_event(event)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_inc_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*是被忽略的内容*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     什么叫rb_null_event呢,代码中的判断是这样的:
+    </div> 
+    <div>
+     static inline int rb_null_event(struct ring_buffer_event *event)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return event-&gt;type == RINGBUF_TYPE_PADDING &amp;&amp; event-&gt;time_delta == 0;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     可以得到,类型是RINGBUF_TYPE_PADDING,时间戳间隔是0, 这样的情况通常是填充页面的空闲部份. 比如一个页面不够放一个event了,就将该页面的剩余部份置为null event,然后将event存入下一个页面中.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     RINGBUF_TYPE_PADDING还有一种类型是rb_discarded_event, 代码中的判断如下:
+    </div> 
+    <div>
+     static inline int rb_discarded_event(struct ring_buffer_event *event)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return event-&gt;type == RINGBUF_TYPE_PADDING &amp;&amp; event-&gt;time_delta;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     它跟null event的差别是时间戳不为空. 这样的情况经常是,用户不想显示ring buffer中的对应event,就将其设为这种类型, (比如event trace中的filter), 它的设置接口是ring_buffer_event_discard(),如下所示:
+    </div> 
+    <div>
+     void ring_buffer_event_discard(struct ring_buffer_event *event)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event-&gt;type = RINGBUF_TYPE_PADDING;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* time delta must be non zero */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!event-&gt;time_delta)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;time_delta = 1;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     回到上面的rb_iter_peek()中,这个函数里面有个重要的子函数rb_advance_iter(),代码如下:
+    </div> 
+    <div>
+     static void rb_advance_iter(struct ring_buffer_iter *iter)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer *buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned length;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer = iter-&gt;cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; buffer = cpu_buffer-&gt;buffer;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Check if we are at the end of the buffer.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;/*检查该页面是否已经读完了*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (iter-&gt;head &gt;= rb_page_size(iter-&gt;head_page)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*前面的if加上这里的RB_WARN_ON()表示读时不可能
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*会超过commit_page的范围, commit_page的提交序号最多
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*只会到page_size的位置
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*在正常情况下,RB中没数据了,就不会进入到ring_buffer_iter_peek():
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*在rb_iter_peek()刚开始的判断中就会被返回
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (RB_WARN_ON(buffer,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;head_page == cpu_buffer-&gt;commit_page))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*必须要前进一个页面*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_inc_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*取得当前的event*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event = rb_iter_head_event(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*计算event的长度*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; length = rb_event_length(event);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* This should not be called to advance the header if we are
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* at the tail of the buffer.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;/*如果超过了提交的范围, 这是不可能存在的*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (iter-&gt;head_page == cpu_buffer-&gt;commit_page) &amp;&amp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (iter-&gt;head + length &gt; rb_commit_index(cpu_buffer))))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*更新iter的时间戳*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; rb_update_iter_read_stamp(iter, event);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; iter-&gt;head += length;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* check for end of page padding */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果该页面已经读完了而且没有超过commit page
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*再将iter前进
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if ((iter-&gt;head &gt;= rb_page_size(iter-&gt;head_page)) &amp;&amp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; (iter-&gt;head_page != cpu_buffer-&gt;commit_page))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_iter(iter);
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     该接口用来在struct ring_buffer_per_cpu中前进一个event,它有三种可能的情况:
+    </div> 
+    <div>
+     1: 如果该页面已经处理完了,那就转入下一个页面
+    </div> 
+    <div>
+     2: 如果页面已经读完了(读位置等于提交位置),不需要进行任何操作了,返回.
+    </div> 
+    <div>
+     3: 将页面的读位置更新到下一个event的位置,然后更新迭代器的时间戳,返回
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     另外,如果下一个event落到了下一个页面中,那就再调用一下本函数,那迁移到一个页面,如下代码所示:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if ((iter-&gt;head &gt;= rb_page_size(iter-&gt;head_page)) &amp;&amp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; (iter-&gt;head_page != cpu_buffer-&gt;commit_page))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_iter(iter)
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     5.1.3: ring_buffer_read_finish
+    </div> 
+    <div>
+     取完缓存区中的数据之后,还需要做清理的工作,这是在ring_buffer_read_finish()中完成的,代码如下:
+    </div> 
+    <div>
+     void
+    </div> 
+    <div>
+     ring_buffer_read_finish(struct ring_buffer_iter *iter)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer = iter-&gt;cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*恢复ring_buffer_per_cpu的使用*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; atomic_dec(&amp;cpu_buffer-&gt;record_disabled);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*释放迭代器占用的空间*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; kfree(iter);
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     现在迭代器方式的读操作分析完了,我们来总结一下读操作的同步机制:
+    </div> 
+    <div>
+     1):在读操作开始时,就会禁用该CPU上的RB写
+    </div> 
+    <div>
+     2):在整个读操作时,持有cpu_buffer-&gt;reader_lock,且禁中断
+    </div> 
+    <div>
+     为什么需要这样做呢? 这个问题值得好好挖掘一下:
+    </div> 
+    <div>
+     1): 为什么在读的时候要禁止该CPU上的写?
+    </div> 
+    <div>
+     在write的时候,如果缓存区满了,会清空head,然后将head转向下一个位置. 假若进行这个操作的时候,Read正在读head这个页面,那读操作就紊乱了. 有人可能会说,那在write的时候,如果要清空head就持有reader_lock锁不就行了么? 这样当然是可以的,只是相于来说比较繁锁
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     2): 为什么要持有reader_lock锁呢?
+    </div> 
+    <div>
+     对于不同的迭代器读操作来说,它们是没有竞争的,因为它们操作的是同一个迭代器,这里持有reader_lock锁主要是为了跟reader方式的读操作保持同步,因为在reader方式下,会更改head页面,这些操作我们在稍后的分析中会看到.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     5.2: reader方式的读操作
+    </div> 
+    <div>
+     我们在上面的分析中多次提到了reader方式的读操作,这种方式要使用struct ring_buffer_per_cpu中的reader_page成员
+    </div> 
+    <div>
+     它的接口为rb_buffer_peek(), 代码如下:
+    </div> 
+    <div>
+     struct ring_buffer_event *
+    </div> 
+    <div>
+     ring_buffer_peek(struct ring_buffer *buffer, int cpu, u64 *ts)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer = buffer-&gt;buffers[cpu];
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long flags;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果ring buffer中不含此CPU,退出*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!cpumask_test_cpu(cpu, buffer-&gt;cpumask))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;again:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*加锁,从ring buffer中取数据,然后解锁*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; spin_lock_irqsave(&amp;cpu_buffer-&gt;reader_lock, flags);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event = rb_buffer_peek(buffer, cpu, ts);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; spin_unlock_irqrestore(&amp;cpu_buffer-&gt;reader_lock, flags);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果取到的数据是填充数据,再取*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (event &amp;&amp; event-&gt;type == RINGBUF_TYPE_PADDING) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_relax();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     这段代码很简单,首先为了保持Read操作的同步,持有reader_lock锁,然后调用rb_buffer_peek()到RB中取数据,如果取出的数据是填充数据,则再取一次.
+    </div> 
+    <div>
+     核心操作是在rb_buffer_peek()中完成的,代码如下:
+    </div> 
+    <div>
+     static struct ring_buffer_event *
+    </div> 
+    <div>
+     rb_buffer_peek(struct ring_buffer *buffer, int cpu, u64 *ts)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_per_cpu *cpu_buffer;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_page *reader;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int nr_loops = 0;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* 取CPU对应的ring_buffer_per_cpu */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer = buffer-&gt;buffers[cpu];
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;again:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* We repeat when a timestamp is encountered. It is possible
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* to get multiple timestamps from an interrupt entering just
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* as one timestamp is about to be written. The max times
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* that this can happen is the number of nested interrupts we
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* can have.&nbsp; Nesting 10 deep of interrupts is clearly
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* an anomaly.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;/*如果重复次数超过了10, 说明ring buffer中存放了太多的
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*无用数据*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer, ++nr_loops &gt; 10))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*取出当前的reader页面*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; reader = rb_get_reader_page(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (!reader)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*从reader页面中取数据*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; event = rb_reader_event(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*下面的逻辑跟iter方式的一样,只是这里记录时候戳采用的
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*是cpu_buffer-&gt;read_stamp
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; switch (event-&gt;type) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_PADDING:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (rb_null_event(event))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RB_WARN_ON(cpu_buffer, 1);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Because the writer could be discarding every
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* event it creates (which would probably be bad)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* if we were to go back to "again" then we may never
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* catch up, and will trigger the warn on, or lock
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* the box. Return the padding, and we will release
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* the current locks, and try again.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_reader(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_TIME_EXTEND:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Internal data, OK to advance */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_reader(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_TIME_STAMP:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* FIXME: not implemented */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_reader(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_DATA:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ts) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ts = cpu_buffer-&gt;read_stamp + event-&gt;time_delta;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_normalize_time_stamp(buffer,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;cpu_buffer-&gt;cpu, ts);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; default:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; BUG();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return NULL;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     这里的代码逻辑跟iter方式的读操作很相似,结合代码中的注释应该很容易理解这段代码,我们来看一下里面的几个重要的操作:
+    </div> 
+    <div>
+     static struct buffer_page *
+    </div> 
+    <div>
+     rb_get_reader_page(struct ring_buffer_per_cpu *cpu_buffer)
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; struct buffer_page *reader = NULL;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; unsigned long flags;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; int nr_loops = 0;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*因为写操作会更改RB的页面,所以这里必须要跟
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*写操作保持同步,即持有cpu_buffer-&gt;lock锁
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_irq_save(flags);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; __raw_spin_lock(&amp;cpu_buffer-&gt;lock);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;again:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* This should normally only loop twice. But because the
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* start of the reader inserts an empty page, it causes
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* a case where we will loop three times. There should be no
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* reason to loop four times (that I know of).
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer, ++nr_loops &gt; 3)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reader = NULL;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; reader = cpu_buffer-&gt;reader_page;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* If there's more to read, return this page */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果该页面中还有数据,返回该页面*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (cpu_buffer-&gt;reader_page-&gt;read &lt; rb_page_size(reader))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* Never should we have an index greater than the size */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*读位置超过了commit 位置,这是不可能出现的*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu_buffer-&gt;reader_page-&gt;read &gt; rb_page_size(reader)))
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* check if we caught up to the tail */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; reader = NULL;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*读页面就是提交页面, 而且读页面中没有数据可读了,
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*说明缓存区中已经没有数据可读了
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (cpu_buffer-&gt;commit_page == cpu_buffer-&gt;reader_page)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Splice the empty reader page into the list around the head.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* Reset the reader page to size zero.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*cpu_buffer-&gt;reader_page中的数据已经全部都读完了,将它和
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*cpu_buffer-&gt;head_page调换一下位置
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; reader = cpu_buffer-&gt;head_page;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;reader_page-&gt;list.next = reader-&gt;list.next;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;reader_page-&gt;list.prev = reader-&gt;list.prev;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_set(&amp;cpu_buffer-&gt;reader_page-&gt;write, 0);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_set(&amp;cpu_buffer-&gt;reader_page-&gt;page-&gt;commit, 0);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* Make the reader page now replace the head */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; reader-&gt;list.prev-&gt;next = &amp;cpu_buffer-&gt;reader_page-&gt;list;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; reader-&gt;list.next-&gt;prev = &amp;cpu_buffer-&gt;reader_page-&gt;list;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* If the tail is on the reader, then we must set the head
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* to the inserted page, otherwise we set it one before.
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;head_page = cpu_buffer-&gt;reader_page;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*因为切换进来的reader_page是可写的,因此,在不越过commit_page的
+    </div> 
+    <div>
+     *情况下,head_page前进一个页面
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (cpu_buffer-&gt;commit_page != reader)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_inc_page(cpu_buffer, &amp;cpu_buffer-&gt;head_page);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /* Finally update the reader page to the new head */
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; cpu_buffer-&gt;reader_page = reader;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; rb_reset_reader_page(cpu_buffer);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;out:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; __raw_spin_unlock(&amp;cpu_buffer-&gt;lock);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; local_irq_restore(flags);
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; return reader;
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     关于reader操作的原理可以看一下ring_buffer.c中自带的注释:
+    </div> 
+    <div>
+     /*
+    </div> 
+    <div>
+     &nbsp;* The ring buffer is made up of a list of pages. A separate list of pages is
+    </div> 
+    <div>
+     &nbsp;* allocated for each CPU. A writer may only write to a buffer that is
+    </div> 
+    <div>
+     &nbsp;* associated with the CPU it is currently executing on.&nbsp; A reader may read
+    </div> 
+    <div>
+     &nbsp;* from any per cpu buffer.
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;* The reader is special. For each per cpu buffer, the reader has its own
+    </div> 
+    <div>
+     &nbsp;* reader page. When a reader has read the entire reader page, this reader
+    </div> 
+    <div>
+     &nbsp;* page is swapped with another page in the ring buffer.
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;* Now, as long as the writer is off the reader page, the reader can do what
+    </div> 
+    <div>
+     &nbsp;* ever it wants with that page. The writer will never write to that page
+    </div> 
+    <div>
+     &nbsp;* again (as long as it is out of the ring buffer).
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;* Here's some silly ASCII art.
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; +------+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; |reader|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RING BUFFER
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; |page&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; +------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp; |--&gt;|&nbsp;&nbsp; |--&gt;|&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---------------+
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; +------+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; |reader|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RING BUFFER
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; |page&nbsp; |------------------v
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; +------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp; |--&gt;|&nbsp;&nbsp; |--&gt;|&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---------------+
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; +------+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; |reader|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RING BUFFER
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; |page&nbsp; |------------------v
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; +------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp; |--&gt;|&nbsp;&nbsp; |--&gt;|&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +------------------------------+
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; +------+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; |buffer|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; RING BUFFER
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; |page&nbsp; |------------------v
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp; +------+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp; |&nbsp;&nbsp; |&nbsp;&nbsp; |--&gt;|&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp; New&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+&nbsp;&nbsp; +---+
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp; Reader------^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp; page&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    </div> 
+    <div>
+     &nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +------------------------------+
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;* After we make this swap, the reader can hand this page off to the splice
+    </div> 
+    <div>
+     &nbsp;* code and be done with it. It can even allocate a new page if it needs to
+    </div> 
+    <div>
+     &nbsp;* and swap that into the ring buffer.
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;* We will be using cmpxchg soon to make all this lockless.
+    </div> 
+    <div>
+     &nbsp;*
+    </div> 
+    <div>
+     &nbsp;*/
+    </div> 
+    <div>
+     其实,它就是利用reader_page来替换了当前head_page页,这样就不会影响到写操作.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     在这里,我们需要注意的是,经过上面的操作之后, 有可能tail_page和reader_page在同一个页面上,这种情况会在RB开始写的时候,这时候的tail_page, head_page都是重合在一起的,我们可以根据上面的代码逻辑推理一下,假设在刚开始的状态,写了一个不足一个页面的数据,reader开始读,reader_page替换掉head_page之后,页面会成为这个样子:
+    </div> 
+    <div>
+     <img src="http://blogimg.chinaunix.net/blog/upfile2/090610015727.jpg" alt="">
+    </div> 
+    <div>
+     那么,在这时候,tail_page commit_page和reader_page是重合在一起的.
+    </div> 
+    <div>
+     在上面的这种情况下,因为切换出来的head_page,也就是new_reader_page没有更改它的页面前向指针与后向指针,因此,tail_page在前进的时候,会前进到head_page的下一个页面.但是在这种情况下,要注意head_page是没有数据的,所以,在iter读方式下,如果reader_page是被切换出来的head_page(也就是代码中说的,reader_page的链表不为空),读页面是从reader_page开始的.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     另外,还需要注意一点的是,代码中一个比较诡异的注释:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* This should normally only loop twice. But because the
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* start of the reader inserts an empty page, it causes
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* a case where we will loop three times. There should be no
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;* reason to loop four times (that I know of).
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; &nbsp;*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; if (RB_WARN_ON(cpu_buffer, ++nr_loops &gt; 3)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reader = NULL;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     代码注释说,通常情况下, nr_loops会等于2,在开始读的时候,因为reader_page会插入一个空页面,造成该值等于3的情况.
+    </div> 
+    <div>
+     两次循环的情况我们都知道: 刚开始进这个函数,nr_loops加1,假设reader_page中没有数据可读,切换进head_page,然后goto到起点,nr_loops变为2.
+    </div> 
+    <div>
+     那如果nr_loops变为3的话,必须是切换进来的head_page为空,并且RB中有数据.
+    </div> 
+    <div>
+     什么时候会满足这样的情况呢?
+    </div> 
+    <div>
+     其实,这种情况,只需要在上一次reader操作时,head_page和commit_page重合,造成head_page不能前进,然后写操作继续进行,写下一个页面了.此时,再有reader去读的时候,会有head_page是空的,但它后面还有数据的情况.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     另外,我们这里还需要注意一下这个问题,如下代码所示:
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; switch (event-&gt;type) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; /*如果是一段填充数据*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp; case RINGBUF_TYPE_PADDING:
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*是一段完全的空闲整充区*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (rb_null_event(event)) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_inc_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto again;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*是被忽略的内容*/
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; rb_advance_iter(iter);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event;
+    </div> 
+    <div>
+     为什么这里如果取出来的是填充数据,会被BUG_ON()呢,而在iter中,却没有呢?
+    </div> 
+    <div>
+     其实,我们注意看一下代码,在rb_reader_event()中取页面的时候,如果发现read==commit,也就是取到填充位置,就会切换下一个页面进来,因此,在rb_reader_event()不可能会返回一个没有数据的页面.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     另外,从代码中看来,reader读操作和写操作是可以同时进行的,因为reader不会修改页面的数据,但是write在写的时候就必须要跟reader保持同步了,因为reader会切换页面,write也会清空header页面,所以这时需要持有自旋锁保护.
+    </div> 
+    <div>
+     从上面的代码中也可以看出,reader方式的读会依次清空RB中的数据页.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     六: 小结
+    </div> 
+    <div>
+     RB是一种高效的缓冲区操作,在理解代码的时候,需要考虑到各种临界条件,另外,在阅读代码的过程中,不是很简洁,很多函数都是的功能极其相似.
+    </div> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

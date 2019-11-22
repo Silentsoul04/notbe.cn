@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux kernel的中断子系统之（三）：IRQ number和中断描述符【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.wowotech.net/linux_kenrel/interrupt_descriptor.html    一、前言    本文主要围绕IRQ number和中断描述符（interrupt descriptor）这两个概念描述通用中断处理过程。第二章主要描述...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/05/26/weixin_33828101_90135327.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux kernel的中断子系统之（三）：IRQ number和中断描述符【转】</h1>
+    <p class="post-meta">May 26, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.wowotech.net/linux_kenrel/interrupt_descriptor.html" rel="nofollow">http://www.wowotech.net/linux_kenrel/interrupt_descriptor.html</a></p> 
+   <p>一、前言</p> 
+   <p>本文主要围绕IRQ number和中断描述符（interrupt descriptor）这两个概念描述通用中断处理过程。第二章主要描述基本概念，包括什么是IRQ number，什么是中断描述符等。第三章描述中断描述符数据结构的各个成员。第四章描述了初始化中断描述符相关的接口API。第五章描述中断描述符相关的接口API。</p> 
+   <p>二、基本概念</p> 
+   <p>1、通用中断的代码处理示意图</p> 
+   <p>一个关于通用中断处理的示意图如下：</p> 
+   <p><a href="http://www.wowotech.net/content/uploadfile/201408/3e79044a4981e30f35e9b19fe44a441720140826100300.gif" rel="nofollow"><img title="zhongduan" src="http://www.wowotech.net/content/uploadfile/201408/c1bc605fe5555c059b2e2e3196d2862a20140826100303.gif" alt="zhongduan" width="708" height="420"></a></p> 
+   <p>在linux kernel中，对于每一个外设的IRQ都用struct irq_desc来描述，我们称之中断描述符（struct irq_desc）。linux kernel中会有一个数据结构保存了关于所有IRQ的中断描述符信息，我们称之中断描述符DB（上图中红色框图内）。当发生中断后，首先获取触发中断的HW interupt ID，然后通过irq domain翻译成IRQ nuber，然后通过IRQ number就可以获取对应的中断描述符。调用中断描述符中的highlevel irq-events handler来进行中断处理就OK了。而highlevel irq-events handler主要进行下面两个操作：</p> 
+   <p>（1）调用中断描述符的底层irq chip driver进行mask，ack等callback函数，进行interrupt flow control。</p> 
+   <p>（2）调用该中断描述符上的action list中的specific handler（我们用这个术语来区分具体中断handler和high level的handler）。这个步骤不一定会执行，这是和中断描述符的当前状态相关，实际上，interrupt flow control是软件（设定一些标志位，软件根据标志位进行处理）和硬件（mask或者unmask interrupt controller等）一起控制完成的。</p> 
+   <p>&nbsp;</p> 
+   <p>2、中断的打开和关闭</p> 
+   <p>我们再来看看整个通用中断处理过程中的开关中断情况，开关中断有两种：</p> 
+   <p>（1）开关local CPU的中断。对于UP，关闭CPU中断就关闭了一切，永远不会被抢占。对于SMP，实际上，没有关全局中断这一说，只能关闭local CPU（代码运行的那个CPU）</p> 
+   <p>（2）控制interrupt controller，关闭某个IRQ number对应的中断。更准确的术语是mask或者unmask一个 IRQ。</p> 
+   <p>本节主要描述的是第一种，也就是控制CPU的中断。当进入high level handler的时候，CPU的中断是关闭的（硬件在进入IRQ processor mode的时候设定的）。</p> 
+   <p>对于外设的specific handler，旧的内核（2.6.35版本之前）认为有两种：slow handler和fast handle。在request irq的时候，对于fast handler，需要传递IRQF_DISABLED的参数，确保其中断处理过程中是关闭CPU的中断，因为是fast handler，执行很快，即便是关闭CPU中断不会影响系统的性能。但是，并不是每一种外设中断的handler都是那么快（例如磁盘），因此就有slow handler的概念，说明其在中断处理过程中会耗时比较长。对于这种情况，如果在整个specific handler中关闭CPU中断，对系统的performance会有影响。因此，对于slow handler，在从high level handler转入specific handler中间会根据IRQF_DISABLED这个flag来决定是否打开中断，具体代码如下（来自2.6.23内核）：</p> 
+   <blockquote> 
+    <p>irqreturn_t handle_IRQ_event(unsigned int irq, struct irqaction *action)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; ……</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (!(action-&gt;flags &amp; IRQF_DISABLED))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_irq_enable_in_hardirq();</p> 
+    <p>&nbsp;&nbsp;&nbsp; ……&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>如果没有设定IRQF_DISABLED（slow handler），则打开本CPU的中断。然而，随着软硬件技术的发展：</p> 
+   <p>（1）硬件方面，CPU越来越快，原来slow handler也可以很快执行完毕</p> 
+   <p>（2）软件方面，linux kernel提供了更多更好的bottom half的机制</p> 
+   <p>因此，在新的内核中，比如3.14，IRQF_DISABLED被废弃了。我们可以思考一下，为何要有slow handler？每一个handler不都是应该迅速执行完毕，返回中断现场吗？此外，任意中断可以打断slow handler执行，从而导致中断嵌套加深，对内核栈也是考验。因此，新的内核中在interrupt specific handler中是全程关闭CPU中断的。</p> 
+   <p><br>3、IRQ number</p> 
+   <p>从CPU的角度看，无论外部的Interrupt controller的结构是多么复杂，I do not care，我只关心发生了一个指定外设的中断，需要调用相应的外设中断的handler就OK了。更准确的说是通用中断处理模块不关心外部interrupt controller的组织细节（电源管理模块当然要关注具体的设备（interrupt controller也是设备）的拓扑结构）。一言以蔽之，通用中断处理模块可以用一个线性的table来管理一个个的外部中断，这个表的每个元素就是一个irq描述符，在kernel中定义如下：</p> 
+   <blockquote> 
+    <p>struct irq_desc irq_desc[NR_IRQS] __cacheline_aligned_in_smp = {&nbsp;<br>&nbsp;&nbsp;&nbsp; [0 ... NR_IRQS-1] = {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .handle_irq&nbsp;&nbsp;&nbsp; = handle_bad_irq,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .depth&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = 1,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .lock&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = __RAW_SPIN_LOCK_UNLOCKED(irq_desc-&gt;lock),&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>系统中每一个连接外设的中断线（irq request line）用一个中断描述符来描述，每一个外设的interrupt request line分配一个中断号（irq number），系统中有多少个中断线（或者叫做中断源）就有多少个中断描述符（struct irq_desc）。NR_IRQS定义了该硬件平台IRQ的最大数目。</p> 
+   <p>总之，一个静态定义的表格，irq number作为index，每个描述符都是紧密的排在一起，一切看起来很美好，但是现实很残酷的。有些系统可能会定义一个很大的NR_IRQS，但是只是想用其中的若干个，换句话说，这个静态定义的表格不是每个entry都是有效的，有空洞，如果使用静态定义的表格就会导致了内存很大的浪费。为什么会有这种需求？我猜是和各个interrupt controller硬件的interrupt ID映射到irq number的算法有关。在这种情况下，静态表格不适合了，我们改用一个radix tree来保存中断描述符（HW interrupt作为索引）。这时候，每一个中断描述符都是动态分配，然后插入到radix tree中。如果你的系统采用这种策略，那么需要打开CONFIG_SPARSE_IRQ选项。上面的示意图描述的是静态表格的中断描述符DB，如果打开CONFIG_SPARSE_IRQ选项，系统使用Radix tree来保存中断描述符DB，不过概念和静态表格是类似的。</p> 
+   <p>此外，需要注意的是，在旧内核中，IRQ number和硬件的连接有一定的关系，但是，在引入irq domain后，IRQ number已经变成一个单纯的number，和硬件没有任何关系。</p> 
+   <p>&nbsp;</p> 
+   <p>三、中断描述符数据结构</p> 
+   <p>1、底层irq chip相关的数据结构</p> 
+   <p>中断描述符中应该会包括底层irq chip相关的数据结构，linux kernel中把这些数据组织在一起，形成struct irq_data，具体代码如下：</p> 
+   <blockquote> 
+    <p>struct irq_data {&nbsp;<br>&nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mask;－－－－－－－－－－TODO&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq;－－－－－－－－IRQ number&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; hwirq;－－－－－－－HW interrupt ID&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; node;－－－－－－－NUMA node index&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; state_use_accessors;－－－－－－－－底层状态，参考IRQD_xxxx&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_chip&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *chip;－－－－－－－－－－该中断描述符对应的irq chip数据结构&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_domain&nbsp;&nbsp;&nbsp; *domain;－－－－－－－－该中断描述符对应的irq domain数据结构&nbsp;<br>&nbsp;&nbsp;&nbsp; void&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *handler_data;－－－－－－－－和外设specific handler相关的私有数据&nbsp;<br>&nbsp;&nbsp;&nbsp; void&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *chip_data;－－－－－－－－－和中断控制器相关的私有数据&nbsp;<br>&nbsp;&nbsp;&nbsp; struct msi_desc&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *msi_desc;&nbsp;<br>&nbsp;&nbsp;&nbsp; cpumask_var_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; affinity;－－－－－－－和irq affinity相关&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>中断有两种形态，一种就是直接通过signal相连，用电平或者边缘触发。另外一种是基于消息的，被称为MSI (Message Signaled Interrupts)。msi_desc是MSI类型的中断相关，这里不再描述。</p> 
+   <p>node成员用来保存中断描述符的内存位于哪一个memory node上。 对于支持NUMA（Non Uniform Memory Access Architecture）的系统，其内存空间并不是均一的，而是被划分成不同的node，对于不同的memory node，CPU其访问速度是不一样的。如果一个IRQ大部分（或者固定）由某一个CPU处理，那么在动态分配中断描述符的时候，应该考虑将内存分配在该CPU访问速度比较快的memory node上。</p> 
+   <p>&nbsp;</p> 
+   <p>2、irq chip数据结构</p> 
+   <p>Interrupt controller描述符（struct irq_chip）包括了若干和具体Interrupt controller相关的callback函数，我们总结如下：</p> 
+   <table class="ke-zeroborder" style="width:700px;" border="0">
+    <tbody>
+     <tr>
+      <td valign="top">成员名字</td> 
+      <td valign="top">描述</td> 
+     </tr>
+     <tr>
+      <td valign="top">name</td> 
+      <td valign="top">该中断控制器的名字，用于/proc/interrupts中的显示</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_startup</td> 
+      <td valign="top">start up 指定的irq domain上的HW interrupt ID。如果不设定的话，default会被设定为enable函数</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_shutdown</td> 
+      <td valign="top">shutdown 指定的irq domain上的HW interrupt ID。如果不设定的话，default会被设定为disable函数</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_enable</td> 
+      <td valign="top">enable指定的irq domain上的HW interrupt ID。如果不设定的话，default会被设定为unmask函数</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_disable</td> 
+      <td valign="top">disable指定的irq domain上的HW interrupt ID。</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_ack</td> 
+      <td valign="top">和具体的硬件相关，有些中断控制器必须在Ack之后（清除pending的状态）才能接受到新的中断。</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_mask</td> 
+      <td valign="top">mask指定的irq domain上的HW interrupt ID</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_mask_ack</td> 
+      <td valign="top">mask并ack指定的irq domain上的HW interrupt ID。</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_unmask</td> 
+      <td valign="top">mask指定的irq domain上的HW interrupt ID</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_eoi</td> 
+      <td valign="top">有些interrupt controler（例如GIC）提供了这样的寄存器接口，让CPU可以通知interrupt controller，它已经处理完一个中断</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_set_affinity</td> 
+      <td valign="top">在SMP的情况下，可以通过该callback函数设定CPU affinity</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_retrigger</td> 
+      <td valign="top">重新触发一次中断，一般用在中断丢失的场景下。如果硬件不支持retrigger，可以使用软件的方法。</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_set_type</td> 
+      <td valign="top">设定指定的irq domain上的HW interrupt ID的触发方式，电平触发还是边缘触发</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_set_wake</td> 
+      <td valign="top">和电源管理相关，用来enable/disable指定的interrupt source作为唤醒的条件。</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_bus_lock</td> 
+      <td valign="top">有些interrupt controller是连接到慢速总线上（例如一个i2c接口的IO expander芯片），在访问这些芯片的时候需要lock住那个慢速bus（只能有一个client在使用I2C bus）</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_bus_sync_unlock</td> 
+      <td valign="top">unlock慢速总线</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_suspend&nbsp;<br>irq_resume&nbsp;<br>irq_pm_shutdown</td> 
+      <td valign="top">电源管理相关的callback函数</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_calc_mask</td> 
+      <td valign="top">TODO</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq_print_chip</td> 
+      <td valign="top">/proc/interrupts中的信息显示</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p>3、中断描述符</p> 
+   <p>在linux kernel中，使用struct irq_desc来描述一个外设的中断，我们称之中断描述符，具体代码如下：</p> 
+   <blockquote> 
+    <p>struct irq_desc {&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_data&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_data;&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int __percpu&nbsp;&nbsp;&nbsp; *kstat_irqs;－－－－－－IRQ的统计信息&nbsp;<br>&nbsp;&nbsp;&nbsp; irq_flow_handler_t&nbsp;&nbsp;&nbsp; handle_irq;－－－－－－－－（1）&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irqaction&nbsp;&nbsp;&nbsp; *action; －－－－－－－－－－－（2）&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; status_use_accessors;－－－－－中断描述符的状态，参考IRQ_xxxx&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; core_internal_state__do_not_mess_with_it;－－－－（3）&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; depth;－－－－－－－－－－（4）&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wake_depth;－－－－－－－－（5）&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_count;&nbsp; －－－－－－－－－（6）&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; last_unhandled;&nbsp;&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irqs_unhandled;&nbsp;<br>&nbsp;&nbsp;&nbsp; raw_spinlock_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lock;－－－－－－－－－－－（7）&nbsp;<br>&nbsp;&nbsp;&nbsp; struct cpumask&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *percpu_enabled;－－－－－－－（8）&nbsp;<br>#ifdef CONFIG_SMP&nbsp;<br>&nbsp;&nbsp;&nbsp; const struct cpumask&nbsp;&nbsp;&nbsp; *affinity_hint;－－－－和irq affinity相关，后续单独文档描述&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_affinity_notify *affinity_notify;&nbsp;<br>#ifdef CONFIG_GENERIC_PENDING_IRQ&nbsp;<br>&nbsp;&nbsp;&nbsp; cpumask_var_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pending_mask;&nbsp;<br>#endif&nbsp;<br>#endif&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; threads_oneshot; －－－－－（9）&nbsp;<br>&nbsp;&nbsp;&nbsp; atomic_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; threads_active;&nbsp;<br>&nbsp;&nbsp;&nbsp; wait_queue_head_t&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; wait_for_threads;&nbsp;<br>#ifdef CONFIG_PROC_FS&nbsp;<br>&nbsp;&nbsp;&nbsp; struct proc_dir_entry&nbsp;&nbsp;&nbsp; *dir;－－－－－－－－该IRQ对应的proc接口&nbsp;<br>#endif&nbsp;<br>&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; parent_irq;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct module&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *owner;&nbsp;<br>&nbsp;&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *name;&nbsp;<br>} ____cacheline_internodealigned_in_smp</p> 
+   </blockquote> 
+   <p>（1）handle_irq就是highlevel irq-events handler，何谓high level？站在高处自然看不到细节。我认为high level是和specific相对，specific handler处理具体的事务，例如处理一个按键中断、处理一个磁盘中断。而high level则是对处理各种中断交互过程的一个抽象，根据下列硬件的不同：</p> 
+   <p>（a）中断控制器</p> 
+   <p>（b）IRQ trigger type</p> 
+   <p>highlevel irq-events handler可以分成：</p> 
+   <p>（a）处理电平触发类型的中断handler（handle_level_irq）</p> 
+   <p>（b）处理边缘触发类型的中断handler（handle_edge_irq）</p> 
+   <p>（c）处理简单类型的中断handler（handle_simple_irq）</p> 
+   <p>（d）处理EOI类型的中断handler（handle_fasteoi_irq）</p> 
+   <p>会另外有一份文档对high level handler进行更详细的描述。</p> 
+   <p>（2）action指向一个struct irqaction的链表。如果一个interrupt request line允许共享，那么该链表中的成员可以是多个，否则，该链表只有一个节点。</p> 
+   <p>（3）这个有着很长名字的符号core_internal_state__do_not_mess_with_it在具体使用的时候被被简化成istate，表示internal state。就像这个名字定义的那样，我们最好不要直接修改它。</p> 
+   <blockquote> 
+    <p>#define istate core_internal_state__do_not_mess_with_it</p> 
+   </blockquote> 
+   <p>（4）我们可以通过enable和disable一个指定的IRQ来控制内核的并发，从而保护临界区的数据。对一个IRQ进行enable和disable的操作可以嵌套（当然一定要成对使用），depth是描述嵌套深度的信息。</p> 
+   <p>（5）wake_depth是和电源管理中的wake up source相关。通过irq_set_irq_wake接口可以enable或者disable一个IRQ中断是否可以把系统从suspend状态唤醒。同样的，对一个IRQ进行wakeup source的enable和disable的操作可以嵌套（当然一定要成对使用），wake_depth是描述嵌套深度的信息。</p> 
+   <p>（6）irq_count、last_unhandled和irqs_unhandled用于处理broken IRQ 的处理。所谓broken IRQ就是由于种种原因（例如错误firmware），IRQ handler没有定向到指定的IRQ上，当一个IRQ没有被处理的时候，kernel可以为这个没有被处理的handler启动scan过程，让系统中所有的handler来认领该IRQ。</p> 
+   <p>（7）保护该中断描述符的spin lock。</p> 
+   <p>（8）一个中断描述符可能会有两种情况，一种是该IRQ是global，一旦disable了该irq，那么对于所有的CPU而言都是disable的。还有一种情况，就是该IRQ是per CPU的，也就是说，在某个CPU上disable了该irq只是disable了本CPU的IRQ而已，其他的CPU仍然是enable的。percpu_enabled是一个描述该IRQ在各个CPU上是否enable成员。</p> 
+   <p>（9）threads_oneshot、threads_active和wait_for_threads是和IRQ thread相关，后续文档会专门描述。</p> 
+   <p>&nbsp;</p> 
+   <p>四、初始化相关的中断描述符的接口</p> 
+   <p>1、静态定义的中断描述符初始化</p> 
+   <blockquote> 
+    <p>int __init early_irq_init(void)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; int count, i, node = first_online_node;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_desc *desc;</p> 
+    <p>&nbsp;&nbsp;&nbsp; init_irq_default_affinity();</p> 
+    <p>&nbsp;&nbsp;&nbsp; desc = irq_desc;&nbsp;<br>&nbsp;&nbsp;&nbsp; count = ARRAY_SIZE(irq_desc);</p> 
+    <p>&nbsp;&nbsp;&nbsp; for (i = 0; i &lt; count; i++) {－－－遍历整个lookup table，对每一个entry进行初始化&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; desc[i].kstat_irqs = alloc_percpu(unsigned int);－－－分配per cpu的irq统计信息需要的内存&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; alloc_masks(&amp;desc[i], GFP_KERNEL, node);－－－分配中断描述符中需要的cpu mask内存&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; raw_spin_lock_init(&amp;desc[i].lock);－－－初始化spin lock&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; lockdep_set_class(&amp;desc[i].lock, &amp;irq_desc_lock_class);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; desc_set_defaults(i, &amp;desc[i], node, NULL);－－－设定default值&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp; return arch_early_irq_init();－－－调用arch相关的初始化函数&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>2、使用Radix tree的中断描述符初始化</p> 
+   <blockquote> 
+    <p>int __init early_irq_init(void)&nbsp;<br>{……</p> 
+    <p>&nbsp;&nbsp;&nbsp; initcnt = arch_probe_nr_irqs();－－－体系结构相关的代码来决定预先分配的中断描述符的个数</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (initcnt &gt; nr_irqs)－－－initcnt是需要在初始化的时候预分配的IRQ的个数&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nr_irqs = initcnt; －－－nr_irqs是当前系统中IRQ number的最大值</p> 
+    <p>&nbsp;&nbsp;&nbsp; for (i = 0; i &lt; initcnt; i++) {－－－－－－－－预先分配initcnt个中断描述符&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; desc = alloc_desc(i, node, NULL);－－－分配中断描述符&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; set_bit(i, allocated_irqs);－－－设定已经alloc的flag&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_insert_desc(i, desc);－－－－－插入radix tree&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp; ……&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>即便是配置了CONFIG_SPARSE_IRQ选项，在中断描述符初始化的时候，也有机会预先分配一定数量的IRQ。这个数量由arch_probe_nr_irqs决定，对于ARM而言，其arch_probe_nr_irqs定义如下：</p> 
+   <blockquote> 
+    <p>int __init arch_probe_nr_irqs(void)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; nr_irqs = machine_desc-&gt;nr_irqs ? machine_desc-&gt;nr_irqs : NR_IRQS;&nbsp;<br>&nbsp;&nbsp;&nbsp; return nr_irqs;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>3、分配和释放中断描述符</p> 
+   <p>对于使用Radix tree来保存中断描述符DB的linux kernel，其中断描述符是动态分配的，可以使用irq_alloc_descs和irq_free_descs来分配和释放中断描述符。alloc_desc函数也会对中断描述符进行初始化，初始化的内容和静态定义的中断描述符初始化过程是一样的。最大可以分配的ID是IRQ_BITMAP_BITS，定义如下：</p> 
+   <blockquote> 
+    <p>#ifdef CONFIG_SPARSE_IRQ&nbsp;<br># define IRQ_BITMAP_BITS&nbsp;&nbsp;&nbsp; (NR_IRQS + 8196)－－－对于Radix tree，除了预分配的，还可以动态&nbsp;<br>#else&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 分配8196个中断描述符&nbsp;<br># define IRQ_BITMAP_BITS&nbsp;&nbsp;&nbsp; NR_IRQS－－－对于静态定义的，IRQ最大值就是NR_IRQS&nbsp;<br>#endif</p> 
+   </blockquote> 
+   <p>&nbsp;</p> 
+   <p>五、和中断控制器相关的中断描述符的接口</p> 
+   <p>这部分的接口主要有两类，irq_desc_get_xxx和irq_set_xxx，由于get接口API非常简单，这里不再描述，主要描述set类别的接口API。此外，还有一些locked版本的set接口API，定义为__irq_set_xxx，这些API的调用者应该已经持有保护irq desc的spinlock，因此，这些locked版本的接口没有中断描述符的spin lock进行操作。这些接口有自己特定的使用场合，这里也不详细描述了。</p> 
+   <p>1、接口调用时机</p> 
+   <p>kernel提供了若干的接口API可以让内核其他模块可以操作指定IRQ number的描述符结构。中断描述符中有很多的成员是和底层的中断控制器相关，例如：</p> 
+   <p>（1）该中断描述符对应的irq chip</p> 
+   <p>（2）该中断描述符对应的irq trigger type</p> 
+   <p>（3）high level handler</p> 
+   <p>在过去，系统中各个IRQ number是固定分配的，各个IRQ对应的中断控制器、触发类型等也都是清楚的，因此，一般都是在machine driver初始化的时候一次性的进行设定。machine driver的初始化过程会包括中断系统的初始化，在machine driver的中断初始化函数中，会调用本文定义的这些接口对各个IRQ number对应的中断描述符进行irq chip、触发类型的设定。</p> 
+   <p>在引入了device tree、动态分配IRQ number以及irq domain这些概念之后，这些接口的调用时机移到各个中断控制器的初始化以及各个具体硬件驱动初始化过程中，具体如下：</p> 
+   <p>（1）各个中断控制器定义好自己的struct irq_domain_ops callback函数，主要是map和translate函数。</p> 
+   <p>（2）在各个具体的硬件驱动初始化过程中，通过device tree系统可以知道自己的中断信息（连接到哪一个interrupt controler、使用该interrupt controller的那个HW interrupt ID，trigger type为何），调用对应的irq domain的translate进行翻译、解析。之后可以动态申请一个IRQ number并和该硬件外设的HW interrupt ID进行映射，调用irq domain对应的map函数。在map函数中，可以调用本节定义的接口进行中断描述符底层interrupt controller相关信息的设定。</p> 
+   <p>&nbsp;</p> 
+   <p>2、irq_set_chip</p> 
+   <p>这个接口函数用来设定中断描述符中desc-&gt;irq_data.chip成员，具体代码如下：</p> 
+   <blockquote> 
+    <p>int irq_set_chip(unsigned int irq, struct irq_chip *chip)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long flags;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_desc *desc = irq_get_desc_lock(irq, &amp;flags, 0); －－－－（1）</p> 
+    <p>&nbsp;&nbsp;&nbsp; desc-&gt;irq_data.chip = chip;&nbsp;<br>&nbsp;&nbsp;&nbsp; irq_put_desc_unlock(desc, flags);－－－－－－－－－－－－－－－（2）&nbsp;<br><br>&nbsp;&nbsp;&nbsp; irq_reserve_irq(irq);－－－－－－－－－－－－－－－－－－－－－－（3）&nbsp;<br>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>（1）获取irq number对应的中断描述符。这里用关闭中断＋spin lock来保护中断描述符，flag中就是保存的关闭中断之前的状态flag，后面在（2）中会恢复中断flag。</p> 
+   <p>（3）前面我们说过，irq number有静态表格定义的，也有radix tree类型的。对于静态定义的中断描述符，没有alloc的概念。但是，对于radix tree类型，需要首先irq_alloc_desc或者irq_alloc_descs来分配一个或者一组IRQ number，在这些alloc函数值，就会set那些那些已经分配的IRQ。对于静态表格而言，其IRQ没有分配，因此，这里通过irq_reserve_irq函数标识该IRQ已经分配，虽然对于CONFIG_SPARSE_IRQ（使用radix tree）的配置而言，这个操作重复了（在alloc的时候已经设定了）。</p> 
+   <p>&nbsp;</p> 
+   <p>3、irq_set_irq_type</p> 
+   <p>这个函数是用来设定该irq number的trigger type的。</p> 
+   <blockquote> 
+    <p>int irq_set_irq_type(unsigned int irq, unsigned int type)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long flags;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_desc *desc = irq_get_desc_buslock(irq, &amp;flags, IRQ_GET_DESC_CHECK_GLOBAL);&nbsp;<br>&nbsp;&nbsp;&nbsp; int ret = 0;</p> 
+    <p>&nbsp;&nbsp;&nbsp; type &amp;= IRQ_TYPE_SENSE_MASK;&nbsp;<br>&nbsp;&nbsp;&nbsp; ret = __irq_set_trigger(desc, irq, type);&nbsp;<br>&nbsp;&nbsp;&nbsp; irq_put_desc_busunlock(desc, flags);&nbsp;<br>&nbsp;&nbsp;&nbsp; return ret;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>来到这个接口函数，第一个问题就是：为何irq_set_chip接口函数使用irq_get_desc_lock来获取中断描述符，而irq_set_irq_type这个函数却需要irq_get_desc_buslock呢？其实也很简单，irq_set_chip不需要访问底层的irq chip（也就是interrupt controller），但是irq_set_irq_type需要。设定一个IRQ的trigger type最终要调用desc-&gt;irq_data.chip-&gt;irq_set_type函数对底层的interrupt controller进行设定。这时候，问题来了，对于嵌入SOC内部的interrupt controller，当然没有问题，因为访问这些中断控制器的寄存器memory map到了CPU的地址空间，访问非常的快，因此，关闭中断＋spin lock来保护中断描述符当然没有问题，但是，如果该interrupt controller是一个I2C接口的IO expander芯片（这类芯片是扩展的IO，也可以提供中断功能），这时，让其他CPU进行spin操作太浪费CPU时间了（bus操作太慢了，会spin很久的）。肿么办？当然只能是用其他方法lock住bus了（例如mutex，具体实现是和irq chip中的irq_bus_lock实现相关）。一旦lock住了slow bus，然后就可以关闭中断了（中断状态保存在flag中）。</p> 
+   <p>解决了bus lock的疑问后，还有一个看起来奇奇怪怪的宏：IRQ_GET_DESC_CHECK_GLOBAL。为何在irq_set_chip函数中不设定检查（check的参数是0），而在irq_set_irq_type接口函数中要设定global的check，到底是什么意思呢？既然要检查，那么检查什么呢？和“global”对应的不是local而是“per CPU”，内核中的宏定义是：IRQ_GET_DESC_CHECK_PERCPU。SMP情况下，从系统角度看，中断有两种形态（或者叫mode）：</p> 
+   <p>（1）1-N mode。只有1个processor处理中断</p> 
+   <p>（2）N-N mode。所有的processor都是独立的收到中断，如果有N个processor收到中断，那么就有N个处理器来处理该中断。</p> 
+   <p>听起来有些抽象，我们还是用GIC作为例子来具体描述。在GIC中，SPI使用1-N模型，而PPI和SGI使用N-N模型。对于SPI，由于采用了1-N模型，系统（硬件加上软件）必须保证一个中断被一个CPU处理。对于GIC，一个SPI的中断可以trigger多个CPU的interrupt line（如果Distributor中的Interrupt Processor Targets Registers有多个bit被设定），但是，该interrupt source和CPU的接口寄存器（例如ack register）只有一套，也就是说，这些寄存器接口是全局的，是global的，一旦一个CPU ack（读Interrupt Acknowledge Register，获取interrupt ID）了该中断，那么其他的CPU看到的该interupt source的状态也是已经ack的状态。在这种情况下，如果第二个CPU ack该中断的时候，将获取一个spurious interrupt ID。</p> 
+   <p> 对于PPI或者SGI，使用N-N mode，其interrupt source的寄存器是per CPU的，也就是每个CPU都有自己的、针对该interrupt source的寄存器接口（这些寄存器叫做banked register）。一个CPU 清除了该interrupt source的pending状态，其他的CPU感知不到这个变化，它们仍然认为该中断是pending的。</p> 
+   <p>对于irq_set_irq_type这个接口函数，它是for 1-N mode的interrupt source使用的。如果底层设定该interrupt是per CPU的，那么irq_set_irq_type要返回错误。</p> 
+   <p>4、irq_set_chip_data</p> 
+   <p>每个irq chip总有自己私有的数据，我们称之chip data。具体设定chip data的代码如下：</p> 
+   <blockquote> 
+    <p>int irq_set_chip_data(unsigned int irq, void *data)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long flags;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_desc *desc = irq_get_desc_lock(irq, &amp;flags, 0);&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp; desc-&gt;irq_data.chip_data = data;&nbsp;<br>&nbsp;&nbsp;&nbsp; irq_put_desc_unlock(desc, flags);&nbsp;<br>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>多么清晰、多么明了，需要文字继续描述吗？</p> 
+   <p>5、设定high level handler</p> 
+   <p>这是中断处理的核心内容，__irq_set_handler就是设定high level handler的接口函数，不过一般不会直接调用，而是通过irq_set_chip_and_handler_name或者irq_set_chip_and_handler来进行设定。具体代码如下：</p> 
+   <blockquote> 
+    <p>void __irq_set_handler(unsigned int irq, irq_flow_handler_t handle, int is_chained, const char *name)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long flags;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct irq_desc *desc = irq_get_desc_buslock(irq, &amp;flags, 0);</p> 
+    <p>……&nbsp;<br>&nbsp;&nbsp;&nbsp; desc-&gt;handle_irq = handle;&nbsp;<br>&nbsp;&nbsp;&nbsp; desc-&gt;name = name;</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (handle != handle_bad_irq &amp;&amp; is_chained) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_settings_set_noprobe(desc);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_settings_set_norequest(desc);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_settings_set_nothread(desc);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_startup(desc, true);&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;<br>out:&nbsp;<br>&nbsp;&nbsp;&nbsp; irq_put_desc_busunlock(desc, flags);&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>理解这个函数的关键是在is_chained这个参数。这个参数是用在interrupt级联的情况下。例如中断控制器B级联到中断控制器A的第x个interrupt source上。那么对于A上的x这个interrupt而言，在设定其IRQ handler参数的时候要设定is_chained参数等于1，由于这个interrupt source用于级联，因此不能probe、不能被request（已经被中断控制器B使用了），不能被threaded（具体中断线程化的概念在其他文档中描述）</p> 
+   <p>&nbsp;</p> 
+   <p><em>原创文章，转发请注明出处。蜗窝科技。</em><a href="http://www.wowotech.net/linux_kenrel/interrupt_descriptor.html" rel="nofollow">http://www.wowotech.net/linux_kenrel/interrupt_descriptor.html</a></p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Oracle 性能问题排查自动化脚本 « NotBeCN</title>
+  <meta name="description" content="             最近对Oracle数据库的自动化运维比较感兴趣，对数据库性能问题的自动发现告警功能琢磨了一下。    废话少说，进入 Oracle Performance troubleshooting automation scripts: Perfbot Maria    功能：定期执行该脚本，对S...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/18/weixin_33682790_90126287.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Oracle 性能问题排查自动化脚本</h1>
+    <p class="post-meta">Jan 18, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>最近对Oracle数据库的自动化运维比较感兴趣，对数据库性能问题的自动发现告警功能琢磨了一下。</p> 
+   <p>废话少说，进入 Oracle Performance troubleshooting automation scripts: Perfbot Maria</p> 
+   <p>功能：定期执行该脚本，对SQL执行超过n分钟的SQL语句的等待事件以及相关的执行计划和SQL monitor的信息以邮件的形式发给运维者。</p> 
+   <p>主要脚本：pbm_wait.sh</p> 
+   <pre><code>#!/bin/bash
+export ORACLE_SID=$1
+export SQL='sqlplus / as sysdba'
+export EXEC_MIN=5
+export ORACLE_HOME=/opt/app/oracle/product/11GR2
+export PATH=$PATH:$ORACLE_HOME/bin
+export DIR=/home/oracle/dba/pb_maria
+#export MY_DATE=`date '+%d%b%y_%k%M'`
+export LOG=${DIR}/pbm_${ORACLE_SID}_wait.log
+export RESULT=pbm_${ORACLE_SID}_wait.result
+export TEMP_RESULT=pbm_${ORACLE_SID}_wait_temp.result
+export FINAL_RESULT=pbm_wait_${ORACLE_SID}_final.result
+export GRACE=pbm_${ORACLE_SID}_grace.log
+export COUNT=1
+export MAIL='mailx -s "Perfbot maria report of DB $ORACLE_SID"'
+cd $DIR
+$SQL &gt; /dev/null &lt;&lt; EOF
+spool ${LOG}
+@wait.sql
+spool off
+EOF
+sed -i '1d;2d;$d' $LOG
+awk '{if($3&gt;ENVIRON["EXEC_MIN"]) {print $0} }' $LOG &gt; $RESULT
+for i in `awk '{print $2}' $RESULT`
+do
+array[$COUNT]=$i;
+COUNT=$(($COUNT+1));
+done
+if [ $COUNT -ne 1 ]
+then
+for ((i=1; i&lt;${COUNT}; i++))
+do
+grep -q ${array[$i]} $GRACE;
+if [ $? -eq 1 ]; then
+echo ${array[$i]} &gt;&gt; $TEMP_RESULT
+fi
+done
+fi
+if [[ -e $TEMP_RESULT ]]; then
+sort -u $TEMP_RESULT &gt; $FINAL_RESULT
+COUNT=1
+for i in `awk '{print $1}' $FINAL_RESULT`
+do
+array[$COUNT]=$i
+COUNT=$(($COUNT+1));
+done
+for ((i=1; i&lt;${COUNT}; i++))
+do
+$SQL &gt; /dev/null &lt;&lt; EOF
+spool ${DIR}/${ORACLE_SID}_${array[$i]}_sql.rpt
+@sm.sql ${array[$i]}
+spool off
+EOF
+sed -i '1d;$d' ${DIR}/${ORACLE_SID}_${array[i]}_sql.rpt
+done
+for ((i=1; i&lt;${COUNT}; i++))
+do
+export MAIL=$MAIL" -a "${DIR}/${ORACLE_SID}_${array[$i]}"_sql.rpt"
+done
+export MAIL=$MAIL" 234924619@qq.com &lt; "${DIR}/$RESULT" "
+eval $MAIL
+mv *.rpt reports/
+fi
+awk '{print $2}' $RESULT &gt; $GRACE
+mv *.result results/</code></pre> 
+   <p>脚本使用方法： /home/oracle/dba/pb_maria/pbm_wait.sh </p> 
+   <p>其中 EXEC_MIN 参数控制着多少分钟以上的SQL会被写入邮件。</p> 
+   <p>细心的朋友会发现，脚本中加入了GRACE机制，即上一次告警过的SQL不会接连告警，可能会隔次告警，减少无谓的告警骚扰。</p> 
+   <p>调用的sql 脚本也附上：</p> 
+   <p>wait.sql</p> 
+   <pre><code>set line 220 pages 50000
+set heading off
+set feedback off
+col username for a10
+col event for a35
+col program for a35
+COLUMN elapsed_min FORMAT 999999999.99
+select username,sql_id, ROUND(( sysdate - SQL_EXEC_START)*1440 , 2) elapsed_min
+,program,event
+FROM V$SESSION
+WHERE USERNAME IS NOT NULL
+AND WAIT_CLASS NOT LIKE 'Idle'
+AND SQL_ID IS NOT NULL
+AND ROUND(( sysdate - SQL_EXEC_START)*1440 , 2) IS NOT NULL
+order by elapsed_min desc;</code></pre> 
+   <p>sm.sql</p> 
+   <pre><code>set pagesize 50000
+set long 20000
+select dbms_sqltune.report_sql_monitor(SQL_ID=&gt;'&amp;&amp;1',TYPE=&gt;'text') from dual
+/</code></pre> 
+   <p>注意点如下：</p> 
+   <p>注意该脚本必须放在/home/oracle/dba/pb_maria路径使用；在该路径下创建results和reports路径来存放历史的信息。</p> 
+   <p>cronjob我设置的是5分钟一次。</p> 
+   <p>这个脚本需要Oracle数据库服务器能连上互联网，才能发邮件。如果是私网的机器，则可以考虑加一台私网公网都在的mail服务器，将需要发的邮件的信息传送到这台mail服务器上，然后定时发出邮件。</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

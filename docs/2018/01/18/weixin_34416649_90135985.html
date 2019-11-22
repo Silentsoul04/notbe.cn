@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>一次OOM问题排查 « NotBeCN</title>
+  <meta name="description" content="             问题描述    用户问题：用户发现自己的服务器CPU在某一时刻陡然升高，但从监控上看，同一时刻的业务量却并不高，客户怀疑是云服务器有问题，希望技术支持团队予以解决。    经过我们的排查，发现cpu的两次间歇飙高是由于客户系统当时发生了OOM（out of memory）的情况，并触发了...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/18/weixin_34416649_90135985.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">一次OOM问题排查</h1>
+    <p class="post-meta">Jan 18, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h2>问题描述</h2> 
+   <p>用户问题：<br>用户发现自己的服务器CPU在某一时刻陡然升高，但从监控上看，同一时刻的业务量却并不高，客户怀疑是云服务器有问题，希望技术支持团队予以解决。</p> 
+   <p>经过我们的排查，发现cpu的两次间歇飙高是由于客户系统当时发生了OOM（out of memory）的情况，并触发了oom-killer造成的。但客户并不接受这个结论，认为是云服务器的异常导致了cpu飙高，而cpu的升高又导致了oom情况的发生。也就是对于cpu升高和oom谁为因果这件事上，客户和我们持完全相反的态度。</p> 
+   <p>下面我们将通过对oom时系统日志的解读来说明cpu升高和oom之间的因果关系。</p> 
+   <h2>知识点梳理</h2> 
+   <h3>1 预备知识</h3> 
+   <p>在解读日志之前，我们先回顾一下linux内核的内存管理。</p> 
+   <h4>1.1 几个基本的概念</h4> 
+   <p>（1）Page 页<br>处理器的最小‘寻址单元’是字节或者字，而页是内存的‘管理单元’。</p> 
+   <p>（2） Zone 区<br>（a）区存在的原因：<br> 有些硬件设备只能对特定的内存地址执行DMA(direct memory access)操作。<br>在一些架构中，实际物理内存是比系统可寻址的虚拟内存要大的，这就导致有些物理内存没有办法被永久的映射在内核的地址空间中。</p> 
+   <p>区的划分也是直接以上面两个原因为依据的。</p> 
+   <p>（b）区的种类 <br>ZONE_DMA—这个区包含的page可以执行DMA操作。这部分区域的大小和CPU架构有关，在x86架构中，该部分区域大小限制为16MB。<br>ZONE_DMA32—类似于ZOME_DMA, 这个区也包含可以执行DMA操作的page。该区域只存在于64位系统中，适合32位的设备访问。<br>ZONE_NORMAL—这个区包含可以正常映射到地址空间中的page，或者说这个区包含了除了DMA和HIGHMEM以外的内存。许多内核操作都仅在这个区域进行。<br>ZONE_HIGHMEM—这个区包含的是high memory，也就是那些不能被永久映射到内核地址空间的页。 </p> 
+   <p>32位的x86架构中存在三种内存区域，ZONE_DMA，ZONE_NORMAL，ZONE_HIGHMEM。根据地址空间划分的不同，三个区域的大小不一样：</p> 
+   <p>1）1G内核空间/3G用户空间</p> 
+   <table>
+    <thead>
+     <tr>
+      <th>ZONE_DMA</th> 
+      <th>&lt; 16M</th> 
+     </tr>
+    </thead>
+    <tbody>
+     <tr>
+      <td>ZONE_NORMAL</td> 
+      <td>16M~896M</td> 
+     </tr>
+     <tr>
+      <td>ZONE_HIGHMEM</td> 
+      <td>&gt; 896M</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>2) 4G内核空间/4G用户空间</p> 
+   <table>
+    <thead>
+     <tr>
+      <th>ZONE_DMA</th> 
+      <th>&lt; 16M</th> 
+     </tr>
+    </thead>
+    <tbody>
+     <tr>
+      <td>ZONE_NORMAL</td> 
+      <td>16M~3968M</td> 
+     </tr>
+     <tr>
+      <td>ZONE_HIGHMEM</td> 
+      <td>&gt; 3968M</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>64位的系统由于寻址能力的提高，不存在highmem区，所以64位系统中存在的区有DMA，DMA32和NORMAL三个区。</p> 
+   <table>
+    <thead>
+     <tr>
+      <th>ZONE_DMA</th> 
+      <th>&lt; 16M</th> 
+     </tr>
+    </thead>
+    <tbody>
+     <tr>
+      <td>ZONE_DMA32</td> 
+      <td>16M~4G</td> 
+     </tr>
+     <tr>
+      <td>ZONE_NORMAL</td> 
+      <td>&gt; 4G</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><img src="https://ws2.sinaimg.cn/large/006tKfTcgy1fjuegr0xkbj30wq0oyq3d.jpg" alt="" title=""></p> 
+   <h4>1.2 内核分配内存的函数</h4> 
+   <p>下面是内核分配内存的核心函数之一，它会分配2的order次方个连续的物理页内存，并将第一页的逻辑地址返回。</p> 
+   <p>unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order)</p> 
+   <p>内核空间的内存分配函数和用户空间最大的不同就是每个函数会有一个gfp_mask参数。<br>其中gfp 代表的就是我们上面的内存分配函数 __get_free_pages()。</p> 
+   <p>gfp_mask可以分成三种: 行为修饰符（action modifier）,区修饰符 （zone modifier）和类型（ type）.</p> 
+   <p>（1）行为修饰符是用来指定内核该如何分配内存的。比如分配内存时是否可以进行磁盘io，是否可以进行文件系统操作，内核是否可以睡眠（sleep）等等。<br>（2）区修饰符指定内存需要从哪个区来分配。<br>（3）类型是行为修饰符和区修饰符结合之后的产物。在一些特定的内存分配场合下，我们可能需要同时指定多个行为修饰符和区修饰符，而type就是针对这些固定的场合，将所需要的行为修饰符和区修饰符都整合到了一起，这样使用者只要指定一个type就可以了。</p> 
+   <p>不同type所代表的含义可以参看下面的表格：<br><img src="https://ws4.sinaimg.cn/large/006tKfTcgy1fjueijjfnlj30ys0ta0xp.jpg" alt="" title=""></p> 
+   <h3>2 日志解读</h3> 
+   <p>下面是从oom killer被触发到进程到被杀掉的一个大概过程，我们来具体看一下。</p> 
+   <pre><code>nginx invoked oom-killer: gfp_mask=0x200da, order=0, oom_score_adj=0
+nginx cpuset=6011a7f12bac1c4592ce41407bb41d49836197001a0e355f5a1d9589e4001e42 mems_allowed=0
+CPU: 1 PID: 10242 Comm: nginx Not tainted 3.13.0-86-generic #130-Ubuntu
+Hardware name: Xen HVM domU, BIOS 4.0.1 12/16/2014
+ 0000000000000000 ffff880070611a00 ffffffff8172a3b4 ffff88012af6c800
+ 0000000000000000 ffff880070611a88 ffffffff8172495d ffffffff81069b76
+ ffff880070611a60 ffffffff810ca5ac ffff88020fff7e38 0000000000000000
+Node 0 DMA free:15908kB min:128kB low:160kB high:192kB active_anon:0kB inactive_anon:0kB active_file:0kB inactive_file:0kB unevictable:0kB isolated(anon):0kB isolated(file):0kB present:15992kB managed:15908kB mlocked:0kB dirty:0kB writeback:0kB mapped:0kB shmem:0kB slab_reclaimable:0kB slab_unreclaimable:0kB kernel_stack:0kB pagetables:0kB unstable:0kB bounce:0kB free_cma:0kB writeback_tmp:0kB pages_scanned:0 all_unreclaimable? yes
+lowmem_reserve[]: 0 3746 7968 7968
+Node 0 DMA32 free:48516kB min:31704kB low:39628kB high:47556kB active_anon:3619272kB inactive_anon:216kB active_file:556kB inactive_file:1516kB unevictable:0kB isolated(anon):0kB isolated(file):0kB present:3915776kB managed:3836724kB mlocked:0kB dirty:4kB writeback:0kB mapped:324kB shmem:1008kB slab_reclaimable:67136kB slab_unreclaimable:67488kB kernel_stack:1792kB pagetables:14540kB unstable:0kB bounce:0kB free_cma:0kB writeback_tmp:0kB pages_scanned:7365 all_unreclaimable? yes
+lowmem_reserve[]: 0 0 4221 4221
+Node 0 Normal free:35640kB min:35748kB low:44684kB high:53620kB active_anon:4019124kB inactive_anon:292kB active_file:1292kB inactive_file:2972kB unevictable:0kB isolated(anon):0kB isolated(file):0kB present:4456448kB managed:4322984kB mlocked:0kB dirty:24kB writeback:4kB mapped:1296kB shmem:1324kB slab_reclaimable:81196kB slab_unreclaimable:83432kB kernel_stack:3392kB pagetables:20252kB unstable:0kB bounce:0kB free_cma:0kB writeback_tmp:0kB pages_scanned: 7874 all_unreclaimable? yes
+lowmem_reserve[]: 0 0 0 0
+Node 0 DMA: 1*4kB (U) 0*8kB 0*16kB 1*32kB (U) 2*64kB (U) 1*128kB (U) 1*256kB (U) 0*512kB 1*1024kB (U) 1*2048kB (R) 3*4096kB (M) = 15908kB Node 0 DMA32: 1101*4kB (UE) 745*8kB (UEM) 475*16kB (UEM) 263*32kB (EM) 88*64kB (UEM) 25*128kB (E)12*256kB (EM) 6*512kB (E) 7*1024kB (EM) 0*2048kB 0*4096kB = 48524kB
+Node 0 Normal: 5769*4kB (EM) 1495*8kB (EM) 24*16kB (UE) 0*32kB 0*64kB 0*128kB 0*256kB 0*512kB 0*1024kB 0*2048kB 0*4096kB = 35420kB
+Node 0 hugepages_total=0 hugepages_free=0 hugepages_surp=0 hugepages_size=2048kB
+2273 total pagecache pages
+0 pages in swap cache
+Swap cache stats: add 0, delete 0, find 0/0
+Free swap  = 0kB
+Total swap = 0kB
+2097054 pages RAM
+0 pages HighMem/MovableOnly
+33366 pages reserved
+[ pid ]   uid  tgid total_vm      rss nr_ptes swapents oom_score_adj name
+[  355]     0   355     4868       66      13        0             0 upstart-udev-br
+[  361]     0   361    12881      145      28        0         -1000 systemd-udevd
+[  499]     0   499     3814       60      13        0             0 upstart-socket-
+[  562]     0   562     5855       79      15        0             0 rpcbind
+[  644]   106   644     5398      142      16        0             0 rpc.statd
+[  775]     0   775     3818       58      12        0             0 upstart-file-br
+...（此处有省略）
+[10396]   104 10396    21140    12367      44        0             0 nginx
+[10397]   104 10397    21140    12324      44        0             0 nginx
+[10398]   104 10398    21140    12324      44        0             0 nginx
+[10399]   104 10399    21140    12367      44        0             0 nginx
+Out of memory: Kill process 10366 (nginx) score 6 or sacrifice child
+Killed process 10366 (nginx) total-vm:84784kB, anon-rss:49156kB, file-rss:520kB
+</code></pre> 
+   <p>先来看一下第一行，它给出了oom killer是由谁触发的信息。</p> 
+   <p>nginx invoked oom-killer: gfp_mask=0x200da, order=0, oom_score_adj=0</p> 
+   <p>order=0 告诉我们所请求的内存的大小是多少，即nginx请求了2的0次方这么多个page的内存，也就是一个page，或者说是4KB。</p> 
+   <p>gfp_mask的最后两个bit代表的是zone mask，也就是说它指明内存应该从哪个区来分配。</p> 
+   <p>Flag value Description</p> 
+   <pre><code>            0x00u      0 implicitly means allocate from ZONE_NORMAL</code></pre> 
+   <p>__GFP_DMA 0x01u Allocate from ZONE_DMA if possible<br>__GFP_HIGHMEM 0x02u Allocate from ZONE_HIGHMEM if possible</p> 
+   <p>（这里有一点需要注意，在64位的x86系统中，是没有highmem区的，64位系统中的normal区就对应上表中的highmem区。）</p> 
+   <p>在本案例中，zonemask是2，也就是说nginx正在从zone－normal（64位系统）中请求内存。</p> 
+   <p>其他标志位的含义如下：</p> 
+   <pre><code>#define __GFP_WAIT      0x10u   /* Can wait and reschedule? */
+#define __GFP_HIGH      0x20u   /* Should access emergency pools? */
+#define __GFP_IO        0x40u   /* Can start physical IO? */
+#define __GFP_FS        0x80u   /* Can call down to low-level FS? */
+#define __GFP_COLD      0x100u  /* Cache-cold page required */
+#define __GFP_NOWARN    0x200u  /* Suppress page allocation failure warning */
+#define __GFP_REPEAT    0x400u  /* Retry the allocation.  Might fail */
+#define __GFP_NOFAIL    0x800u  /* Retry for ever.  Cannot fail */
+#define __GFP_NORETRY   0x1000u /* Do not retry.  Might fail */
+#define __GFP_NO_GROW   0x2000u /* Slab internal usage */
+#define __GFP_COMP      0x4000u /* Add compound page metadata */
+#define __GFP_ZERO      0x8000u /* Return zeroed page on success */
+#define __GFP_NOMEMALLOC 0x10000u /* Don't use emergency reserves */
+#define __GFP_NORECLAIM  0x20000u /* No realy zone reclaim during allocation */
+</code></pre> 
+   <p>所以我们当前这个内存请求带有这几个标志：GFP_NORECLAIM，GFP_FS，GFP_IO，GFP_WAIT, 都是比较正常的几个标志，那么我们这个请求为什么会有问题呢？继续往下看，可以看到下面的信息：</p> 
+   <pre><code>Node 0 Normal free:35640kB min:35748kB low:44684kB high:53620kB active_anon:4019124kB inactive_anon:292kB active_file:1292kB inactive_file:2972kB unevictable:0kB isolated(anon):0kB isolated(file):0kB present:4456448kB managed:4322984kB mlocked:0kB dirty:24kB writeback:4kB mapped:1296kB shmem:1324kB slab_reclaimable:81196kB slab_unreclaimable:83432kB kernel_stack:3392kB pagetables:20252kB unstable:0kB bounce:0kB free_cma:0kB writeback_tmp:0kB pages_scanned: 7874 all_unreclaimable? yes
+</code></pre> 
+   <p>可以看到normal区free的内存只有35640KB，比系统允许的最小值（min）还要低，这意味着application已经无法再从系统中申请到内存了，并且系统会开始启动oom killer来缓解系统内存压力。<br><img src="https://ws3.sinaimg.cn/large/006tKfTcgy1fjuelvhq4zj30zy0o8jt4.jpg" alt="" title=""></p> 
+   <p>这里我们说一下一个常见的误区，就是有人会认为触发了oom-killer的进程就是问题的罪魁祸首，比如我们这个例子中的这个nginx进程。其实日志中invoke oom-killer的这个进程有时候可能只是一个受害者，因为其他应用／进程已将系统内存用尽，而这个invoke oomkiller的进程恰好在此时发起了一个分配内存的请求而已。在系统内存已经不足的情况下，任何一个内存请求都可能触发oom killer的启动。</p> 
+   <p>oom-killer的启动会使系统从用户空间转换到内核空间。内核会在短时间内进行大量的工作，比如计算每个进程的oom分值，从而筛选出最适合杀掉的进程。我们从日志中也可以看到这一筛选过程：</p> 
+   <pre><code>[ pid ]   uid  tgid total_vm      rss nr_ptes swapents oom_score_adj name
+[  355]     0   355     4868       66      13        0             0 upstart-udev-br
+[  361]     0   361    12881      145      28        0         -1000 systemd-udevd
+[  499]     0   499     3814       60      13        0             0 upstart-socket-
+[  562]     0   562     5855       79      15        0             0 rpcbind
+[  644]   106   644     5398      142      16        0             0 rpc.statd
+[  775]     0   775     3818       58      12        0             0 upstart-file-br
+...
+[10396]   104 10396    21140    12367      44        0             0 nginx
+[10397]   104 10397    21140    12324      44        0             0 nginx
+[10398]   104 10398    21140    12324      44        0             0 nginx
+[10399]   104 10399    21140    12367      44        0             0 nginx
+</code></pre> 
+   <p>本例中，一个nginx进程被选中作为缓解内存压力的牺牲进程：<br>Out of memory: Kill process 10366 (nginx) score 6 or sacrifice child<br>Killed process 10366 (nginx) total-vm:84784kB, anon-rss:49156kB, file-rss:520kB</p> 
+   <p>整个过程进行的时间很短，只有毫秒级别，但是工作量／计算量很大，这就导致了cpu短时间内迅速飙升，出现峰值。但这一切工作都由内核在内核空间中完成，所以用户在自己的业务监控数据上并不会看到业务量的异常。这些短时间升高的cpu是内核使用的，而不是用户的业务。</p> 
+   <p>本例中客户只是偶尔看到这个现象，且业务并没有受到影响。我们给客户的建议是分析业务内存需求量最大值，如果系统已经没有办法满足特定时段业务的内存需求，建议用户升级内存来避免oom的情况发生，因为严重的oom情况是可能引发系统崩溃的。</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

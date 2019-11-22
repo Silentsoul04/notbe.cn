@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Redis（三）：AOF 持久化 « NotBeCN</title>
+  <meta name="description" content="                        文章目录            1、AOF 持久化工作流程           1.1、命令写入（append）      1.2、文件同步（sync）      1.3、AOF 文件重写（rewrite）             1.3.1、重写后的AOF文件为什...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/11/u010647035_90115843.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Redis（三）：AOF 持久化</h1>
+    <p class="post-meta">May 11, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-kimbie-light"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p></p>
+  <div class="toc">
+   <h3>文章目录</h3>
+   <ul>
+    <ul>
+     <li><a href="#1AOF__4" rel="nofollow">1、AOF 持久化工作流程</a></li>
+     <ul>
+      <li><a href="#11append_16" rel="nofollow">1.1、命令写入（append）</a></li>
+      <li><a href="#12sync_36" rel="nofollow">1.2、文件同步（sync）</a></li>
+      <li><a href="#13AOF_rewrite_68" rel="nofollow">1.3、AOF 文件重写（rewrite）</a></li>
+      <ul>
+       <li><a href="#131AOF_73" rel="nofollow">1.3.1、重写后的AOF文件为什么会变小</a></li>
+       <li><a href="#132AOF__79" rel="nofollow">1.3.2、AOF 重写机制的触发</a></li>
+       <ul>
+        <li><a href="#1321_82" rel="nofollow">1.3.2.1、手动触发</a></li>
+        <li><a href="#1322_85" rel="nofollow">1.3.2.2、自动触发：</a></li>
+       </ul>
+       <li><a href="#133AOF__93" rel="nofollow">1.3.3、AOF 文件重写流程</a></li>
+       <li><a href="#134_122" rel="nofollow">1.3.4、重启加载流程</a></li>
+      </ul>
+     </ul>
+     <li><a href="#2AOF__139" rel="nofollow">2、AOF 持久化的效率和安全性</a></li>
+    </ul>
+   </ul>
+  </div>
+  <br> 除了 RDB 持久化之外，Redis 还提供了 AOF（Append Only File）持久化功能。RDB 持久化是保存数据库中键值对数据来记录数据库状态的，AOF 以独立日志的方式记录每次写命令，重启时再重新执行 AOF 文件中的命令达到恢复数据的目的。 AOF 的主要作用是解决了数据持久化的实时性。
+  <p></p> 
+  <h2><a id="1AOF__4"></a>1、AOF 持久化工作流程</h2> 
+  <p>AOF 的工作流程包括： 命令写入（append）、文件同步（sync）、文件重写（rewrite）、重启加载（load）<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511190626355.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA2NDcwMzU=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p> 
+  <p>1）所有的写入命令会追加到 aof_ buf（缓冲区）</p> 
+  <p>2）缓冲区根据对应的策略向硬盘做同步操作</p> 
+  <p>3）随着 AOF 文件越来越大，需要定期对 AOF 文件进行重写，达到压缩的目的</p> 
+  <p>4）当 Redis 服务重启时，可以加载 AOF 文件进行数据恢复</p> 
+  <h3><a id="11append_16"></a>1.1、命令写入（append）</h3> 
+  <p>当 AOF 持久化功能打开的情况下，Redis 服务在执行完一个写命令之后，会以Redis协议的格式将被执行的写命令追加到服务器状态的 aof_buf 缓冲区的末尾。</p> 
+  <pre><code>struct redisServer { 
+    // ... 
+    // AOF 缓冲区 
+    sds aof_buf; 
+    // ... 
+};
+</code></pre> 
+  <p>如果向服务端执行以下命令：</p> 
+  <pre><code>127.0.0.1:6379&gt; set hello world
+OK
+</code></pre> 
+  <p>该命令执行之后，redis 服务会将以下协议内容追加到 aof_buf 缓冲区的末尾</p> 
+  <pre><code>*3\r\n$3\r\nset\r\n$3\r\nhello\r\n$5\r\nworld\r\
+</code></pre> 
+  <h3><a id="12sync_36"></a>1.2、文件同步（sync）</h3> 
+  <p>Redis 服务器进程就是一个事件循环（loop），这个循环中的文件事件负责接收客户端的命令 请求，以及向客户端发送命令回复，而时间事件则负责执行像 serverCron 函数这样需要定时 运行的函数。</p> 
+  <p>因为服务器在处理文件事件时可能会执行写命令，使得一些内容被追加到 aof_buf 缓冲区， 所以 在服务器每次结束一个事件循环之前，它都会调用 flushAppendOnlyFile 函数，考虑是否需要将 aof_buf 缓冲区中的内容写入和保存到 AOF 文件里面。</p> 
+  <p>flushAppendOnlyFile 函数的行为由配置的 appendfsync 的值来决定，不同值产生的行为不同：</p> 
+  <p><strong>1）appendfsync always</strong></p> 
+  <p>命令写入 aof_buf 后调用系统 fsync 操作同步到 AOF 文件</p> 
+  <p><strong>2）appendfsync everysec（默认）</strong></p> 
+  <p>命令写入 aof_buf 后调用系统 write 操作。fsync 同步文件操作由专门线程每秒调用一次</p> 
+  <p><strong>3）appendfsync no</strong></p> 
+  <p>命令写入 aof_buf 后调用系统 write 操作，不对 AOF 文件做 fsync 同步，同步硬盘操作由操作系统负责，通常间隔是 30 秒</p> 
+  <p><strong>系统调用 write 和 fsync 说明：</strong></p> 
+  <ul> 
+   <li>write 操作会触发延迟写（delayed write）机制。Linux 内核提供页缓冲区来提高硬盘 IO 性能。write 操作在写入系统缓冲区后直接返回。同步硬盘操作依赖于系统调度机制，同步文件之前，如果此时系统故障宕机，缓冲区内数据将丢失。</li> 
+   <li>fsync 针对单个文件操作，做强制硬盘同步，fsync 将阻塞直到写入硬盘完成后返回，保证了数据持久化。</li> 
+  </ul> 
+  <p>除了 write、fsync，Linux 还提供了 sync、fdatasync 操作，具体 API 说明参见：<a href="http://linux.die.net/man/2/write%EF%BC%8Chttp://linux.die.net/man/2/fsync%EF%BC%8Chttp://linux.die.net/man/2/sync%EF%BC%8Chttp://linux.die.net/man/2/fdatasync%E3%80%82" rel="nofollow">http://linux.die.net/man/2/write，http://linux.die.net/man/2/fsync，http://linux.die.net/man/2/sync，http://linux.die.net/man/2/fdatasync。</a></p> 
+  <blockquote> 
+   <p>为了提高文件的写入效率，在现代操作系统中，当用户调用 write 函数，将一些数据写入到 文件的时候，操作系统通常会将写入数据暂时保存在一个内存缓冲区里面，等到缓冲区的空间 被填满、或者超过了指定的时限之后，才真正地将缓冲区中的数据写入到磁盘里面。</p> 
+   <p>这种做法虽然提高了写入效率，但也为写入数据带来了安全问题，因为如果计算机发生停机， 那么保存在内存缓冲区里面的数据将会丢失。</p> 
+   <p>因此，系统提供了fsync 和 fdatasync 两个同步函数，它们可以强制让操作系统立即将缓冲区 中的数据写入到硬盘里面，从而确保写入数据的安全性。</p> 
+  </blockquote> 
+  <h3><a id="13AOF_rewrite_68"></a>1.3、AOF 文件重写（rewrite）</h3> 
+  <p>随着命令不断写入 AOF， 文件会越来越大，为了解决这个问题，Redis 引入AOF 重写机制压缩文件体积。AOF 文件 重写是把 Redis 进程内的数据转化为写命令同步到新 AOF 文件的过程。</p> 
+  <p>AOF 重写不仅减小了文件的体积，而且提高了被 Redis 服务加载的速度。</p> 
+  <h4><a id="131AOF_73"></a>1.3.1、重写后的AOF文件为什么会变小</h4> 
+  <p>1、已经超时数据的命令不再写入文件</p> 
+  <p>2、旧的AOF文件含有很多无效的命令，如：del key、hdel key2、strem keys等。重写时使用进程内数据直接生成，新的AOF文件只会保留最终数据的写入命令</p> 
+  <p>3、多条写命令可以合并为一条，如：lpush list a、lpush list b、lpush list c 可以转化为：lpush list a b c。为了防止单条命令过大造成客户端缓冲区溢出，对于list、set、hash、zset等类型操作，以 64 个元素为界拆分为多条。</p> 
+  <h4><a id="132AOF__79"></a>1.3.2、AOF 重写机制的触发</h4> 
+  <p>AOF 重写机制可以手动触发和自动触发</p> 
+  <h5><a id="1321_82"></a>1.3.2.1、手动触发</h5> 
+  <p>调用 bgrewriteaof 命令</p> 
+  <h5><a id="1322_85"></a>1.3.2.2、自动触发：</h5> 
+  <p>自动触发根据 auto-aof-rewrite-percentage 和 auto-aof-rewrite-min-size 参数确定触发时机</p> 
+  <ul> 
+   <li>auto-aof-rewrite-percentage：代表当前AOF文件空间（aof_current_size）和上一次重写后AOF文件空间（aof_base_size）的比值。</li> 
+   <li>auto-aof-rewrite-min-size：运行AOF重写时文件最小体积，默认 64MB</li> 
+  </ul> 
+  <p>自动触发时机= aof_current_size&gt;auto-aof-rewrite-min-size&amp;&amp;（aof_current_ size-aof_base_size）/ aof_base_ size&gt;= auto-aof-rewrite-percentage</p> 
+  <h4><a id="133AOF__93"></a>1.3.3、AOF 文件重写流程</h4> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511194845432.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA2NDcwMzU=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p> 
+  <p><strong>（1）、执行AOF重写请求</strong></p> 
+  <p>如果当前进程正在执行 AOF 重写，请求不执行并返回如下信息：</p> 
+  <pre><code>ERR Background append only file rewriting already in progress
+</code></pre> 
+  <p>如果当前进程正在执行bgsave操作，重写命令延迟到bgsave完成之后再执行，返回如下信息：</p> 
+  <pre><code>Background append only file rewriting scheduled
+</code></pre> 
+  <p><strong>（2）、</strong> 父进程执行fork创建子进程，开销等同于bgsave过程。</p> 
+  <p><strong>（3.1）、</strong> 主进程fork完成后，继续响应其他命令请求。所有修改命令依然写入AOF缓冲区并根据 appendfsync 策略同步到硬盘，保证AOF机制的正确性。</p> 
+  <p><strong>（3.2）、</strong> 由于fork操作使用写时复制（copy-on-write）,子进程只能共享fork操作时的内存数据。由于父进程依然响应命令，Redis 使用AOF重写缓冲区保存这部分新数据，防止新AOF文件生成期间丢失这部分数据。</p> 
+  <p><strong>（4）、</strong> 子进程根据内存快照，按照命令合并规则写入到新的AOF文件。每次批量写入硬盘数据量由 aof-rewrite-incremental-fsync 控制，默认为 32MB，防止单次刷盘数据过多造成硬盘阻塞。</p> 
+  <p><strong>（5.1）、</strong> 新AOF文件写入完成后，子进程发送信号给父进程，父进程更新统计信息</p> 
+  <p><strong>（5.2）、</strong> 父进程把AOF重写缓冲区的数据写入到新的AOF文件</p> 
+  <p><strong>（5.3）、</strong> 使用新AOF文件替换老文件，完成AOF重写。</p> 
+  <h4><a id="134_122"></a>1.3.4、重启加载流程</h4> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/2019051120591877.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA2NDcwMzU=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p> 
+  <p>1）、AOF持久化开启且存在AOF文件时，优先加载AOF文件，相应日志如下：</p> 
+  <pre><code>* DB loaded from append only file: 2.256 seconds
+</code></pre> 
+  <p>2）、AOF持久化关闭或AOF文件不存在时，加载RDB文件，相应日志如下：</p> 
+  <pre><code>* DB loaded from disk: 1.325 seconds
+</code></pre> 
+  <p>3）、持久化文件AOF或RDB文件加载成功后，Redis启动成功</p> 
+  <p>4）、AOF或RDB文件存在错误时，Redis启动失败并打印错误日志</p> 
+  <h2><a id="2AOF__139"></a>2、AOF 持久化的效率和安全性</h2> 
+  <p>appendfsync 选项的值直接决定AOF 持久化功能的效率和安全性。</p> 
+  <p>1）当 appendfsync 的值为 always 时，服务器在每个事件循环都要将 aof_buf 缓冲区中的所有 内容写入到 AOF 文件， 并且同步 AOF 文件， 所以 always 的效率是 三个选项中最慢的，但 从安全性来说， always 也是最安全的，因为即使出现故障停机，AOF持久化也只会丢失一个事件循环中所产生的命令数据。</p> 
+  <p>2）当 appendfsync 的值为 everysec 时，服务器在每个事件循环都要将 aof_ buf 缓冲区中的所有内容写入到AOF 文件，并且每隔一秒就要在子线程中对AOF 文件进行一次同步。 从效率上来讲， everysec 足够快，并且就算出现故障停机，数据库也只丢失一秒钟的命令数据。</p> 
+  <p>3）当 appendfsync 的值为 no 时，服务器在每个事件循环都要将 aof_ buf 缓冲区中的所有内容 写入到 AOF 文件，至于何时对 AOF 文件进行同步，则由操作 系统控制。 因为处于 no 模式 下的 flushAppendOnlyFile 调用无须执行同步操作，所以该模式下的 AOF 文件写入速度总是最快的，不过因为这种模式会在系统缓存中积累一段时间的写入数据，所以该 模式的单次同步时长通常是三种模式中时间最长的。当出现故障停机时，使用 no 模式的服务器将丢失上次同步 AOF 文件之后的所有写命令数据。</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>cpu_relax( )-----对自选循环等待（spin-wait loops）操作的优化【转】 « NotBeCN</title>
+  <meta name="description" content="             cpu_relax（）-----对自选循环等待（spin-wait loops）操作的优化    转自：http://www.doc100.net/bugs/t/173547/index.html    &nbsp; &nbsp;在lock_timer_base（）函数中看到在for循环...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/04/26/weixin_33722405_90132131.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">cpu_relax( )-----对自选循环等待（spin-wait loops）操作的优化【转】</h1>
+    <p class="post-meta">Apr 26, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>cpu_relax（）-----对自选循环等待（spin-wait loops）操作的优化</p> 
+   <p>转自：<a href="http://www.doc100.net/bugs/t/173547/index.html" rel="nofollow">http://www.doc100.net/bugs/t/173547/index.html</a></p> 
+   <p>&nbsp; &nbsp;在lock_timer_base（）函数中看到在for循环操作中调用了cpu_relax（），本来以为是要让出CPU，调度其他进程运行，但是看代码之后发现完全不是这么回事。cpu_relax（）中只有一条调用语句，调用的是rep_nop函数。rep_nop（）函数如下：</p> 
+   <p>&nbsp;</p> 
+   <pre><code class="language-cpp">static inline void rep_nop(void)
+{
+	asm volatile("rep; nop" ::: "memory");
+}</code></pre> 
+   <p>只有一条简单的汇编语句，原来在论坛里看到过这条汇编语句，不是重复执行nop指令，"rep; nop"指令会被翻译成pause指令，到底是不是这样呢？反汇编一下看看，c代码如下：</p> 
+   <p>&nbsp;</p> 
+   <pre><code class="language-cpp">#include &lt;stdio.h&gt;
+
+static inline void rep_nop(void)
+{
+    asm volatile("rep; nop" ::: "memory");
+}
+
+int main(void)
+{
+    rep_nop();
+    return 0;
+}</code></pre> 
+   <p>文件名保存在nop.c，使用gcc编译成目标文件nop.o，命令如下：</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <pre><code class="language-plain">gcc -c nop.c</code></pre> 
+   <p>使用objdump来反汇编，命令如下：</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <pre><code class="language-plain">objdump -s -d nop.o</code></pre> 
+   <p>&nbsp;</p> 
+   <p>反汇编的结果如下图所示：</p> 
+   <p><img src="http://www.doc100.net/img/2013/01/25/113158620.png" alt=""><br>从图中可以看出"rep; nop"指令被翻译成pause指令，因此实际上rep_nop（）函数执行了一次pause指令。关于这条指令，intel的指令手册《Instruction Set Reference, M-Z》中讲的比较详细，这里总结一下。</p> 
+   <p>&nbsp; pause指令的作用是:</p> 
+   <p>&nbsp; &nbsp; 1)提升spin-wait loops(自旋循环等待)的性能。在执行一个 spin-wait loops时，Pentium4处理会遇到严重的性能损失，因为在循环退出时，处理器会检测到一个可能的内存顺序冲突。pause指令会向处理器提供一种提示，告诉处理器当前所执行的代码序列是一个spin-wait loop操作。大多数情况下，处理器会根据这个提示避开内存序列冲突，从而提高处理器的性能。正是基于此，建议在spin-wait loop中使用pause指令。</p> 
+   <p>&nbsp; &nbsp; 2)pause指令的另外一个功能是让Pentium4处理器在执行spin-wait loop时可以减少电源的消耗。在等待资源而执行自旋等待时，Pentium4处理器以极快的速度执行自旋等待操作时，将会消耗很多电能，但使用pause指令则可以极大地减少处理器的电源消耗。</p> 
+   <p>&nbsp; PAUSE 指令在 Pentium4 处理器中引入，但它也是向前兼容的。在早先的 IA-32 处理器里，PAUSE 指令实际上就相当于 NOP 指令。Pentium4 处理器以一种 预延迟(pre-defined delay)的技术来实现 PAUSE 指令。这种延迟也是有限度的，并且在一些处理器上是零延迟。该指令不会改变处理器的处理器的状态。</p> 
+   <p>&nbsp; 上面还提到一个概念就是内存顺序冲突（Memory order violation）。内存顺序冲突一般是由假共享引起，假共享是指多个CPU同时修改同一个缓存行的不同部分而引起的一个CPU的操作无效，当出现这个内存顺序冲突时，CPU必须清空流水线。</p> 
+   <p>参考资料：</p> 
+   <p>聊聊并发（五）——原子操作的实现原理</p> 
+   <p>http://www.groad.net/bbs/read.php?tid-3373.html</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

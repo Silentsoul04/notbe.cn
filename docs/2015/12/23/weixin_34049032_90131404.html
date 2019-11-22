@@ -1,0 +1,5942 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核跟踪之trace框架分析【转】 « NotBeCN</title>
+  <meta name="description" content="                       转自：http://blog.chinaunix.net/uid-20543183-id-1930846.html              &nbsp;              ------------------------------------------ ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/12/23/weixin_34049032_90131404.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核跟踪之trace框架分析【转】</h1>
+    <p class="post-meta">Dec 23, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">转自：<a href="http://blog.chinaunix.net/uid-20543183-id-1930846.html" rel="nofollow">http://blog.chinaunix.net/uid-20543183-id-1930846.html</a></span>
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">------------------------------------------</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">本文系本站原创,欢迎转载!</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">转载请注明出处:http://ericxiao.cublog.cn/</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">------------------------------------------</span>
+    </div> 
+   </div> 
+   <div>
+    一: 前言
+   </div> 
+   <div>
+    本文主要是对trace的框架做详尽的分析, 在后续的分析中，再来分析接入到框架中的几个重要的tracer. 在下面的分析中,会涉及到ring buffer的操作,如果对这部份不熟悉的,请先参阅本站有关ring buffer分析的文章. 同以往的分析一样,本文不会在trace的使用上花费较多的笔墨,而着重分析kernel中源代码实现, 有关这部份的使用,请参阅kernel自带的文档: linux-2.6-tip/Documentation/trace/ftrace.txt, 分析的源代码版本为: v2.6.30-rc8,分析的代码基本上位于kernel/trace/trace.c中.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Trace框架的初始化代码如下所示:
+   </div> 
+   <div>
+    early_initcall(tracer_alloc_buffers);
+   </div> 
+   <div>
+    fs_initcall(tracer_init_debugfs);
+   </div> 
+   <div>
+    late_initcall(clear_boot_tracer);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    由此可见, 它的初始化主要由三个函数完成,且调用的顺序是tracer_alloc_buffers() à tracer_init_debugfs() à clear_boot_tracer().下面依次分析这几个函数.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    二 tracer_alloc_buffers()分析
+   </div> 
+   <div>
+    从这个函数的名称就可以看出来, 它是为trace分配buffer,这个函数较长,且涉及到很多细节,采用分段分析的方式,代码如下示:
+   </div> 
+   <div>
+    __init static int tracer_alloc_buffers(void)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_array_cpu *data;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ring_buf_size;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int i;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret = -ENOMEM;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!alloc_cpumask_var(&amp;tracing_buffer_mask, GFP_KERNEL))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!alloc_cpumask_var(&amp;tracing_cpumask, GFP_KERNEL))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_free_buffer_mask;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!alloc_cpumask_var(&amp;tracing_reader_cpumask, GFP_KERNEL))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_free_tracing_cpumask;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* To save memory, keep the ring buffer size to its minimum */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (ring_buffer_expanded)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buf_size = trace_buf_size;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buf_size = 1;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; cpumask_copy(tracing_buffer_mask, cpu_possible_mask);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; cpumask_copy(tracing_cpumask, cpu_all_mask);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; cpumask_clear(tracing_reader_cpumask);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    从上面的代码可以看出,它为三个cpu位图分配了空间并为其执行了初始化过程, 另外对使用ring buffer的大小也做了确定.
+   </div> 
+   <div>
+    首先我们来看一下ring buffer的大小的确定,基本的原则是使用最小的缓存区,在代码中,如果ring_buffer_expanded为0,ring buffer的大小会初始化为1,那ring_buffer_expanded什么时候会为1呢?.
+   </div> 
+   <div>
+    ring_buffer_expanded定义如下:
+   </div> 
+   <div>
+    static int ring_buffer_expanded;
+   </div> 
+   <div>
+    它的初始值为0,但在代码中需要判断它的值,肯定是在内核启动时对它进行了更改,搜索代码,会发现:
+   </div> 
+   <div>
+    static int __init set_ftrace(char *str)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; strncpy(bootup_tracer_buf, str, BOOTUP_TRACER_SIZE);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; default_bootup_tracer = bootup_tracer_buf;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* We are using ftrace early, expand it */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_expanded = 1;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return 1;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    __setup("ftrace=", set_ftrace);
+   </div> 
+   <div>
+    Ftrace参数用来指定内核启动时的使用的tracer, 具体tracer会我们在后面的章节中进行分析,这里只需要知道tracer相当于cgroup中的subsystem.
+   </div> 
+   <div>
+    由此看到, 会将指定的tracer名称保存在bootp_tracer_buf中, 并且将ring_buffer_expanded设置为了1, 在此我们需要注意bootp_tracer_buf定义为:
+   </div> 
+   <div>
+    static char bootup_tracer_buf[BOOTUP_TRACER_SIZE] __initdata;
+   </div> 
+   <div>
+    它是一个init段的数据结构,在kernel初始化完全之后,它所占的空间会被会释放掉,也就是说,启动后,这个缓存区是不能再被使用的.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    综上分析, 如果指定了boot时的tracer, 因为tracer马上就会使用ring buffer,所在ring buffer的大小就能采用最小值了,需要将其扩大到trace_buf_size,定义如下:
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    #define TRACE_BUF_SIZE_DEFAULT&nbsp;&nbsp; 1441792UL /* 16384 * 88 (sizeof(entry)) */
+   </div> 
+   <div>
+    static unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_buf_size = TRACE_BUF_SIZE_DEFAULT;
+   </div> 
+   <div>
+    它默认是1441792, 不过这个初始化大小也是能调整的,它对应的启动参数是”trace_buf_size=”,这个启动参数可自行参照代码进行分析.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    接下来,我们来看一下那三个cpu位图代表的是什么意思.先来看它们的定义:
+   </div> 
+   <div>
+    tracing_buffer_mask: 表示系统中所有的CPU
+   </div> 
+   <div>
+    tracing_cpumask: 表示trace的cpu,只有在位图中的CPU才能允许被trace
+   </div> 
+   <div>
+    tracing_reader_cpumask: 用来记录当前那一个CPU的ring buffer被pipe读,阻止cpu上并行pipe操作。
+   </div> 
+   <div>
+    关于这几个参数我们在以后还会遇到,等遇到的时候才来详细分析
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* TODO: make the number of buffers hot pluggable with CPUS */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; global_trace.buffer = ring_buffer_alloc(ring_buf_size,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp; TRACE_BUFFER_FLAGS);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!global_trace.buffer) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_ERR "tracer: failed to allocate ring buffer!\n");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON(1);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_free_cpumask;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; global_trace.entries = ring_buffer_size(global_trace.buffer);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    #ifdef CONFIG_TRACER_MAX_TRACE
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; max_tr.buffer = ring_buffer_alloc(ring_buf_size,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; TRACE_BUFFER_FLAGS);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!max_tr.buffer) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_ERR "tracer: failed to allocate max ring buffer!\n");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON(1);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_free(global_trace.buffer);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_free_cpumask;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; max_tr.entries = ring_buffer_size(max_tr.buffer);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; WARN_ON(max_tr.entries != global_trace.entries);
+   </div> 
+   <div>
+    #endif
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* Allocate the first page for all buffers */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; for_each_tracing_cpu(i) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data = global_trace.data[i] = &amp;per_cpu(global_trace_cpu, i);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; max_tr.data[i] = &amp;per_cpu(max_data, i);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    上面的几段代码用来初始化global_trace和max_tr，ring buffer的分配过程我们在上一篇文章中已经分析过了,这里不再赘述. 我们有必要来弄懂一下,gloabal_trace和max_tr是用来干什么的.
+   </div> 
+   <div>
+    Gloabal_trace很好理解,它就是tracer用来存放他们的信息.
+   </div> 
+   <div>
+    Max_tr是跟CONFIG_TRACER_MAX_TRACE相关联的,在Kconfig没有找到它的相关部份，我们来看一下它的注释：
+   </div> 
+   <div>
+    /*
+   </div> 
+   <div>
+    &nbsp;* The max_tr is used to snapshot the global_trace when a maximum
+   </div> 
+   <div>
+    &nbsp;* latency is reached. Some tracers will use this to store a maximum
+   </div> 
+   <div>
+    &nbsp;* trace while it continues examining live traces.
+   </div> 
+   <div>
+    &nbsp;*
+   </div> 
+   <div>
+    &nbsp;* The buffers for the max_tr are set up the same as the global_trace.
+   </div> 
+   <div>
+    &nbsp;* When a snapshot is taken, the link list of the max_tr is swapped
+   </div> 
+   <div>
+    &nbsp;* with the link list of the global_trace and the buffers are reset for
+   </div> 
+   <div>
+    &nbsp;* the global_trace so the tracing can continue.
+   </div> 
+   <div>
+    &nbsp;*/
+   </div> 
+   <div>
+    根据上面的说明，max_tr是在计算延迟时等相关处理时用来做global_trace的快照。这样说可能不是很理解，举个例子，如果想要trace 系统的中断关闭时间，中断关闭是允许的，但是关闭时间过长就会影响系统性能，所以只有在关闭时间超过某一个值的时候才会将它的相关信息记录下来，所以将这些信息记录在max_tr中（global_trace中此时已经存放了trace到的所有信息）. 具体的操作等以后分析相关tracer的时候，遇到了再来分析.
+   </div> 
+   <div>
+    另外，global_trace和max_tr的data数组都指向了Per_cpu变量的相关结构，里面有一个成员是disabled，它表示控制对应cpu的tracer操作，如果该值大于1，表示该CPU的tracer操作是禁止的,这也可以理解上，CPU上一次只能有一个tracer在操作.接着往下面看
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_init_cmdlines();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; register_tracer(&amp;nop_trace);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; current_trace = &amp;nop_trace;
+   </div> 
+   <div>
+    #ifdef CONFIG_BOOT_TRACER
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; register_tracer(&amp;boot_tracer);
+   </div> 
+   <div>
+    #endif
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* All seems OK, enable tracing */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; tracing_disabled = 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    这段代码中，初始化了cmdlines，然后注册了一个空的tracer, 也就是nop_tracer, 如果指定了boot时候的tracer（这个过程在上面已经分析过了）,将这个tacer注册。
+   </div> 
+   <div>
+    首先来看一下cmdlines,它是进程的名称，也就是用ps看到的进程名字。它的初始化过程我们暂不分析，等后面联合cmdlines的操作再来一起分析.
+   </div> 
+   <div>
+    Tracint_disables是一个很重要的标志，它的初始化是为1,如果初始化成功，将其置为0,表示整个trace系统已经可用了，否则，如果中途发生了错误，此值设为1，整个trace会禁用.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; atomic_notifier_chain_register(&amp;panic_notifier_list,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;trace_panic_notifier);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; register_die_notifier(&amp;trace_die_notifier);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    注册了两个notifier,用来在内核发生panic或者是die的时候，将trace中的消息打印出来。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    out_free_cpumask:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; free_cpumask_var(tracing_reader_cpumask);
+   </div> 
+   <div>
+    out_free_tracing_cpumask:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; free_cpumask_var(tracing_cpumask);
+   </div> 
+   <div>
+    out_free_buffer_mask:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; free_cpumask_var(tracing_buffer_mask);
+   </div> 
+   <div>
+    out:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    在代码中，我们遇到了tracer的注册，在这里就来分析tracer的注册过程
+   </div> 
+   <div>
+    2.1: tracer的注册操作
+   </div> 
+   <div>
+    int register_tracer(struct tracer *type)
+   </div> 
+   <div>
+    __releases(kernel_lock)
+   </div> 
+   <div>
+    __acquires(kernel_lock)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct tracer *t;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int len;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret = 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!type-&gt;name) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pr_info("Tracer must have a name\n");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -1;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* When this gets called we hold the BKL which means that
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* preemption is disabled. Various trace selftests however
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* need to disable and enable preemption for successful tests.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* So we drop the BKL here and grab it after the tests again.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unlock_kernel();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; tracing_selftest_running = true;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; for (t = trace_types; t; t = t-&gt;next) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (strcmp(type-&gt;name, t-&gt;name) == 0) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* already found */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pr_info("Trace %s already registered\n",
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;name);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -1;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!type-&gt;set_flag)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;set_flag = &amp;dummy_set_flag;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!type-&gt;flags)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;flags = &amp;dummy_tracer_flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!type-&gt;flags-&gt;opts)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;flags-&gt;opts = dummy_tracer_opt;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!type-&gt;wait_pipe)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;wait_pipe = default_wait_pipe;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    #ifdef CONFIG_FTRACE_STARTUP_TEST
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (type-&gt;selftest &amp;&amp; !tracing_selftest_disabled) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct tracer *saved_tracer = current_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct trace_array *tr = &amp;global_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int i;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Run a selftest on this tracer.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Here we reset the trace buffer, and set the current
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* tracer to be this tracer. The tracer can then run some
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* internal tracing to verify that everything is in order.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* If we fail, we do not register this tracer.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for_each_tracing_cpu(i)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tracing_reset(tr, i);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; current_trace = type;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* the test is responsible for initializing and enabling */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pr_info("Testing tracer %s: ", type-&gt;name);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = type-&gt;selftest(type, tr);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* the test is responsible for resetting too */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; current_trace = saved_tracer;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_CONT "FAILED!\n");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Only reset on passing, to avoid touching corrupted buffers */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for_each_tracing_cpu(i)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tracing_reset(tr, i);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_CONT "PASSED\n");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    #endif
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; type-&gt;next = trace_types;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_types = type;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; len = strlen(type-&gt;name);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (len &gt; max_tracer_type_len)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; max_tracer_type_len = len;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    首先，不允许tracer的名称，即tracer-&gt;name为空.
+   </div> 
+   <div>
+    在修改和访问tracer链表的时候都必须持有trace_types_lock, 然后遍历trace_types链表，判断当前链表中是否有同名的tracer,如果有，释放锁之后退出
+   </div> 
+   <div>
+    然后对tracer的成员进行必要的补充，包括flag&nbsp;和waite_pipe，它们究竞是干什么的，在这里将它放一放，等遇到的时候再分析
+   </div> 
+   <div>
+    接下来，如果这个tracer定义了selftest操作，且自检没有被禁用的话，就会进行tracer的自检，在代码中，我们会看到，它先将global_trace的ring buffer清空，然后将该tracer设为当前的tracer(current_trace = type;),然后调用selftest接后，接着将current_tracer回复原值，再将ring buffer中的数据清空.
+   </div> 
+   <div>
+    如果自检成功，将tracer加入到trace_types链表。最后全局量max_tracer_type_len保存最大的tracer名称长度,以便于在用户空间读取全部tracer名称的时候，可以分配合适的缓存冲。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;out:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; tracing_selftest_running = false;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (ret || !default_bootup_tracer)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_unlock;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (strncmp(default_bootup_tracer, type-&gt;name, BOOTUP_TRACER_SIZE))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_unlock;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_INFO "Starting tracer '%s'\n", type-&gt;name);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* Do we want this tracer to start on bootup? */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; tracing_set_tracer(type-&gt;name);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; default_bootup_tracer = NULL;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* disable other selftests, since this will break it. */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; tracing_selftest_disabled = 1;
+   </div> 
+   <div>
+    #ifdef CONFIG_FTRACE_STARTUP_TEST
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_INFO "Disabling FTRACE selftests due to running tracer '%s'\n",
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;name);
+   </div> 
+   <div>
+    #endif
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;out_unlock:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; lock_kernel();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这部份代码是对boot时设置的tracer的“安装”部份，从代码中也看出来了，这个过程是在tracing_set_tracer()中完成的。
+   </div> 
+   <div>
+    另外，我们需要注意到，在selftest开始前，tracing_selftest_running被设置为了true,测试完了，会将其设为false,如果有指定boot时的tracer,会将tracing_selftest_disabled置为1,也就是说禁用掉tracer自检，以免自检的时候清空了ring buffer,丢失数据.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    2.2: tracer的”安装”操作
+   </div> 
+   <div>
+    从上面的代码中可以看到，这个操作的相关接口是tracing_set_tracer(),代码如下：
+   </div> 
+   <div>
+    static int tracing_set_tracer(const char *buf)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; static struct trace_option_dentry *topts;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_array *tr = &amp;global_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct tracer *t;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret = 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!ring_buffer_expanded) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = tracing_resize_ring_buffer(trace_buf_size);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret &lt; 0)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = 0;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果ring buffer还是默认大小(1 byte)，需要将其调整了，因为现在有了tracer,就会往里面写数据，以前的大小是肯定满足不了的。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; for (t = trace_types; t; t = t-&gt;next) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (strcmp(t-&gt;name, buf) == 0)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!t) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -EINVAL;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (t == current_trace)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    从trace_types链表中找到名称对应的tracer,如果找不到，或者当前的tracer就是指定的tracer,可以清理一下退出了
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_branch_disable();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (current_trace &amp;&amp; current_trace-&gt;reset)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; current_trace-&gt;reset(tr);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; destroy_trace_option_files(topts);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; current_trace = t;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; topts = create_trace_option_files(current_trace);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (t-&gt;init) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = tracer_init(t, tr);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_branch_enable(tr);
+   </div> 
+   <div>
+    &nbsp;out:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这段代码涉及到branch tracer的东西，在分析branch tracer的时候再来详细的分析。我们在代码中看到，在安装tracer之前，会先调用reset将其重置,然后销毁它的option文件，然后将它赋值给全局量current_trace，再创建option文件，再后由tracer_init()清空ring buffer中的内容，然后再调用init()
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    2.3: tracer 的option文件
+   </div> 
+   <div>
+    下面来分析tracer option文件是怎么组织的.我们先来看一下它在tracer中的结构，如下示：
+   </div> 
+   <div>
+    struct tracer {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ......
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ......
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*set_flag)(u32 old_flags, u32 bit, int set);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct tracer_flags&nbsp;&nbsp;&nbsp; *flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ......
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    所谓option,就是在tracer中flag中的一个位图.
+   </div> 
+   <div>
+    与option相关的主要有两个部份，一个是set_flag操作，它是用来设置flag中的相关标志，原型如下：
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*set_flag)(u32 old_flags, u32 bit, int set);
+   </div> 
+   <div>
+    即原来的flag值是old_flags,现在要设置的位图是bit，要将其设置为set (或是1或是0)
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    另外一个是struct tracer_flags,定义如下：
+   </div> 
+   <div>
+    struct tracer_flags {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; val;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct tracer_opt&nbsp; *opts;
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    Val用来存放tracer的flag, struct tracer_opt用来存放各位标志位选项，如下：
+   </div> 
+   <div>
+    struct tracer_opt {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp; *name; /* Will appear on the trace_options file */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; bit; /* Mask assigned in val field in tracer_flags */
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    Name是这个标志位的名称，也就是debugfs中tracer option文件的名字, bit是它所占的位图.
+   </div> 
+   <div>
+    分析完它的含义之后，我们可以返回register_tracer()来看一下它的option部份的附加补充了：
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!type-&gt;set_flag)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;set_flag = &amp;dummy_set_flag;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!type-&gt;flags)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;flags = &amp;dummy_tracer_flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!type-&gt;flags-&gt;opts)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;flags-&gt;opts = dummy_tracer_opt;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果tracer的set_flag接口为空，则将其指定为dummy_set_flag()，这个函数其实什么都不做，就直接返回0，
+   </div> 
+   <div>
+    如果没有指定flags,则将其初始化为dummy_tracer­_flags,如果没有指定每个flags的具体位含义，则将其指定为dummy_tracer_opt.
+   </div> 
+   <div>
+    有兴趣的可以跟踪看一下，其实这些默认指定的全是空的。也就是说不会带标志
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    在代码中，option文件的相关信息都是保存在struct trace_option_dentry中的，定义如下：
+   </div> 
+   <div>
+    struct trace_option_dentry {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct tracer_opt&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *opt;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct tracer_flags&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct dentry&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *entry;
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    Opt是该文件对应的选项，flags是对应tracer的flags, entry是这个option所对应的dentry结构。
+   </div> 
+   <div>
+    现在可以来看一下option文件的建立与销毁了， 先来看建立过程：
+   </div> 
+   <div>
+    static struct trace_option_dentry *
+   </div> 
+   <div>
+    create_trace_option_files(struct tracer *tracer)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_option_dentry *topts;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct tracer_flags *flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct tracer_opt *opts;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int cnt;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!tracer)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; flags = tracer-&gt;flags;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!flags || !flags-&gt;opts)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    参数有效性检查
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; opts = flags-&gt;opts;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; for (cnt = 0; opts[cnt].name; cnt++)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; topts = kcalloc(cnt + 1, sizeof(*topts), GFP_KERNEL);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!topts)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    统计tracer中总共有几个option,然后对应就会有多少个trace_option_dentry,为其分配对应的空间
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; for (cnt = 0; opts[cnt].name; cnt++)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; create_trace_option_file(&amp;topts[cnt], flags,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&amp;opts[cnt]);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return topts;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    调用create_trace_option_file()为这几个option创建对应的文件,该接口如下：
+   </div> 
+   <div>
+    static void
+   </div> 
+   <div>
+    create_trace_option_file(struct trace_option_dentry *topt,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;struct tracer_flags *flags,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;struct tracer_opt *opt)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct dentry *t_options;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; t_options = trace_options_init_dentry();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!t_options)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; topt-&gt;flags = flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; topt-&gt;opt = opt;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; topt-&gt;entry = trace_create_file(opt-&gt;name, 0644, t_options, topt,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &amp;trace_options_fops);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    它先通过trace_options_init_dentry检查debugfs/traceing/option目录是否建立，如果没有，则新建之。
+   </div> 
+   <div>
+    然后在debugfs/traceing/option目录下创建对应的option文件，文件名为opt-&gt;name,操作文件集为trace_options_fops,如下示：
+   </div> 
+   <div>
+    static const struct file_operations trace_options_fops = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .open = tracing_open_generic,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .read = trace_options_read,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .write = trace_options_write,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Open操作为：
+   </div> 
+   <div>
+    int tracing_open_generic(struct inode *inode, struct file *filp)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (tracing_disabled)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENODEV;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; filp-&gt;private_data = inode-&gt;i_private;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    从此可以看出，如果traing_disable为1，那么它会禁止所有ftrace的操作，这发生在初始化失败，或者是中途操作失败。
+   </div> 
+   <div>
+    然后私有区结构也就是创建文件时的topt.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Read操作为：
+   </div> 
+   <div>
+    static ssize_t
+   </div> 
+   <div>
+    trace_options_read(struct file *filp, char __user *ubuf, size_t cnt,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; loff_t *ppos)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_option_dentry *topt = filp-&gt;private_data;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; char *buf;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (topt-&gt;flags-&gt;val &amp; topt-&gt;opt-&gt;bit)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buf = "1\n";
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buf = "0\n";
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return simple_read_from_buffer(ubuf, cnt, ppos, buf, 2);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    如果flags中的对应标志被置位的话，返回1,否则返回0。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Write操作为：
+   </div> 
+   <div>
+    static ssize_t
+   </div> 
+   <div>
+    trace_options_write(struct file *filp, const char __user *ubuf, size_t cnt,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;loff_t *ppos)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_option_dentry *topt = filp-&gt;private_data;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned long val;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; char buf[64];
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (cnt &gt;= sizeof(buf))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (copy_from_user(&amp;buf, ubuf, cnt))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EFAULT;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; buf[cnt] = 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ret = strict_strtoul(buf, 10, &amp;val);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (ret &lt; 0)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ret = 0;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; switch (val) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; case 0:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* do nothing if already cleared */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!(topt-&gt;flags-&gt;val &amp; topt-&gt;opt-&gt;bit))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (current_trace-&gt;set_flag)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = current_trace-&gt;set_flag(topt-&gt;flags-&gt;val,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; topt-&gt;opt-&gt;bit, 0);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; topt-&gt;flags-&gt;val &amp;= ~topt-&gt;opt-&gt;bit;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; case 1:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* do nothing if already set */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (topt-&gt;flags-&gt;val &amp; topt-&gt;opt-&gt;bit)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (current_trace-&gt;set_flag)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = current_trace-&gt;set_flag(topt-&gt;flags-&gt;val,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; topt-&gt;opt-&gt;bit, 1);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; topt-&gt;flags-&gt;val |= topt-&gt;opt-&gt;bit;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; default:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; *ppos += cnt;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return cnt;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这段代码虽然长，但是很简单，它就是调用tracer的set_flag()操作，如果返回0,则将标志设置成相应值，否则，出错退出.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Option文件的删除很简单，它就是删除对应的dentry就可以了，相应的代码请自行查看destroy_trace_option_files(),这里就不详细分析了.
+   </div> 
+   <div>
+    到这里，trace的第一个初始化函数tracer_alloc_buffers（）就分析完了，我们接下来看第二个。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    三： tracer_init_debugfs（）的分析
+   </div> 
+   <div>
+    tracer_init_debugfs()像它的名字一样，它就是在debugfs中创建了很多的文件，由于篇幅关系，就不再一一分析所有文件的操作,只选几个较复杂的进行分析
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    3.1 trace文件分析
+   </div> 
+   <div>
+    Trace文件的创建过程如下:
+   </div> 
+   <div>
+    debugfs/tracing/trace:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_create_file("trace", 0644, d_tracer,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void *) TRACE_PIPE_ALL_CPU, &amp;tracing_fops);
+   </div> 
+   <div>
+    另外,在debugfs/tracing/cpu_nr(CPU序号)/trace位置也有此文件:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_create_file("trace", 0644, d_cpu,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void *) cpu, &amp;tracing_fops);
+   </div> 
+   <div>
+    两个文件的唯一区别是,它们的私有数据,前者是TRACE_PIPE_ALL_CPU,后者是该目录对应的CPU.
+   </div> 
+   <div>
+    它们的操作集都是一样的,即都为traint_fops, 定义如下:
+   </div> 
+   <div>
+    static const struct file_operations tracing_fops = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .open&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tracing_open,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .read&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = seq_read,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .write&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tracing_write_stub,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .llseek&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = seq_lseek,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .release = tracing_release,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    先来看open操作:
+   </div> 
+   <div>
+    static int tracing_open(struct inode *inode, struct file *file)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_iterator *iter;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret = 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* If this file was open for write, then erase contents */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if ((file-&gt;f_mode &amp; FMODE_WRITE) &amp;&amp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; !(file-&gt;f_flags &amp; O_APPEND)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; long cpu = (long) inode-&gt;i_private;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cpu == TRACE_PIPE_ALL_CPU)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tracing_reset_online_cpus(&amp;global_trace);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tracing_reset(&amp;global_trace, cpu);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (file-&gt;f_mode &amp; FMODE_READ) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter = __tracing_open(inode, file);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (IS_ERR(iter))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = PTR_ERR(iter);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else if (trace_flags &amp; TRACE_ITER_LATENCY_FMT)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;iter_flags |= TRACE_FILE_LAT_FMT;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果该文件是写操作且不是追加操作, 就会调用tracing_reset_online_cpus()或者tracing_reset()清除所有CPU或者是对应CPU上的ring buffer.
+   </div> 
+   <div>
+    例如,我们可以在用户空间中进行如下操作来清除debugfs/tracing/trace或者debugfs/traceing/cpuN/trace文件中的内容:
+   </div> 
+   <div>
+    echo “” &gt; debugfs/tracing/trace
+   </div> 
+   <div>
+    echo “” &gt; debugfs/traceing/cpuN/trace
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果是读操作,流程就会转入__tracing_open(),在这里我们注意一下TRACE_ITER_LATENCY_FMT标志的含义,它是用来跟踪状态时差的, 比如,从禁用中断到启用中断中间的时差.
+   </div> 
+   <div>
+    如果全局trace_flags带有这个标志, 相应的要将iter的TRACE_FILE_LAT_FMT标志置位.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    __traing_open()比较繁长,采用分段分析的方式,如下:
+   </div> 
+   <div>
+    static struct trace_iterator *
+   </div> 
+   <div>
+    __tracing_open(struct inode *inode, struct file *file)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; long cpu_file = (long) inode-&gt;i_private;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; void *fail_ret = ERR_PTR(-ENOMEM);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_iterator *iter;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct seq_file *m;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int cpu, ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (tracing_disabled)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ERR_PTR(-ENODEV);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果trace被禁用了,返回错误,这个是在每一个trace文件之前必须要检查的, 因为可能在运行的过程中trace发生了错误,此时就会禁用整个trace子系统
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter = kzalloc(sizeof(*iter), GFP_KERNEL);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!iter)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ERR_PTR(-ENOMEM);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* We make a copy of the current tracer to avoid concurrent
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* changes on it while we are reading.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;trace = kzalloc(sizeof(*iter-&gt;trace), GFP_KERNEL);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!iter-&gt;trace)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (current_trace)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *iter-&gt;trace = *current_trace;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!alloc_cpumask_var(&amp;iter-&gt;started, GFP_KERNEL))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; cpumask_clear(iter-&gt;started);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (current_trace &amp;&amp; current_trace-&gt;print_max)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;tr = &amp;max_tr;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;tr = &amp;global_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;pos = -1;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_init(&amp;iter-&gt;mutex);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;cpu_file = cpu_file;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    分配并初始化一个读操作的迭代器,iter-&gt; trace指向当前使用的trace, 注意在取current_trace的时候必须要持有trace_types_lock,这样是为了避免set_tracer操作的竞争.
+   </div> 
+   <div>
+    另外要注意的是,iter-&gt;trace分配了一个缓存区,并用来存放具体的trace拷贝,(为什么需要存放一个拷贝，而不是指针?) 
+   </div> 
+   <div>
+    接下来分配并初始化了iter-&gt;started, 这是在test_cpu_buff_start()中被使用的. 简单的来说,在第一次显示这个cpu上的信息的时候,就会将CPU在这个位图中置位,并显示出
+   </div> 
+   <div>
+    ##### CPU n buffer started ####
+   </div> 
+   <div>
+    当再次显示这个CPU的信息的时候,就会判断该CPU在此位图中是否被置位,如果有的话,说明已经打印过一次了.
+   </div> 
+   <div>
+    然后确定iter使用的缓存区,如果当前tracer的print_max被置1,就使用max_tr, 否则使用gloal_trace.
+   </div> 
+   <div>
+    将cpufile保存在iter-&gt;cpu_filer中.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* Notify the tracer early; before we stop tracing. */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;trace &amp;&amp; iter-&gt;trace-&gt;open)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;trace-&gt;open(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* Annotate start of buffers if we had overruns */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (ring_buffer_overruns(iter-&gt;tr-&gt;buffer))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;iter_flags |= TRACE_FILE_ANNOTATE;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;cpu_file == TRACE_PIPE_ALL_CPU) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; for_each_tracing_cpu(cpu) {
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;buffer_iter[cpu] =
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_read_start(iter-&gt;tr-&gt;buffer, cpu);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; } else {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpu = iter-&gt;cpu_file;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;buffer_iter[cpu] =
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_read_start(iter-&gt;tr-&gt;buffer, cpu);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    准备工作都已经做完了,我们需要调用trace的open接口,来通知open操作即将开始.如果iter操作的缓冲区有数据被冲刷掉,就设置iter的TRACE_FILE_ANNOTATE标志,这个标志用在test_cpu_buff_start（）中，如果没有这个标志，则不会显示
+   </div> 
+   <div>
+    ”##### CPU %u buffer started ####”. 也就是说，只有在ring buffer中有数据被覆盖了才会显示这个字符串.
+   </div> 
+   <div>
+    接下来,就是为操作的CPU初始化一个ring buffer的iter这个过程在分析ring buffer的时候就已经分析过了,这里不再赘述.
+   </div> 
+   <div>
+    注意在这里并没有对每个CPU上ring buffer的iter的初始化结果做检查, 如果初始化失败的话,采用reader的方式读,但是这样会造成死循环,这在后面的代码可以看到
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* TODO stop tracer */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ret = seq_open(file, &amp;tracer_seq_ops);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (ret &lt; 0) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fail_ret = ERR_PTR(ret);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail_buffer;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; m = file-&gt;private_data;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; m-&gt;private = iter;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* stop the trace while dumping */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; tracing_stop();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return iter;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    将iter设置为seq_file的私有区,然后禁止iter-&gt;trace的写操作,这是因为在读trace文件的过程,不允许再有数据往里面写.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;fail_buffer:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; for_each_tracing_cpu(cpu) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;buffer_iter[cpu])
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_read_finish(iter-&gt;buffer_iter[cpu]);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; free_cpumask_var(iter-&gt;started);
+   </div> 
+   <div>
+    &nbsp;fail:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; kfree(iter-&gt;trace);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; kfree(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return fail_ret;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    tracer_seq_ops的定义如下：
+   </div> 
+   <div>
+    static struct seq_operations tracer_seq_ops = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .start&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = s_start,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .next&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = s_next,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .stop&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = s_stop,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .show&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = s_show,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Seq file文件操作在之前的分析见过很多次了，在这就不详细分析这个文件系统的实现了。来依次看它里面的接口：
+   </div> 
+   <div>
+    static void *s_start(struct seq_file *m, loff_t *pos)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_iterator *iter = m-&gt;private;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; static struct tracer *old_tracer;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int cpu_file = iter-&gt;cpu_file;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; void *p = NULL;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; loff_t l = 0;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int cpu;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* copy the tracer to avoid using a global lock all around */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (unlikely(old_tracer != current_trace &amp;&amp; current_trace)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; old_tracer = current_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *iter-&gt;trace = *current_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; atomic_inc(&amp;trace_record_cmdline_disabled);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (*pos != iter-&gt;pos) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;ent = NULL;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;cpu = 0;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;idx = -1;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ftrace_disable_cpu();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cpu_file == TRACE_PIPE_ALL_CPU) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for_each_tracing_cpu(cpu)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_iter_reset(iter-&gt;buffer_iter[cpu]);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_iter_reset(iter-&gt;buffer_iter[cpu_file]);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ftrace_enable_cpu();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for (p = iter; p &amp;&amp; l &lt; *pos; p = s_next(m, p, &amp;l))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; } else {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; l = *pos - 1;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; p = s_next(m, p, &amp;l);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_event_read_lock();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return p;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    首先，如果当前的tracer发生了改变，那就将iter-&gt;tracer更新。
+   </div> 
+   <div>
+    注意，在上面的代码中还有这个操作：
+   </div> 
+   <div>
+    atomic_inc(&amp;trace_record_cmdline_disabled);
+   </div> 
+   <div>
+    也就是说，在读操作进行的时候，会禁止进程cmdline的记录.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    由于在初始化的时候，将iter-&gt;pos设为了-1.因此，在第一次读的时候，上面的if是满足的,因为会设操作CPU上的ring buffer iter重置，而且，if中的for循环也是不满足的。因此在第一次读的时候，会返回了一个空的event,即iter-&gt; ent.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    否则的话，会转入到s_next()一直到数据读满为止，来跟踪看一下s_next():
+   </div> 
+   <div>
+    static void *s_next(struct seq_file *m, void *v, loff_t *pos)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_iterator *iter = m-&gt;private;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int i = (int)*pos;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; void *ent;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; (*pos)++;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* can't go backwards */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;idx &gt; i)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;idx &lt; 0)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ent = find_next_entry_inc(iter);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ent = iter;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; while (ent &amp;&amp; iter-&gt;idx &lt; i)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ent = find_next_entry_inc(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;pos = *pos;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return ent;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    里面的核心操作在find_next_entry_inc()中，代码如下：
+   </div> 
+   <div>
+    static void *find_next_entry_inc(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;ent = __find_next_entry(iter, &amp;iter-&gt;cpu, &amp;iter-&gt;ts);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;ent)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_iterator_increment(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return iter-&gt;ent ? iter : NULL;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这个函数较简单，就是从ring buffer中取出下一块数据，该数据对应的CPU和时间戳会分别保存在iter-&gt;cpu和iter-&gt;ts中，如果取数据成功，调用trace_iterator_increment()来在ring buffer中跳过这个数据，以便在下次读的时候就可以读到新数据了.
+   </div> 
+   <div>
+    读取成功返回iter,失败返回NULL.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    __find_next_entry()代码如下：
+   </div> 
+   <div>
+    static struct trace_entry *
+   </div> 
+   <div>
+    __find_next_entry(struct trace_iterator *iter, int *ent_cpu, u64 *ent_ts)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct ring_buffer *buffer = iter-&gt;tr-&gt;buffer;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry *ent, *next = NULL;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int cpu_file = iter-&gt;cpu_file;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; u64 next_ts = 0, ts;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int next_cpu = -1;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int cpu;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* If we are in a per_cpu trace file, don't bother by iterating over
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* all cpu and peek directly.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (cpu_file &gt; TRACE_PIPE_ALL_CPU) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ring_buffer_empty_cpu(buffer, cpu_file))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ent = peek_next_entry(iter, cpu_file, ent_ts);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ent_cpu)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ent_cpu = cpu_file;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; for_each_tracing_cpu(cpu) {
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ring_buffer_empty_cpu(buffer, cpu))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; continue;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ent = peek_next_entry(iter, cpu, &amp;ts);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Pick the entry with the smallest timestamp:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ent &amp;&amp; (!next || ts &lt; next_ts)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; next = ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; next_cpu = cpu;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; next_ts = ts;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (ent_cpu)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ent_cpu = next_cpu;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (ent_ts)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ent_ts = next_ts;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return next;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    如果是指对单个CPU的操作，那就很简单了，只需要调用peek_next_entry()取这个CPU上的数据即可。
+   </div> 
+   <div>
+    对于所有CPU的情况，要比较复杂一点，它是轮流取每个CPU中的数据，然后将时间戳最小的那块数据返回，ent_cpu和ent_ts就存放这块数据所在的CPU和它的时间戳
+   </div> 
+   <div>
+    来跟踪看一下peek_next_entry（）：
+   </div> 
+   <div>
+    static struct trace_entry *
+   </div> 
+   <div>
+    peek_next_entry(struct trace_iterator *iter, int cpu, u64 *ts)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct ring_buffer_iter *buf_iter = iter-&gt;buffer_iter[cpu];
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* Don't allow ftrace to trace into the ring buffers */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ftrace_disable_cpu();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (buf_iter)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event = ring_buffer_iter_peek(buf_iter, ts);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event = ring_buffer_peek(iter-&gt;tr-&gt;buffer, cpu, ts);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ftrace_enable_cpu();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return event ? ring_buffer_event_data(event) : NULL;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    从这个函数我们就可以看出来了，如果ring buffer iter分配失败，也就是上文代码中buf_iter==NULL的情况，就会采用reader的方式将其读出.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    从这里我们可以看出，trace的数据在ring buffer的基础上又封装了一个头部，即struct trace_entry, 关于trcace的数据存放方法，在下文中等遇到时再来进行单独的分析.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    __find_next_entry（）这条支路的情况分析完了，接下来看下trace_iterator_increment()，来看一下它是怎么在ring buffer中跳过这块缓存的:
+   </div> 
+   <div>
+    static void trace_iterator_increment(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* Don't allow ftrace to trace into the ring buffers */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ftrace_disable_cpu();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;idx++;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;buffer_iter[iter-&gt;cpu])
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_read(iter-&gt;buffer_iter[iter-&gt;cpu], NULL);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ftrace_enable_cpu();
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    上面的代码可以看出，就是调用ring_buffer_read()从缓存区中再读一次，这个接口与前面调用的ring_buffer_iter_peek()相比，它会调用rb_advance_iter()来使iter跳过这块数据.
+   </div> 
+   <div>
+    在这里没必要担心上次读出的数据，也就是ring_buffer_iter_peek()读出的数据会和ring_buffer_read()的数据不同。因为在iter读操作时，整个ring buffer都是禁写的，它里面的数据无法更新。
+   </div> 
+   <div>
+    在这里有一个问题,为什么用iter方式读ring buffer中数据的时候要使用消耗掉这块数据,而在reader方式下就不需要呢?
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    我们看到了数据是怎么取出来了,接下来看数据的显示, 从上文中的分析,可以得知,trace文件属于seq file, 它的数据显示是在struct seq_operations中的show操作完全的,在这里即为s_show().由于数据的显示和数据的存放是紧密联系的,所以在这里就暂时不分析s_show(),等下文中分析完了数据存放之后,再来分析这一部份.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    文件关闭调用的接口为tracing_release(),代码如下:
+   </div> 
+   <div>
+    static int tracing_release(struct inode *inode, struct file *file)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct seq_file *m = (struct seq_file *)file-&gt;private_data;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_iterator *iter;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int cpu;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!(file-&gt;f_mode &amp; FMODE_READ))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter = m-&gt;private;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; for_each_tracing_cpu(cpu) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;buffer_iter[cpu])
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_read_finish(iter-&gt;buffer_iter[cpu]);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;trace &amp;&amp; iter-&gt;trace-&gt;close)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;trace-&gt;close(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* reenable tracing if it was previously enabled */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; tracing_start();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; seq_release(inode, file);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_destroy(&amp;iter-&gt;mutex);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; free_cpumask_var(iter-&gt;started);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; kfree(iter-&gt;trace);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; kfree(iter);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    如果不是读操作,就不用进行后面的资源释放了,直接退出即可.否则,释放读操作曾经分配过的资源, 调用tracer的close接口来通知tracer要进行close操作了, 然后调用tracing_start()来启用ring buffer的写操作.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    3.2 trace_pipe文件的操作
+   </div> 
+   <div>
+    Trace_pipe也是读取CPU上对应的数据,它和trace文件不同的时,读该文件是一个阻塞型的,即如果没有数据可读的话,就会阻塞,一直到数据到达为止.
+   </div> 
+   <div>
+    文件的建立过程:
+   </div> 
+   <div>
+    在debugfs/tracing/目录下:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_create_file("trace_pipe", 0444, d_tracer,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void *) TRACE_PIPE_ALL_CPU, &amp;tracing_pipe_fops);
+   </div> 
+   <div>
+    在debugfs/tracing/cpuN/目录下:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_create_file("trace_pipe", 0444, d_cpu,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void *) cpu, &amp;tracing_pipe_fops);
+   </div> 
+   <div>
+    两者的实现都是一样的, 不过就是操作的CPU不同,一个是操作所有CPU,另一个是操作对应的CPU.
+   </div> 
+   <div>
+    它的文件操作集为:
+   </div> 
+   <div>
+    static const struct file_operations tracing_pipe_fops = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .open&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tracing_open_pipe,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .poll&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tracing_poll_pipe,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .read&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tracing_read_pipe,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .splice_read&nbsp; = tracing_splice_read_pipe,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; .release = tracing_release_pipe,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    先来看open操作:
+   </div> 
+   <div>
+    static int tracing_open_pipe(struct inode *inode, struct file *filp)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; long cpu_file = (long) inode-&gt;i_private;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_iterator *iter;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret = 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (tracing_disabled)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENODEV;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* We only allow one reader per cpu */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (cpu_file == TRACE_PIPE_ALL_CPU) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!cpumask_empty(tracing_reader_cpumask)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -EBUSY;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpumask_setall(tracing_reader_cpumask);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; } else {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!cpumask_test_cpu(cpu_file, tracing_reader_cpumask))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cpumask_set_cpu(cpu_file, tracing_reader_cpumask);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; else {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -EBUSY;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    从这个地方可以看出tracing_reader_cpumask的用途了, 它就是pipe read时,要操作的CPU集. 因为整个open过程是加锁保护的,所以在traceing_reader_cpumask进行上述代码判断可以保证该文件同时只能有一个pipe reader在执行
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* create a buffer to store the information to pass to userspace */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter = kzalloc(sizeof(*iter), GFP_KERNEL);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!iter) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -ENOMEM;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* We make a copy of the current tracer to avoid concurrent
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* changes on it while we are reading.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;trace = kmalloc(sizeof(*iter-&gt;trace), GFP_KERNEL);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!iter-&gt;trace) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -ENOMEM;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (current_trace)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *iter-&gt;trace = *current_trace;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!alloc_cpumask_var(&amp;iter-&gt;started, GFP_KERNEL)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -ENOMEM;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto fail;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* trace pipe does not show start of buffer */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; cpumask_setall(iter-&gt;started);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_flags &amp; TRACE_ITER_LATENCY_FMT)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;iter_flags |= TRACE_FILE_LAT_FMT;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;cpu_file = cpu_file;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;tr = &amp;global_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_init(&amp;iter-&gt;mutex);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; filp-&gt;private_data = iter;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;trace-&gt;pipe_open)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;trace-&gt;pipe_open(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    out:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    fail:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; kfree(iter-&gt;trace);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; kfree(iter);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    分配并初始化struct trace_iterator, 这个操作跟trace文件的操作大同小异,不过需要注意的是,它们之间的差别:
+   </div> 
+   <div>
+    1): pipe read刚开始就将iter-&gt;started置位了所有CPU, 结合我们在上面的分析,就可得知,在pipe read下就不会打印出” ##### CPU n buffer started ####”这样的无用信息.
+   </div> 
+   <div>
+    2): 调用tracer的pipe_open()操作来通知tracer.
+   </div> 
+   <div>
+    3): 操作trace文件的时候,会禁用写操作,而pipe_open是开写操作执行的
+   </div> 
+   <div>
+    4): 在读ring buffer的方式上,pipe操作没有去初始化读ring buffer的iter,也就是说,pipe读方式是以reader方式进行的,它会一边读,一边消耗ring buffer中的数据页
+   </div> 
+   <div>
+    5):&nbsp; pipe_read只能读取global_trace中的内容
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    接下来分析pipe的Read操作,它对应的接口为tracing_read_pipe(),代码如下:
+   </div> 
+   <div>
+    static ssize_t
+   </div> 
+   <div>
+    tracing_read_pipe(struct file *filp, char __user *ubuf,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp; size_t cnt, loff_t *ppos)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_iterator *iter = filp-&gt;private_data;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; static struct tracer *old_tracer;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ssize_t sret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* return any leftover data */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; sret = trace_seq_to_user(&amp;iter-&gt;seq, ubuf, cnt);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (sret != -EBUSY)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return sret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_seq_init(&amp;iter-&gt;seq);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* copy the tracer to avoid using a global lock all around */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (unlikely(old_tracer != current_trace &amp;&amp; current_trace)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; old_tracer = current_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *iter-&gt;trace = *current_trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;trace_types_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果iter中还有数据,将就数据返回到用户空间,如果已经没数据了,将iter-&gt;seq重置位,然后加锁获得cuuurent_trace.
+   </div> 
+   <div>
+    在这里就有一个疑问了,如果等我们获得了current_trace后,即运行到mutex_unlock(&amp;trace_types_lock)这条语句后,用户更改了当前的tracer, 而且此时tracer很快就往ring buffer中写入了数据.这样就会造成pipe_read读出来的数据,其实已经不是iter-&gt;trace的数据了,而这个问题在trace的操作中是不存在的,因为在trace的操作过程中,写操作是禁止的.
+   </div> 
+   <div>
+    是到分析iter-&gt;seq的时候了,它的类型为struct trace_seq, 定义如下:
+   </div> 
+   <div>
+    struct trace_seq {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buffer[PAGE_SIZE];
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; len;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; readpos;
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    该结构用于将ring buffer中取出的信息经过转换之后存放在这里, 从结构可以看出,它能存放的最大大小(也就是read操作能够读出的有效数据的最大长度)是一个页面.
+   </div> 
+   <div>
+    Len表示trace_seq中的数据长度, readpos是指当前读位置.
+   </div> 
+   <div>
+    那可以看出,trace_seq中有len大小的数据,已经被读出了readpos,而余下len-readpos的数据
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Avoid more than one consumer on a single file descriptor
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* This is just a matter of traces coherency, the ring buffer itself
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* is protected.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;iter-&gt;mutex);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;trace-&gt;read) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sret = iter-&gt;trace-&gt;read(iter, filp, ubuf, cnt, ppos);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (sret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    waitagain:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; sret = tracing_wait_pipe(filp);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (sret &lt;= 0)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* stop when tracing is finished */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_empty(iter)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sret = 0;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (cnt &gt;= PAGE_SIZE)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cnt = PAGE_SIZE - 1;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* reset all but tr, trace, and overruns */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; memset(&amp;iter-&gt;seq, 0,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof(struct trace_iterator) -
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; offsetof(struct trace_iterator, seq));
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;pos = -1;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果iter中已经没有数据了, 为了使读操作串行化,必须先持有iter-&gt;mutex, 这是因为,如果读操作并行,可以因为竞争关系,在下面的处理中,会使一些读操作异常返回,导致退出.
+   </div> 
+   <div>
+    可是为什么在trace文件操作的时候为什么不需要保证它的串行呢? 这是因为trace文件采用的是seq file的方式,它内部就是加锁保证顺序访问的.
+   </div> 
+   <div>
+    然后调用tracer-&gt;read()来通知tracer pipe读操作已经开始了.注意tracer-&gt;read()在操作trace文件是不会被操作的,其实这里改为tracer-&gt;pipe_read()可能会更合适
+   </div> 
+   <div>
+    接着调用tracing_wait_pipe()来等待,一直到有数据到达为止.
+   </div> 
+   <div>
+    如果等待返回了,检查ring buffer 后还是没数据,说明traceing_waite_pipe()是异常返回(比如说收到了信号),操作返回.
+   </div> 
+   <div>
+    确实有数据可读之后,就需要做一些必须的初始化工作.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_event_read_lock();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; while (find_next_entry_inc(iter) != NULL) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; enum print_line_t ret;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int len = iter-&gt;seq.len;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = print_trace_line(iter);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret == TRACE_TYPE_PARTIAL_LINE) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* don't print partial lines */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;seq.len = len;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret != TRACE_TYPE_NO_CONSUME)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_consume(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;seq.len &gt;= cnt)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_event_read_unlock();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    因为在print_trace_line()中将ring buffer中的数据进行转换的时候需要用到trace_event,为了防止跟trace_event注册和撤消的竞争,这里需要持有trace_event_mutex
+   </div> 
+   <div>
+    然后调用find_next_entry_inc()从ring buffer中取数据,这个过程我们在分析trace方件的读操作就已经分析过了, 这里不再进行分析了.
+   </div> 
+   <div>
+    接着接用print_trace_line()将取到的数据放到iter-&gt;seq中.
+   </div> 
+   <div>
+    注意print_trace_line()的返回值:
+   </div> 
+   <div>
+    1: TRACE_TYPE_PARTIAL_LINE:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; 说明刚才填允到iter中的数据是不需要的,因此将iter-&gt;seq的数据长度恢复到写之前的值
+   </div> 
+   <div>
+    2: TRACE_TYPE_NO_CONSUME
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; 说明这些数据在处理的时候已经从ring buffer中消耗掉了,否则调用trace_consume（）将读过的event消耗掉。
+   </div> 
+   <div>
+    如果已经取到了足够的数据,就可以停止从ring buffer中取数据了
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* Now copy what we have to the user */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; sret = trace_seq_to_user(&amp;iter-&gt;seq, ubuf, cnt);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;seq.readpos &gt;= iter-&gt;seq.len)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_seq_init(&amp;iter-&gt;seq);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* If there was nothing to send to user, inspite of consuming trace
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* entries, go back to wait for more entries.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (sret == -EBUSY)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto waitagain;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    out:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;iter-&gt;mutex);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return sret;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    剩余的就很容易了,将读取到的数据返回即可.
+   </div> 
+   <div>
+    这里的加锁以保护串行是不是有问题呢?因为刚开始进入到的这个函数的时候,会有从iter-&gt;seq中取数据以及清空iter-&gt;seq的操作,这会跟后面的iter-&gt;seq操作产生竞争.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    有必要来分析一下tracing_wait_pipe()的操作,代码如下:
+   </div> 
+   <div>
+    static int tracing_wait_pipe(struct file *filp)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_iterator *iter = filp-&gt;private_data;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; while (trace_empty(iter)) {
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if ((filp-&gt;f_flags &amp; O_NONBLOCK)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EAGAIN;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mutex_unlock(&amp;iter-&gt;mutex);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; iter-&gt;trace-&gt;wait_pipe(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mutex_lock(&amp;iter-&gt;mutex);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (signal_pending(current))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINTR;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* We block until we read something and tracing is disabled.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* We still block if tracing is disabled, but we have never
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* read anything. This allows a user to cat this file, and
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* then enable tracing. But after we have read something,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* we give an EOF when tracing is again disabled.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* iter-&gt;pos will be 0 if we haven't read anything.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!tracer_enabled &amp;&amp; iter-&gt;pos)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return 1;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    从上面的代码中很容易看出:
+   </div> 
+   <div>
+    1: 如果打开文件时带了O_NONBLOCK标志,会退出,因为在这个地方会造成阻塞.
+   </div> 
+   <div>
+    2: 调用trace-&gt;wait_pipe()阻塞,直到有数据为止
+   </div> 
+   <div>
+    3: 如果trace被禁用(tracer_enable == 0)而且iter-&gt;pos不为0,就会退出等待.
+   </div> 
+   <div>
+    &nbsp;&nbsp; 为什么呢? 我们知道,在tracing_open_pipe()分配iter用的是kzalloc,即iter结构中的
+   </div> 
+   <div>
+    &nbsp;&nbsp; 成员全部为0,而且没有对iter-&gt;pos做特别的初始化.因此可得知,open的时候iter-&gt;pos为0,
+   </div> 
+   <div>
+    &nbsp; 然后在tracing_read_pipe()中,判断读取数据之后,会将iter-&gt;pos置为-1
+   </div> 
+   <div>
+    &nbsp; 结合注释可得知这样做的原因:
+   </div> 
+   <div>
+    如果trace被禁用了,但我们还没有读到任何数据,那就一直等待,到有数据为止.如果是在读数据的中途(曾经读出过数据),那就给用户空间返回EOF.
+   </div> 
+   <div>
+    这样做,主要是允许这样的情况:
+   </div> 
+   <div>
+    在open的时候,trace是禁用的,然后pipe read一直阻塞,直到trace启用为止.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    接着跟踪看一下默认的tracer-&gt; wait_pipe(),即default_wait_pipe,代码如下:
+   </div> 
+   <div>
+    void default_wait_pipe(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; DEFINE_WAIT(wait);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; prepare_to_wait(&amp;trace_wait, &amp;wait, TASK_INTERRUPTIBLE);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_empty(iter))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; schedule();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; finish_wait(&amp;trace_wait, &amp;wait);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这段代码比较容易,就是将等待队列挂在trace_wait上,然后一直睡眠,直到有数据为止,注意这里并没有信号的检测,即如果没数据的话,不管用户进行什么样的操作,它都会阻塞在这个地方.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    结合tracing_wait_pipe()和default_wait_pipe()的代码来看:
+   </div> 
+   <div>
+    1; 有数据default_wait_pipe()才会返回,如果一个tracer一段时间内没有写数据,那么即使用按ctrl+C也无法中止这个过程.
+   </div> 
+   <div>
+    2: 如果tracer使用的是default_wait_pipe(),不可能会因为trace disable造成pipe_read退出的现象. 这是因为对tracer_enabled进行判断的时候, default_wait_pipe()肯定检测到取到了数据.
+   </div> 
+   <div>
+    这个地方是不是错误呢?
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Poll接口的基本原理跟pipe read是一样的,它也在检测到有数据时才会返回,在这里就不详细分析这个过程了.
+   </div> 
+   <div>
+    Close操作就是释放掉open时候分配的资源.也不对它进行详细分析了.
+   </div> 
+   <div>
+    四: trace数据的组织
+   </div> 
+   <div>
+    上面分析到具体的数据读取方面的东西的时候全部都略过了,下面我们从数据的存放开始来研究这个问题.
+   </div> 
+   <div>
+    4.1： 数据的存放
+   </div> 
+   <div>
+    经过上一篇文章对ring buffer的分析，我们知道ring buffer中的数据都带有一个ring_buffer_event的头部，在trace中，每一块数据又被带上了trace_entry的头部，它用来存放trace数据的公共信息。结构定义如下示：
+   </div> 
+   <div>
+    struct trace_entry {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned short&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; preempt_count;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pid;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tgid;
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    Type是数据的类型，不同的类型，显示数据也是不一样的，这在后面会分析到，flags表示当前的cpu标志信息，从此处可以得到中断是否被禁用， preempt_count,表示抢占位计数,pid和tgid分别表示当前进程的pid和tgid。
+   </div> 
+   <div>
+    不同的tracer需要不同的数据，那它是怎么来表示和分配的呢？我们以debugfs/tracing/trace_marker文件为例进行分析。
+   </div> 
+   <div>
+    Trace_marker表示用户可以自已输入一些东西以便做为了mark之用。它的写操作过程就不加详细分析了。它的重要的操作是在trace_vprintk()中完成的，代码如下：
+   </div> 
+   <div>
+    int trace_vprintk(unsigned long ip, const char *fmt, va_list args)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ......
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ......
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; raw_local_irq_save(irq_flags);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; __raw_spin_lock(&amp;trace_buf_lock);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; len = vsnprintf(trace_buf, TRACE_BUF_SIZE, fmt, args);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; len = min(len, TRACE_BUF_SIZE-1);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_buf[len] = 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; size = sizeof(*entry) + len + 1;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; event = trace_buffer_lock_reserve(tr, TRACE_PRINT, size, irq_flags, pc);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!event)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_unlock;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry = ring_buffer_event_data(event);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry-&gt;ip&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = ip;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; memcpy(&amp;entry-&gt;buf, trace_buf, len);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry-&gt;buf[len] = 0;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!filter_check_discard(call, entry, tr-&gt;buffer, event))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ring_buffer_unlock_commit(tr-&gt;buffer, event);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    ......
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    首先来看一下存放数据的数据结构，如下：
+   </div> 
+   <div>
+    struct print_entry {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ip;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buf[];
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    它除了本身所存放的数据外，还带有一个struct trace_entry， buf[]是一个变长的数组，它的实际大小等于要存放的字符所占空间。
+   </div> 
+   <div>
+    据此可以得知，它要从ring buffer中分配的数据大小为
+   </div> 
+   <div>
+    sizeof(struct print_entry) + strlen(string) + 1
+   </div> 
+   <div>
+    从上面可以看到，有一个统一的，trace从ring buffer中分配空间的接口，即为trace_buffer_lock_reserve().代码如下：
+   </div> 
+   <div>
+    struct ring_buffer_event *trace_buffer_lock_reserve(struct trace_array *tr,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; int type,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; unsigned long len,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; unsigned long flags, int pc)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; event = ring_buffer_lock_reserve(tr-&gt;buffer, len);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (event != NULL) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry *ent = ring_buffer_event_data(event);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tracing_generic_entry_update(ent, flags, pc);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ent-&gt;type = type;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return event;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    先看一下参数的含义：
+   </div> 
+   <div>
+    Tr： 我们在前面分析过了，它是trace封装的一个结构，里面含有要操作的ring buffer
+   </div> 
+   <div>
+    Type: 写入ring buffer的数据类型
+   </div> 
+   <div>
+    Len: 需要从ring buffer中分配的总长度（不计算event头部）
+   </div> 
+   <div>
+    Flags: CPU的标志
+   </div> 
+   <div>
+    Pc: 当前进程的抢占位计数
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Ring_buffer_lock_reserver()是RB的一个接口，在分析RB的时候已经分析过了.
+   </div> 
+   <div>
+    ring_buffer_event_data()也是RB的一个接口，即从分配得到的event中取出data部份
+   </div> 
+   <div>
+    重点来看一下tracing_generic_entry_update()，代码如下：
+   </div> 
+   <div>
+    void
+   </div> 
+   <div>
+    tracing_generic_entry_update(struct trace_entry *entry, unsigned long flags,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; int pc)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct task_struct *tsk = current;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry-&gt;preempt_count&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = pc &amp; 0xff;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry-&gt;pid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = (tsk) ? tsk-&gt;pid : 0;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry-&gt;tgid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = (tsk) ? tsk-&gt;tgid : 0;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry-&gt;flags =
+   </div> 
+   <div>
+    #ifdef CONFIG_TRACE_IRQFLAGS_SUPPORT
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (irqs_disabled_flags(flags) ? TRACE_FLAG_IRQS_OFF : 0) |
+   </div> 
+   <div>
+    #else
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; TRACE_FLAG_IRQS_NOSUPPORT |
+   </div> 
+   <div>
+    #endif
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ((pc &amp; HARDIRQ_MASK) ? TRACE_FLAG_HARDIRQ : 0) |
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ((pc &amp; SOFTIRQ_MASK) ? TRACE_FLAG_SOFTIRQ : 0) |
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (need_resched() ? TRACE_FLAG_NEED_RESCHED : 0);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    从此可以看出, trace_entry-&gt; preempt_count保存的是当前进程抢占计数,它是进程preempt_count字段的最低8位.(似乎这里0xff用PREEMPT_MASK代替更合适一些)
+   </div> 
+   <div>
+    trace_entry-&gt;pid和trace_entry-&gt;tgid分别存放当前进程的pid和tgid
+   </div> 
+   <div>
+    trace_entry-&gt;flags表示了很多信息，具体如下：
+   </div> 
+   <div>
+    第一位: 表示中断禁用位，禁用为1,启用为0
+   </div> 
+   <div>
+    第二位: 表示当前平台是否支持irq flag的检测(没有配置CONFIG_TRACE_IRQFLAGS_SUPPORT)，不支持此位置1,否则为0
+   </div> 
+   <div>
+    第三位： 表示当前是否需要重调度，是为1，否则为0
+   </div> 
+   <div>
+    第四位： 表示是否处于硬中断坏境（响应外部设备的中断）,是为1,否则为0
+   </div> 
+   <div>
+    第五位： 表示是否处于软中断环境，是为1，否则为0
+   </div> 
+   <div>
+    这里是否还可以增加一位用来显示是否在NMI中？
+   </div> 
+   <div>
+    当然trace_entry-&gt;type表示数据的类型
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    数据的commit!!! 为什么trace_vprintk()在写完数据提交后，为什么不需要采用wake_up的commit?
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    4.2: 数据的读取
+   </div> 
+   <div>
+    前面分析了数据的存放过程，现在来看一下怎么将数据从ring buffer中取出来.
+   </div> 
+   <div>
+    上面分析过,trace框架只提供了一个基本的头部，每个tracer还有自己的数据扩充，那怎么知道trace_entry后面扩充的是怎么样的数据呢？ trace_entry-&gt;type就可以派上用场了，可以凭借它找到它所对应的输出规则。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    在trace中，这种输出规则是用trace_event来表示的，该结构如下示：
+   </div> 
+   <div>
+    typedef enum print_line_t (*trace_print_func)(struct trace_iterator *iter,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int flags);
+   </div> 
+   <div>
+    struct trace_event {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct hlist_node&nbsp; node;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct list_head&nbsp;&nbsp; list;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_print_func&nbsp;&nbsp; trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_print_func&nbsp;&nbsp; raw;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_print_func&nbsp;&nbsp; hex;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_print_func&nbsp;&nbsp; binary;
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    可能trace_event会通过list链在一起(其type是自动分配的情况下)，同时为了快速和type相对应，它们又通过node链在一个哈表链里。
+   </div> 
+   <div>
+    Type表示对应的数据类型，也即前面分析的trace_entry-&gt;type.
+   </div> 
+   <div>
+    Trace, raw, hex,binary分别表示数据输出的几种方式，具体的在后面会分析到.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    对于trace_event不外乎几种操作： 注册trace_event，根据type找到trace_event,撤消trace_event，分别来分析这几个过程：
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Trace_event的注册：
+   </div> 
+   <div>
+    Trace_event的注册是通过register_ftrace_event()来完成的，代码如下：
+   </div> 
+   <div>
+    int register_ftrace_event(struct trace_event *event)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned key;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret = 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; down_write(&amp;trace_event_mutex);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (WARN_ON(!event))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; INIT_LIST_HEAD(&amp;event-&gt;list);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!event-&gt;type) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct list_head *list = NULL;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (next_event_type &gt; FTRACE_MAX_EVENT) {
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;type = trace_search_list(&amp;list);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!event-&gt;type)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } else {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;type = next_event_type++;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; list = &amp;ftrace_event_list;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (WARN_ON(ftrace_find_event(event-&gt;type)))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; list_add_tail(&amp;event-&gt;list, list);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; } else if (event-&gt;type &gt; __TRACE_LAST_TYPE) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_WARNING "Need to add type to trace.h\n");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON(1);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; } else {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Is this event already used */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ftrace_find_event(event-&gt;type))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (event-&gt;trace == NULL)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;trace = trace_nop_print;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (event-&gt;raw == NULL)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;raw = trace_nop_print;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (event-&gt;hex == NULL)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;hex = trace_nop_print;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (event-&gt;binary == NULL)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;binary = trace_nop_print;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; key = event-&gt;type &amp; (EVENT_HASHSIZE - 1);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; hlist_add_head(&amp;event-&gt;node, &amp;event_hash[key]);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ret = event-&gt;type;
+   </div> 
+   <div>
+    &nbsp;out:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; up_write(&amp;trace_event_mutex);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    为了保护ftrace_event_list和event_hash[],所以在进行操作之前必须持有锁。
+   </div> 
+   <div>
+    接下来是对event-&gt;type的处理，可能有以下三点情况：
+   </div> 
+   <div>
+    1： 没有指定event-&gt;type: 这种情况就需要为其分配一个type
+   </div> 
+   <div>
+    2:&nbsp; 指定了event-&gt;type,但是它的值超过了__TRACE_LAST_TYPE,这是一种非法的情况，__TRACE_LAST_TYPE的相关定义如下：
+   </div> 
+   <div>
+    enum trace_type {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; __TRACE_FIRST_TYPE = 0,
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_FN,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_CTX,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_WAKE,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_STACK,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_PRINT,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_BPRINT,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_SPECIAL,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_MMIO_RW,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_MMIO_MAP,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_BRANCH,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_BOOT_CALL,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_BOOT_RET,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_GRAPH_RET,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_GRAPH_ENT,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_USER_STACK,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_HW_BRANCHES,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_SYSCALL_ENTER,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_SYSCALL_EXIT,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_KMEM_ALLOC,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_KMEM_FREE,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_POWER,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_BLK,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; TRACE_KSYM,
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; __TRACE_LAST_TYPE,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    enum trace_type表示了系统自定义的type类型，超过__TRACE_LAST_TYPE是属于自动分配的type
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    3： 指定了type，type也没有超过trace_type，但是这个trace_type已经注册过了。
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; 这种情况是不允许的，不可能为一个type对应多个trace_event.
+   </div> 
+   <div>
+    从上面的代码中可以看出，只有在type末指定的情况，才会将trace_evnet加入ftrace_event_list链表.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    在trace_evnet-&gt; trace, raw, hex, binary为空的情况下，为其选择一个默认处理函数，这个函数什么都不会做，直接返回一个已处理标志。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    然后，为了加快从type到trace_event的查找速度，以type为键值，取其低7位做为哈希值，加入event_hash[]的对应哈希链表中。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    来分析它的type分配过程，如下代码段：
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (next_event_type &gt; FTRACE_MAX_EVENT) {
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;type = trace_search_list(&amp;list);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!event-&gt;type)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } else {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; event-&gt;type = next_event_type++;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; list = &amp;ftrace_event_list;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    next_event_type表示下一次要分配的type,如果它超过了最大值，那就只能从头搜索一次，看是否有被释放掉的type.如果当前再无type可用，返回0。
+   </div> 
+   <div>
+    最大值的为FTRACE_MAX_EVENT，定义如下：
+   </div> 
+   <div>
+    #define FTRACE_MAX_EVENT&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ((1 &lt;&lt; (sizeof(((struct trace_entry *)0)-&gt;type) * 8)) - 1)
+   </div> 
+   <div>
+    它就是表示struct trace_entry-&gt;type所占的位数
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    在next_event_type没有超过最大值的情况下，很容易处理，直接取next_event_type的值就可以了，然后将ftrace_event_list链表的末尾。
+   </div> 
+   <div>
+    那也就是说，next_event_type末超过范围之前，ftrace_event_list中的数据都是按type从小到大的顺序排列的。
+   </div> 
+   <div>
+    如果超过了呢？来看一下trace_search_list(),代码如下：
+   </div> 
+   <div>
+    static int trace_search_list(struct list_head **list)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_event *e;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int last = __TRACE_LAST_TYPE;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (list_empty(&amp;ftrace_event_list)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *list = &amp;ftrace_event_list;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return last + 1;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* We used up all possible max events,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* lets see if somebody freed one.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; list_for_each_entry(e, &amp;ftrace_event_list, list) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (e-&gt;type != last + 1)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; last++;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /* Did we used up all 65 thousand events??? */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if ((last + 1) &gt; FTRACE_MAX_EVENT)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; *list = &amp;e-&gt;list;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return last + 1;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这个函数只有一个参数，且是一个二级指针list,表示要插入的位置，返回分配得到的type,如果失败，返回0.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    __TRACE_LAST_TYPE是动态分配type的起始值，如果ftrace_event_list为空，说明之前分配type的trace_event全部都释放掉了，所以直取__TRACE_LAST_TYPE即可.
+   </div> 
+   <div>
+    在其它的情况下，因为ftrace_event_list中的数据都是从小到大排列来的，所以只需要一个循环找到其中的“空洞”位置即可。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    从注册过程中我们也看到了，需要调用ftrace_find_event（）来判断该type是否被使用，其它就是去寻找type对应的trace_event，也就是我们接下来要分析的操作，代码如下：
+   </div> 
+   <div>
+    struct trace_event *ftrace_find_event(int type)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_event *event;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct hlist_node *n;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned key;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; key = type &amp; (EVENT_HASHSIZE - 1);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; hlist_for_each_entry(event, n, &amp;event_hash[key], node) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (event-&gt;type == type)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return NULL;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    该函数很简单，就是一个计算哈希值，然后从对应哈希链中匹配的过程。
+   </div> 
+   <div>
+    在这里需要注意一个问题，在整个寻找的过程中是没有加锁的。因此，我们在调用它之前必须持有trace_event_mutex
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    接下来分析trace_event的撤消过程，它是在unregister_ftrace_event(),代码如下：
+   </div> 
+   <div>
+    int unregister_ftrace_event(struct trace_event *event)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; down_write(&amp;trace_event_mutex);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; __unregister_ftrace_event(event);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; up_write(&amp;trace_event_mutex);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    先是临界区保护，然后调用__unregister_ftrace_event(),如下：
+   </div> 
+   <div>
+    int __unregister_ftrace_event(struct trace_event *event)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; hlist_del(&amp;event-&gt;node);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; list_del(&amp;event-&gt;list);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    很简单，只需要对应从ftrace_event_list, event_hash[]中删除即可。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    分析完了trace_event的操作之后，可以来看一下数据到底是怎么显示的，从前面分析trace文件和trace_pipe的操作可得知，它是在print_trace_line()中完成的，代码如下：
+   </div> 
+   <div>
+    static enum print_line_t print_trace_line(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; enum print_line_t ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;trace &amp;&amp; iter-&gt;trace-&gt;print_line) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = iter-&gt;trace-&gt;print_line(iter);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret != TRACE_TYPE_UNHANDLED)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ret;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果当前的trace定义了print_line,那就调用它
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;ent-&gt;type == TRACE_BPRINT &amp;&amp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_flags &amp; TRACE_ITER_PRINTK &amp;&amp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_flags &amp; TRACE_ITER_PRINTK_MSGONLY)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return trace_print_bprintk_msg_only(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;ent-&gt;type == TRACE_PRINT &amp;&amp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_flags &amp; TRACE_ITER_PRINTK &amp;&amp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_flags &amp; TRACE_ITER_PRINTK_MSGONLY)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return trace_print_printk_msg_only(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果当前的消息类型是TRACE_BPRINT/TRACE_PRINT, 而且trace标志带有TRACE_ITER_PRINTK和TRACE_ITER_PRINTK_MSGONLY,那就调用
+   </div> 
+   <div>
+    trace_print_bprintk_msg_only()/trace_print_printk_msg_only()
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_flags &amp; TRACE_ITER_BIN)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return print_bin_fmt(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_flags &amp; TRACE_ITER_HEX)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return print_hex_fmt(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_flags &amp; TRACE_ITER_RAW)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return print_raw_fmt(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    TRACE_ITER_BIN，TRACE_ITER_HEX，TRACE_ITER_RAW表示消息分别以二进制,十六进制，原始形式输出
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return print_trace_fmt(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    否则调用print_trace_fmt()
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    分别来分析一下上面出现的几个函数：
+   </div> 
+   <div>
+    enum print_line_t trace_print_bprintk_msg_only(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_seq *s = &amp;iter-&gt;seq;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry *entry = iter-&gt;ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct bprint_entry *field;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_assign_type(field, entry);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ret = trace_seq_bprintf(s, field-&gt;fmt, field-&gt;buf);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_HANDLED;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    trace_assign_type()用来将entry按照其type转换成想来的类型，定义如下：
+   </div> 
+   <div>
+    #define trace_assign_type(var, ent)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; do {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IF_ASSIGN(var, ent, struct ftrace_entry, TRACE_FN); \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; IF_ASSIGN(var, ent, struct ctx_switch_entry, 0);&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ......
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .......
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __ftrace_bad_type();&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; } while (0)
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    #undef IF_ASSIGN
+   </div> 
+   <div>
+    #define IF_ASSIGN(var, entry, etype, id)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (FTRACE_CMP_TYPE(var, etype)) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; var = (typeof(var))(entry);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON(id &amp;&amp; (entry)-&gt;type != id);&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    #define FTRACE_CMP_TYPE(var, type) \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; __builtin_types_compatible_p(typeof(var), type *)
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    __builtin_types_compatible_p是gcc的扩展，用来检测两个类型是否一样.
+   </div> 
+   <div>
+    其实IF_ASSIGN(var, entry, etype, id)就是表示，如果var和etype类型是一样的，那么就把entry转换成etype类型，并且赋值给var.
+   </div> 
+   <div>
+    注意上面的这个宏在预编译的时候就会被替换掉，如果某处的trace_assign_type（）不合法（var的类型没有出现在这个列表中）就会被替换成__ftrace_bad_type,而这个函数是没有被定义的，所以在编译的时候就会报错，这就可以提前发现错误，而并不需要等到kernel运行起来，报error了才发现。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    TRACE_BPRINT所用的数据结构为struct bprint_entry,定义如下：
+   </div> 
+   <div>
+    struct bprint_entry {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ip;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *fmt;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; buf[];
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    现在有必要来介绍一下bprint是什么东西了，例如，如下打印语句：
+   </div> 
+   <div>
+    Printk(“a=%d, b=%ul\n”, a, b);
+   </div> 
+   <div>
+    如果打印格式字符串是一个静态的，那就会适用bprint了，它会将brpint_entry-&gt;fmt指向打印的字符串，然后将要打印的参数按一定的方式保存在bprint_entry-&gt;buf[]中，这样就可以比一般的print打印要节省空间。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    trace_print_printk_msg_only()代码如下：
+   </div> 
+   <div>
+    enum print_line_t trace_print_printk_msg_only(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_seq *s = &amp;iter-&gt;seq;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry *entry = iter-&gt;ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct print_entry *field;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; int ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; trace_assign_type(field, entry);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; ret = trace_seq_printf(s, "%s", field-&gt;buf);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_HANDLED;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    Struct print_entry在上面的分析中提到过，并举了一个例子，在这里就不详细分析了，它就是将buf中的内容存放到iter-&gt;seq中.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    print_bin_fmt()代码如下：
+   </div> 
+   <div>
+    static enum print_line_t print_bin_fmt(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_seq *s = &amp;iter-&gt;seq;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry *entry;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_event *event;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry = iter-&gt;ent;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_flags &amp; TRACE_ITER_CONTEXT_INFO) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SEQ_PUT_FIELD_RET(s, entry-&gt;pid);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SEQ_PUT_FIELD_RET(s, iter-&gt;cpu);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SEQ_PUT_FIELD_RET(s, iter-&gt;ts);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; event = ftrace_find_event(entry-&gt;type);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return event ? event-&gt;binary(iter, 0) : TRACE_TYPE_HANDLED;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    如果定义了TRACE_ITER_CONTEXT_INFO，则需要将pid, cpu, time信息打印出来。
+   </div> 
+   <div>
+    SEQ_PUT_FIELD_RET定义如下：
+   </div> 
+   <div>
+    #define SEQ_PUT_FIELD_RET(s, x)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    do {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!trace_seq_putmem(s, &amp;(x), sizeof(x)))&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    } while (0)
+   </div> 
+   <div>
+    trace_seq_putmem（）代码如下：
+   </div> 
+   <div>
+    int trace_seq_putmem(struct trace_seq *s, const void *mem, size_t len)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (len &gt; ((PAGE_SIZE - 1) - s-&gt;len))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; memcpy(s-&gt;buffer + s-&gt;len, mem, len);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; s-&gt;len += len;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return len;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    从此可以看出，它就是直接将数据拷贝到缓存里。
+   </div> 
+   <div>
+    接着调用ftrace_find_event（）找到对应的event，然后调用该event的binary()操作.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    print_hex_fmt()和print_bin_fmt()大同小异，只不过数据是以十六进制方式显示。
+   </div> 
+   <div>
+    print_raw_fmt（）代码如下：
+   </div> 
+   <div>
+    static enum print_line_t print_raw_fmt(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_seq *s = &amp;iter-&gt;seq;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry *entry;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_event *event;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry = iter-&gt;ent;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_flags &amp; TRACE_ITER_CONTEXT_INFO) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!trace_seq_printf(s, "%d %d %llu ",
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; entry-&gt;pid, iter-&gt;cpu, iter-&gt;ts))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto partial;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; event = ftrace_find_event(entry-&gt;type);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (event)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event-&gt;raw(iter, 0);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!trace_seq_printf(s, "%d ?\n", entry-&gt;type))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto partial;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_HANDLED;
+   </div> 
+   <div>
+    partial:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    Raw方式的输出要比前两种要好看多了，它将各数值转换成了字符串格式。并且在最后还会将数据的type输出.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    print_trace_fmt()代码如下:
+   </div> 
+   <div>
+    static enum print_line_t print_trace_fmt(struct trace_iterator *iter)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_seq *s = &amp;iter-&gt;seq;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned long sym_flags = (trace_flags &amp; TRACE_ITER_SYM_MASK);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_entry *entry;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; struct trace_event *event;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; entry = iter-&gt;ent;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; test_cpu_buff_start(iter);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    test_cpu_buff_start()函数比较简单,如果:
+   </div> 
+   <div>
+    1: trace标志定义了TRACE_ITER_ANNOTATE
+   </div> 
+   <div>
+    2: 该条信息不是第一条显示的信息
+   </div> 
+   <div>
+    3: 从来没有为该CPU打印过注释
+   </div> 
+   <div>
+    那就为这个CPU打印注释信息,格式如下:
+   </div> 
+   <div>
+    “##### CPU N buffer started ####\n"
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; event = ftrace_find_event(entry-&gt;type);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (trace_flags &amp; TRACE_ITER_CONTEXT_INFO) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (iter-&gt;iter_flags &amp; TRACE_FILE_LAT_FMT) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!trace_print_lat_context(iter))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto partial;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } else {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!trace_print_context(iter))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto partial;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    对应的,找到type对应的trace_event,如果定义了TRACE_ITER_CONTEXT_INFO,那就需要打印pid,cpu,time等信息.
+   </div> 
+   <div>
+    在TRACE_FILE_LAT_FMT被定义与没被定义的情况下,打印的消息格式是不相同的,在这里就不详细分析trace_print_lat_context()和trace_print_context(),它们的代码都很简单,可自行阅读.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (event)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return event-&gt;trace(iter, sym_flags);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!trace_seq_printf(s, "Unknown type %d\n", entry-&gt;type))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto partial;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_HANDLED;
+   </div> 
+   <div>
+    partial:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    相应的,最后调用event的trace操作, 如果没有找到对应的event,则显示错误提示:
+   </div> 
+   <div>
+    “Unknown type %d\n”
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    到这里,就对trace中的数据如何组织,如果存放,以及如何显示的分析告一段落了.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    五: cmdline的存放和查找
+   </div> 
+   <div>
+    Cmdline就是进程的名字,也就是我们用ps指用所列出的进程列表.其实它的操作不外乎这几个:
+   </div> 
+   <div>
+    1: 如何存放pid与cmdline的对应关系.
+   </div> 
+   <div>
+    2: 如何查找pid对应的cmdline.
+   </div> 
+   <div>
+    3: 保存cmdline的时机.
+   </div> 
+   <div>
+    下文的分析主要会围绕着这几个方面.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    5.1: cmdline的初始化
+   </div> 
+   <div>
+    经过上面的分析,我们知道cmdline的初始化操作是在trace_init_cmdlines()中完全的,代码如下:
+   </div> 
+   <div>
+    static void trace_init_cmdlines(void)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; memset(&amp;map_pid_to_cmdline, NO_CMDLINE_MAP, sizeof(map_pid_to_cmdline));
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; memset(&amp;map_cmdline_to_pid, NO_CMDLINE_MAP, sizeof(map_cmdline_to_pid));
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; cmdline_idx = 0;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    看其来它很简单,就是将map_pid_to_cmdline, map_cmdline_to_pid全部都清成初始化状态NO_CMDLINE_MAP表示它是没有映射的,也就是空闲的.并将cmdline_idx置为了0.
+   </div> 
+   <div>
+    它们的初始分别如下:
+   </div> 
+   <div>
+    static unsigned map_pid_to_cmdline[PID_MAX_DEFAULT+1];
+   </div> 
+   <div>
+    static unsigned map_cmdline_to_pid[SAVED_CMDLINES];
+   </div> 
+   <div>
+    static int cmdline_idx;
+   </div> 
+   <div>
+    另外还有一个存放cmdline的二维数组:
+   </div> 
+   <div>
+    static char saved_cmdlines[SAVED_CMDLINES][TASK_COMM_LEN];
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    看了上面的定义之后,我们可能会隐约猜到这个算法了, saved_cmdlines无疑是用来存放cmdline的.
+   </div> 
+   <div>
+    TASK_COMM_LEN是最大的进程名字大小,因此可得知,里面最多可以存放SAVED_CMDLINES个cmdline.
+   </div> 
+   <div>
+    而PID_MAX_DEFAULT 表示的是进程最大的pid大小, map_pid_to_cmdline[]无疑是每个pid都会对应一项.为什么最大的pid值是PID_MAX_DEFAULT,但是map_pid_to_cmdline[]的大小却定义为PID_MAX_DEFAULT+1呢? 因为还得要加上pid等于0的情况(idle进程).
+   </div> 
+   <div>
+    从map_pid_to_cmdline的名字上看来,它是映射从pid到cmdline,那是否是每个pid对应map_pid_to_cmdline[]中的每一个项,然后这一项里面存放的是在saved_cmdlines[][TASK_COMM_LEN]中的序号.然后就找到了cmdline?
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    map_cmdline_to_pid[SAVED_CMDLINES]又是用来干什么的呢? 从上面可以的分析可以看出,一次只能保存SAVED_CMDLINES个进程的cmdline,那这个数组应该是用来控制那些进程应该要映射.哪些进程的映射被”挤出”?
+   </div> 
+   <div>
+    不过上面的分析只是我们看到代码的猜测而已,我们来看一下具体的存放过程.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    5.2: cmdline的存放
+   </div> 
+   <div>
+    Cmdline的存放操作是在trace_save_cmdline()中完成的,代码如下:
+   </div> 
+   <div>
+    static void trace_save_cmdline(struct task_struct *tsk)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; unsigned pid, idx;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!tsk-&gt;pid || unlikely(tsk-&gt;pid &gt; PID_MAX_DEFAULT))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* It's not the end of the world if we don't get
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* the lock, but we also don't want to spin
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* nor do we want to disable interrupts,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* so if we miss here, then better luck next time.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (!__raw_spin_trylock(&amp;trace_cmdline_lock))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; idx = map_pid_to_cmdline[tsk-&gt;pid];
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; if (idx == NO_CMDLINE_MAP) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; idx = (cmdline_idx + 1) % SAVED_CMDLINES;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* Check whether the cmdline buffer at idx has a pid
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* mapped. We are going to overwrite that entry so we
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* need to clear the map_pid_to_cmdline. Otherwise we
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* would read the new comm for the old pid.
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pid = map_cmdline_to_pid[idx];
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (pid != NO_CMDLINE_MAP)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; map_pid_to_cmdline[pid] = NO_CMDLINE_MAP;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; map_cmdline_to_pid[idx] = tsk-&gt;pid;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; map_pid_to_cmdline[tsk-&gt;pid] = idx;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cmdline_idx = idx;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; memcpy(&amp;saved_cmdlines[idx], tsk-&gt;comm, TASK_COMM_LEN);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp; __raw_spin_unlock(&amp;trace_cmdline_lock);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    从上面的入口参数的检测可以看出,它不能够存放pid=0的情况,即然这样为什么面要将map_pid_to_cmdline[]要定义成PID_MAX_DEFAULT+1大小, PID_MAX_DEFAULT大小不就够了么?
+   </div> 
+   <div>
+    同时,在操作的过程中必须要持有trace_cmdline_lock锁,但是如果这个锁已经持有了,就不再等待,而是退出.可能是因为不想在这个过程中耽误太多的时候.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    从上面的代码中可以看也, map_pid_to_cmdline[]的作用正如我们之前所猜测的: 每一个进程以pid为键值对应map_pid_to_cmdline[]中的一项, 而该项存放的是在saved_cmdlines中的对应项.
+   </div> 
+   <div>
+    举个例个, pid为15, 假设map_pid_to_cmdline[15] = 30, 那么它的cmdline就存放在saved_cmdlines[30][].
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果对应在map_pid_to_cmdline[]数组中的值为NO_CMDLINE_MAP, 这个值是我们之前初始化的状态，说明并没有为这个pid建立映射。那就必须要为它分配一个在save_cmdlines中的存放位置了。怎么样存放呢？
+   </div> 
+   <div>
+    首先，我们必须要考虑到这个问题，因为只能存放SAVED_CMDLINES个进程的cmdline,在空间都存放满了之前，我们肯定要将最老的值移出。在这个过程中map_cmdline_to_pid[]和cmdline_idx就派上用场了。
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    其实map_cmdline_to_pid中的第一项都表示save_cmdlines对应项的状态。举个例子，假设我们想知道save_cmdlines[13]的存放状态，这些状态都在map_cmdline_to_pid[13]中。
+   </div> 
+   <div>
+    如果map_cmdline_to_pid[13]中的值为NO_CMDLINE_MAP，说明save_cmdlines[13]就是空闲的，否则，假设map_cmdline_to_pid[13]存放的值为99,那就表示save_cmdline[99]存放的是pid为99的进程的cmdline. 当然也会有map_pid_to_cmdline[99] == 13.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如下图所示：
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <div>
+     <img src="http://blogimg.chinaunix.net/blog/upfile2/090629020407.jpg" alt="">
+    </div> 
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <div>
+     Cmdline_idx在这个过程中是从上到下递增指向map_pid_to_cmdline[]中的项。如果有冲突，就将其替换，因为这是存放在save_cmdlines中最老的数据了，并且将它对应在map_pid_to_cmdline[]中的项设为NO_CMDLINE_MAP，表示末曾为它建立映射。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     5.3: cmdline的查找
+    </div> 
+    <div>
+     Cmdline的查找过程很容易了，就是找到进程对应在map_pid_to_cmdline中的值，如果有映射就找到在save_cmdlines中的对应项就可以了。它的操作是在trace_find_cmdline()中完成的，代码如下：
+    </div> 
+    <div>
+     void trace_find_cmdline(int pid, char comm[])
+    </div> 
+    <div>
+     {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; unsigned map;
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; if (!pid) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; strcpy(comm, "");
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; if (pid &gt; PID_MAX_DEFAULT) {
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; strcpy(comm, "&lt;...&gt;");
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; }
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; preempt_disable();
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; __raw_spin_lock(&amp;trace_cmdline_lock);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; map = map_pid_to_cmdline[pid];
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; if (map != NO_CMDLINE_MAP)
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; strcpy(comm, saved_cmdlines[map]);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; else
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; strcpy(comm, "&lt;...&gt;");
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; __raw_spin_unlock(&amp;trace_cmdline_lock);
+    </div> 
+    <div>
+     &nbsp;&nbsp;&nbsp;&nbsp; preempt_enable();
+    </div> 
+    <div>
+     }
+    </div> 
+    <div>
+     这段代码比较简单，就不加详细分析了。
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     5.4: cmdline的保存时机
+    </div> 
+    <div>
+     那究竟是在什么时候才将进程的cmdline保存呢？
+    </div> 
+    <div>
+     实际上，kernel提供了两个函数用来启动记录cmdline和停止记录.它们分别是tracing_start_cmdline_record（）和tracing_stop_cmdline_record()但是它们是和一个名为”sched_switch”的tracer相关的。在这里就不详细的它的执行。它实际上就是在发生进程切换的事件的过程中插入了一些hook函数，然后在这些hook函数再记录下pid对应的cmdline.
+    </div> 
+    <div>
+     &nbsp;
+    </div> 
+    <div>
+     六： 小结
+    </div> 
+    <div>
+     Trace的框架并不复杂，复杂的是框架中还跟具体的tracer有千丝万缕的联系，所以在分析代码时，涉及到具体tracer的部份全部都跳过去了，这些部份只能等分析完对应的tracer操作之后再自行回来对照。另外，trace提供的众多全局标志也比较繁锁，在本文中并没有对这些标志一一进行分析，相关用途可查看相关源码，这部分源码都很简单，自行阅读即可。
+    </div> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

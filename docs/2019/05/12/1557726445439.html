@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Golang net/http包 client浅尝（一） « NotBeCN</title>
+  <meta name="description" content="                        tcp链接       背景    client 包 一次完整请求         client使用     发起流程           Do      send      RoundTrip      dialConn                   背景 ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/1557726445439.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Golang net/http包 client浅尝（一）</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p></p>
+  <div class="toc">
+   <h3>tcp链接</h3>
+   <ul>
+    <li><a href="#_1" rel="nofollow">背景</a></li>
+    <li><a href="#client___3" rel="nofollow">client 包 一次完整请求</a></li>
+    <ul>
+     <li><a href="#client_4" rel="nofollow">client使用</a></li>
+     <li><a href="#_26" rel="nofollow">发起流程</a></li>
+     <ul>
+      <li><a href="#Do_27" rel="nofollow">Do</a></li>
+      <li><a href="#send_63" rel="nofollow">send</a></li>
+      <li><a href="#RoundTrip_99" rel="nofollow">RoundTrip</a></li>
+      <li><a href="#dialConn_251" rel="nofollow">dialConn</a></li>
+     </ul>
+    </ul>
+   </ul>
+  </div>
+  <p></p> 
+  <h1><a id="_1"></a>背景</h1> 
+  <p>了解一下，Go的client是怎么使用TCP链接的。</p> 
+  <h1><a id="client___3"></a>client 包 一次完整请求</h1> 
+  <h2><a id="client_4"></a>client使用</h2> 
+  <pre><code>
+http.Client{
+		Transport: &amp;http.Transport{
+			DialContext: (&amp;net.Dialer{
+				Timeout:   30 * time.Second, //连接超时时间
+				KeepAlive: 30 * time.Second, //连接保持超时时间
+				DualStack: true, //
+			}).DialContext,
+			MaxIdleConnsPerHost:   2,//每个host 最大空闲链接数
+			MaxIdleConns:          100, //client对与所有host最大空闲连接数总和
+			IdleConnTimeout:       90 * time.Second, //空闲连接在连接池中的超时时间
+			TLSHandshakeTimeout:   10 * time.Second, //TLS安全连接握手超时时间
+			ExpectContinueTimeout: 1 * time.Second, //发送完请求到接收到响应头的超时时间
+		},
+		//总的超时时间
+		Timeout: serv.GetTotalTimeout(),
+	}.Do(req)
+</code></pre> 
+  <h2><a id="_26"></a>发起流程</h2> 
+  <h3><a id="Do_27"></a>Do</h3> 
+  <pre><code>func (c *Client) Do(req *Request) (*Response, error) {
+	//...
+	for {
+        //首次不会进入，如果需要重定向，会进入
+		if len(reqs) &gt; 0 {
+			//...
+		}
+
+		reqs = append(reqs, req)
+		var err error
+		var didTimeout func() bool
+		
+		// 调用send
+		if resp, didTimeout, err = c.send(req, deadline); err != nil {
+			if !deadline.IsZero() &amp;&amp; didTimeout() {
+				err = &amp;httpError{
+					err:     err.Error() + " (Client.Timeout exceeded while awaiting headers)",
+					timeout: true,
+				}
+			}
+			return nil, uerr(err)
+		}
+
+		//检查是否需要重定向，如果不需要直接返回
+		var shouldRedirect bool
+		redirectMethod, shouldRedirect, includeBody = redirectBehavior(req.Method, resp, reqs[0])
+		if !shouldRedirect {
+			return resp, nil
+		}
+
+		req.closeBody()
+	}
+}
+</code></pre> 
+  <h3><a id="send_63"></a>send</h3> 
+  <pre><code>
+// didTimeout is non-nil only if err != nil.
+func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
+	//...
+	resp, didTimeout, err = send(req, c.transport(), deadline)
+	//...
+}
+
+
+func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
+
+	//...
+
+	stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
+
+	resp, err = rt.RoundTrip(req)
+	if err != nil {
+		stopTimer()
+
+		//...
+
+		return nil, didTimeout, err
+	}
+	//...
+	return resp, nil, nil
+}
+</code></pre> 
+  <p>setRequestCancel:有三种请求取消的方式，<br> 1.tcp，Transport.CancelRequest<br> 2.Request.Cancel 借助timer<br> 3.Request.Context<br> (后面细说)<br> RoundTrip：transport提供的API，request发起，response接收</p> 
+  <h3><a id="RoundTrip_99"></a>RoundTrip</h3> 
+  <pre><code>func (t *Transport) RoundTrip(req *Request) (*Response, error) {
+	for {
+	
+		...
+		
+		// Get the cached or newly-created connection to either the
+		// host (for http or https), the http proxy, or the http proxy
+		// pre-CONNECTed to https server. In any case, we'll be ready
+		// to send it requests.
+		pconn, err := t.getConn(treq, cm)
+		if err != nil {
+			t.setReqCanceler(req, nil)
+			req.closeBody()
+			return nil, err
+		}
+
+		var resp *Response
+		if pconn.alt != nil {
+			// HTTP/2 path.
+			t.setReqCanceler(req, nil) // not cancelable with CancelRequest
+			resp, err = pconn.alt.RoundTrip(req)
+		} else {
+			resp, err = pconn.roundTrip(treq)
+		}
+		if err == nil {
+			return resp, nil
+		}
+		if !pconn.shouldRetryRequest(req, err) {
+			// Issue 16465: return underlying net.Conn.Read error from peek,
+			// as we've historically done.
+			if e, ok := err.(transportReadFromServerError); ok {
+				err = e.err
+			}
+			return nil, err
+		}
+		
+		...
+		
+	}
+}
+</code></pre> 
+  <p>func (t *Transport) getConn 获取一个tcp链接</p> 
+  <pre><code>
+func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (*persistConn, error) {
+	req := treq.Request
+	trace := treq.trace
+	ctx := req.Context()
+	if trace != nil &amp;&amp; trace.GetConn != nil {
+		trace.GetConn(cm.addr())
+	}
+	if pc, idleSince := t.getIdleConn(cm); pc != nil {
+		if trace != nil &amp;&amp; trace.GotConn != nil {
+			trace.GotConn(pc.gotIdleConnTrace(idleSince))
+		}
+		// set request canceler to some non-nil function so we
+		// can detect whether it was cleared between now and when
+		// we enter roundTrip
+		t.setReqCanceler(req, func(error) {})
+		return pc, nil
+	}
+
+	type dialRes struct {
+		pc  *persistConn
+		err error
+	}
+	dialc := make(chan dialRes)
+
+	// Copy these hooks so we don't race on the postPendingDial in
+	// the goroutine we launch. Issue 11136.
+	testHookPrePendingDial := testHookPrePendingDial
+	testHookPostPendingDial := testHookPostPendingDial
+
+	handlePendingDial := func() {
+		testHookPrePendingDial()
+		go func() {
+			if v := &lt;-dialc; v.err == nil {
+				t.putOrCloseIdleConn(v.pc)
+			}
+			testHookPostPendingDial()
+		}()
+	}
+
+	cancelc := make(chan error, 1)
+	t.setReqCanceler(req, func(err error) { cancelc &lt;- err })
+
+	go func() {
+		pc, err := t.dialConn(ctx, cm)
+		dialc &lt;- dialRes{pc, err}
+	}()
+
+	idleConnCh := t.getIdleConnCh(cm)
+	select {
+	case v := &lt;-dialc:
+		// Our dial finished.
+		if v.pc != nil {
+			if trace != nil &amp;&amp; trace.GotConn != nil &amp;&amp; v.pc.alt == nil {
+				trace.GotConn(httptrace.GotConnInfo{Conn: v.pc.conn})
+			}
+			return v.pc, nil
+		}
+		// Our dial failed. See why to return a nicer error
+		// value.
+		select {
+		case &lt;-req.Cancel:
+			// It was an error due to cancelation, so prioritize that
+			// error value. (Issue 16049)
+			return nil, errRequestCanceledConn
+		case &lt;-req.Context().Done():
+			return nil, req.Context().Err()
+		case err := &lt;-cancelc:
+			if err == errRequestCanceled {
+				err = errRequestCanceledConn
+			}
+			return nil, err
+		default:
+			// It wasn't an error due to cancelation, so
+			// return the original error message:
+			return nil, v.err
+		}
+	case pc := &lt;-idleConnCh:
+		// Another request finished first and its net.Conn
+		// became available before our dial. Or somebody
+		// else's dial that they didn't use.
+		// But our dial is still going, so give it away
+		// when it finishes:
+		handlePendingDial()
+		if trace != nil &amp;&amp; trace.GotConn != nil {
+			trace.GotConn(httptrace.GotConnInfo{Conn: pc.conn, Reused: pc.isReused()})
+		}
+		return pc, nil
+	case &lt;-req.Cancel:
+		handlePendingDial()
+		return nil, errRequestCanceledConn
+	case &lt;-req.Context().Done():
+		handlePendingDial()
+		return nil, req.Context().Err()
+	case err := &lt;-cancelc:
+		handlePendingDial()
+		if err == errRequestCanceled {
+			err = errRequestCanceledConn
+		}
+		return nil, err
+	}
+}
+</code></pre> 
+  <p>getconn里面的实现具体为<br> 开启一个goroutine去建立tcp链接，主程序block在select/case里面，如果先获取到刚建立的tcp链接就直接返回，如果连接池里面有链接，就返回连接池里面的空闲链接，同时将刚才建立的链接在放回连接池。</p> 
+  <h3><a id="dialConn_251"></a>dialConn</h3> 
+  <pre><code>func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (*persistConn, error) {
+	...
+	
+	go pconn.readLoop() //读resp
+	go pconn.writeLoop() //写req
+	return pconn, nil
+}
+
+</code></pre> 
+  <p>再看下pconn.readLoop 的代码可以知道，在读完响应body之后，如果这个链接还是活跃的就放回连接池。</p> 
+  <p>附：</p> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512153952261.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3cxNTI0OTI0MzI5NQ==,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

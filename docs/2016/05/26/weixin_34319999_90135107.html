@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux内核分析笔记----中断和中断处理程序【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/hanyan225/archive/2011/07/17/2108609.html    中断还是中断，我讲了很多次的中断了，今天还是要讲中断，为啥呢？因为在操作系统中，中断是必须要讲的..    &nbsp;&nbsp;&nbsp;&...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/05/26/weixin_34319999_90135107.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux内核分析笔记----中断和中断处理程序【转】</h1>
+    <p class="post-meta">May 26, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p><span>转自：<a href="http://www.cnblogs.com/hanyan225/archive/2011/07/17/2108609.html" rel="nofollow">http://www.cnblogs.com/hanyan225/archive/2011/07/17/2108609.html</a></span></p> 
+   <p><span>中断还是中断，我讲了很多次的中断了，今天还是要讲中断，为啥呢？因为在操作系统中，中断是必须要讲的..</span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 那么什么叫中断呢， 中断还是打断，这样一说你就不明白了。唉，中断还真是有点像打断。我们知道linux管理所有的硬件设备，要做的第一件事先是通信。然后，我们天天在说一句话：处理器的速度跟外围硬件设备的速度往往不在一个数量级上，甚至几个数量级的差别，这时咋办，你总不能让处理器在那里傻等着你硬件做好了告诉我一声吧。这很容易就和日常生活联系起来了，这样效率太低，不如我处理器做别的事情，你硬件设备准备好了，告诉我一声就得了。这个告诉，咱们说的轻松，做起来还是挺费劲啊！怎么着，简单一点，轮训(polling)可能就是一种解决方法，缺点是操作系统要做太多的无用功，在那里傻傻的做着不重要而要重复的工作，这里有更好的办法---中断，这个中断不要紧，关键在于从硬件设备的角度上看，已经实现了从被动为主动的历史性突破。</span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 中断的例子我就不说了，这个很显然啊。分析中断，本质上是一种特殊的电信号，由硬件设备发向处理器，处理器接收到中断后，会马上向操作系统反应此信号的带来，然后就由OS负责处理这些新到来的数据，中断可以随时发生，才不用操心与处理器的时间同步问题。不同的设备对应的中断不同，他们之间的不同从操作系统级来看，差别就在于一个数字标识-----中断号。专业一点就叫中断请求(IRQ)线,通常IRQ都是一些数值量。有些体系结构上，中断好是固定的，有的是动态分配的，这不是问题所在，问题在于特定的中断总是与特定的设备相关联，并且内核要知道这些信息，这才是最关键的,不是么？哈哈.</span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 用书上一句话说：讨论中断就不得不提及异常，异常和中断不一样，它在产生时必须要考虑与处理器的时钟同步，实际上，异常也常常称为同步中断，在处理器执行到由于编程失误而导致的错误指令的时候，或者是在执行期间出现特殊情况，必须要靠内核来处理的时候，处理器就会产生一个异常。因为许多处理器体系结构处理异常以及处理中断的方式类似，因此，内核对它们的处理也很类似。这里的讨论，大部分都是适合异常，这时可以看成是处理器本身产生的中断。</span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 中断产生告诉中断控制器，继续告诉操作系统内核，内核总是要处理的，是不？这里内核会执行一个叫做中断处理程序或中断处理例程的函数。这里特别要说明，中断处理程序是和特定中断相关联的，而不是和设备相关联，如果一个设备可以产生很多中断，这时该设备的驱动程序也就需要准备多个这样的函数。一个中断处理程序是设备驱动程序的一部分，这个我们在linux设备驱动中已经说过，就不说了，后面我也会提到一些。前边说过一个问题：中断是可能随时发生的，因此必须要保证中断处理程序也能随时执行，中断处理程序也要尽可能的快速执行，只有这样才能保证尽可能快地恢复中断代码的执行。</span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 但是，不想说但是，大学第一节逃课的情形现在仍记忆犹新：又想马儿跑，又想马儿不吃草，怎么可能！但现实问题或者不像想象那样悲观，我们的中断说不定还真有奇迹发生。这个奇迹就是将中断处理切为两个部分或两半。中断处理程序上半部(top half)---接收到一个中断，它就立即开始开始执行，但只做严格时限的工作，这些工作都是在所有中断被禁止的情况下完成的。同时，能够被允许稍后完成的工作推迟到下半部(bottom half)去，此后，下半部会被执行，通常情况下，下半部都会在中断处理程序返回时立即执行。我会在后面谈论linux所提供的是实现下半部的各种机制。</span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 说了那么多，现在开始第一个问题：如何注册一个中断处理程序。我们在linux驱动程序理论里讲过，通过一下函数可注册一个中断处理程序：</span></p> 
+   <div> 
+    <div class="syntaxhighlighter cpp"> 
+     <table border="0">
+      <tbody>
+       <tr>
+        <td class="gutter"> 
+         <div class="line number1 index0 alt2">
+          1
+         </div> </td> 
+        <td class="code"> 
+         <div> 
+          <div class="line number1 index0 alt2"> 
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">request_irq(unsigned </code>
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">irq,irqreturn_t (*handler)(</code>
+           <code class="cpp color1 bold">int</code>
+           <code class="cpp plain">, </code>
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">*,</code>
+           <code class="cpp keyword bold">struct</code>&nbsp;
+           <code class="cpp plain">pt_regs *),unsigned </code>
+           <code class="cpp color1 bold">long</code>&nbsp;
+           <code class="cpp plain">irqflags,</code>
+           <code class="cpp keyword bold">const</code>&nbsp;
+           <code class="cpp color1 bold">char</code>&nbsp;
+           <code class="cpp plain">* devname,</code>
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">*dev_id)</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p><span><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;有关这个中断的一些参数说明，我就不说了，一旦注册了一个中断处理程序，就肯定会有释放中断处理，这是调用下列函数：</span></span></p> 
+   <div> 
+    <div class="syntaxhighlighter cpp"> 
+     <table border="0">
+      <tbody>
+       <tr>
+        <td class="gutter"> 
+         <div class="line number1 index0 alt2">
+          1
+         </div> </td> 
+        <td class="code"> 
+         <div> 
+          <div class="line number1 index0 alt2"> 
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">free_irq(unsigned </code>
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">irq, </code>
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">*dev_id)</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p><span><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;这里需要说明的就是要必须要从进程上下文调用free_irq().好了，现在给出一个例子来说明这个过程,首先声明一个中断处理程序：</span></span></p> 
+   <div> 
+    <div class="syntaxhighlighter cpp"> 
+     <table border="0">
+      <tbody>
+       <tr>
+        <td class="gutter"> 
+         <div class="line number1 index0 alt2">
+          1
+         </div> </td> 
+        <td class="code"> 
+         <div> 
+          <div class="line number1 index0 alt2"> 
+           <code class="cpp keyword bold">static</code>&nbsp;
+           <code class="cpp plain">irqreturn_t intr_handler(</code>
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">irq, </code>
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">*dev_id, </code>
+           <code class="cpp keyword bold">struct</code>&nbsp;
+           <code class="cpp plain">pt_regs *regs)</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p><span><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;注意：这里的类型和前边说到的request_irq()所要求的参数类型是匹配的，参数不说了。对于返回值，中断处理程序的返回值是一个特殊类型，irqrequest_t,可能返回两个特殊的值：IRQ_NONE和IRQ_HANDLED.当中断处理程序检测到一个中断时，但该中断对应的设备并不是在注册处理函数期间指定的产生源时，返回IRQ_NONE;当中断处理程序被正确调用，且确实是它所对应的设备产生了中断时，返回IRQ_HANDLED.C此外，也可以使用宏IRQ_RETVAL(x)，如果x非0值，那么该宏返回IRQ_HANDLED,否则，返回IRQ_NONE.利用这个特殊的值，内核可以知道设备发出的是否是一种虚假的(未请求)中断。如果给定中断线上所有中断处理程序返回的都是IRQ_NONE，那么，内核就可以检测到出了问题。最后，需要说明的就是那个static了，中断处理程序通常会标记为static，因为它从来不会被别的文件中的代码直接调用。另外，中断处理程序是无需重入的，当一个给定的中断处理程序正在执行时，相应的中断线在所有处理器上都会被屏蔽掉，以防止在同一个中断上接收另外一个新的中断。通常情况下，所有其他的中断都是打开的，所以这些不同中断线上的其他中断都能被处理，但当前中断总是被禁止的。由此可见，同一个中断处理程序绝对不会被同时调用以处理嵌套的中断。&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 下面要说到的一个问题是和共享的中断处理程序相关的。共享和非共享在注册和运行方式上比较相似的。差异主要有以下几点：</span></p> 
+   <table border="1">
+    <tbody>
+     <tr>
+      <td valign="top"><span>1.request_irq()的参数flags必须设置为SA_SHIRQ标志。<br>2.对每个注册的中断处理来说，dev_id参数必须唯一。指向任一设备结构的指针就可以满足这一要求。通常会选择设备结构，因为它是唯一的，而且中<br>&nbsp;&nbsp; 断处理程序可能会用到它，不能给共享的处理程序传递NULL值。<br>3.中断处理程序必须能够区分它的设备是否真的产生了中断。这既需要硬件的支持，也需要处理程序有相关的处理逻辑。如果硬件不支持这一功能，那中<br>&nbsp;&nbsp; 断处理程序肯定会束手无策，它根本没法知道到底是否与它对应的设备发生了中断，还是共享这条中断线的其他设备发出了中断。</span></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 在指定SA_SHIRQ标志以调用request_irq()时，只有在以下两种情况下才能成功：中断当前未被注册或者在该线上的所有已注册处理程序都指定了SA_SHIRQ.A。注意，在这一点上2.6与以前的内核是不同的，共享的处理程序可以混用SA_INTERRUPT.&nbsp; 一旦内核接收到一个中断后，它将依次调用在该中断线上注册的每一个处理程序。因此一个处理程序必须知道它是否应该为这个中断负责。如果与它相关的设备并没有产生中断，那么中断处理程序应该立即退出，这需要硬件设备提供状态寄存器(或类似机制)，以便中断处理程序进行检查。毫无疑问，大多数设备都提这种功能。</span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 当执行一个中断处理程序或下半部时，内核处于中断上下文(interrupt context)中。对比进程上下文，进程上下文是一种内核所处的操作模式，此时内核代表进程执行，可以通过current宏关联当前进程。此外，因为进程是进程上下文的形式连接到内核中，因此，在进程上下文可以随时休眠，也可以调度程序。但中断上下文却完全不是这样，它可以休眠，因为我们不能从中断上下文中调用函数。如果一个函数睡眠，就不能在中断处理程序中使用它，这也是对什么样的函数能在中断处理程序中使用的限制。还需要说明一点的是，中断处理程序没有自己的栈，相反，它共享被中断进程的内核栈，如果没有正在运行的进程，它就使用idle进程的栈。因为中断程序共享别人的堆栈，所以它们在栈中获取空间时必须非常节省。内核栈在32位体系结构上是8KB，在64位体系结构上是16KB.执行的进程上下文和产生的所有中断都共享内核栈。<br><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 下面给出中断从硬件到内核的路由过程(截图选自liuux内核分析与设计p61)，然后做出总结：</span></span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<img title="中断处理路由" src="https://yqfile.alicdn.com/img_4915af7e2bd1fbd19b7f043da9bd7c69.jpg" alt="中断处理路由" width="508" height="226"></span></p> 
+   <p><span><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 图一&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 中断从硬件到内核的路由</span></span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 上面的图内部说明已经很明确了，我这里就不在详谈。在内核中，中断的旅程开始于预定义入口点，这类似于系统调用。对于每条中断线，处理器都会跳到对应的一个唯一的位置。这样，内核就可以知道所接收中断的IRQ号了。初始入口点只是在栈中保存这个号，并存放当前寄存器的值(这些值属于被中断的任务)；然后，内核调用函数do_IRQ().从这里开始，大多数中断处理代码是用C写的。do_IRQ()的声明如下：</span></p> 
+   <div> 
+    <div class="syntaxhighlighter cpp"> 
+     <table border="0">
+      <tbody>
+       <tr>
+        <td class="gutter"> 
+         <div class="line number1 index0 alt2">
+          1
+         </div> </td> 
+        <td class="code"> 
+         <div> 
+          <div class="line number1 index0 alt2"> 
+           <code class="cpp plain">unsigned </code>
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">do_IRQ(</code>
+           <code class="cpp keyword bold">struct</code>&nbsp;
+           <code class="cpp plain">pt_regs regs)</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 因为C的调用惯例是要把函数参数放在栈的顶部，因此pt_regs结构包含原始寄存器的值，这些值是以前在汇编入口例程中保存在栈上的。中断的值也会得以保存，所以，do_IRQ()可以将它提取出来，X86的代码为：</span></p> 
+   <div> 
+    <div class="syntaxhighlighter cpp"> 
+     <table border="0">
+      <tbody>
+       <tr>
+        <td class="gutter"> 
+         <div class="line number1 index0 alt2">
+          1
+         </div> </td> 
+        <td class="code"> 
+         <div> 
+          <div class="line number1 index0 alt2"> 
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">irq = regs.orig_eax &amp; 0xff</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 计算出中断号后，do_IRQ()对所接收的中断进行应答，禁止这条线上的中断传递。在普通的PC机器上，这些操作是由mask_and_ack_8259A()来完成的，该函数由do_IRQ()调用。接下来，do_IRQ()需要确保在这条中断线上有一个有效的处理程序，而且这个程序已经启动但是当前没有执行。如果这样的话， do_IRQ()就调用handle_IRQ_event()来运行为这条中断线所安装的中断处理程序，有关处理例子，可以参考linux内核设计分析一书，我这里就不细讲了。在handle_IRQ_event()中，首先是打开处理器中断，因为前面已经说过处理器上所有中断这时是禁止中断(因为我们说过指定SA_INTERRUPT)。接下来，每个潜在的处理程序在循环中依次执行。如果这条线不是共享的，第一次执行后就退出循环，否则，所有的处理程序都要被执行。之后，如果在注册期间指定了SA_SAMPLE_RANDOM标志，则还要调用函数add_interrupt_randomness(),这个函数使用中断间隔时间为随机数产生熵。最后，再将中断禁止(do_IRQ()期望中断一直是禁止的)，函数返回。该函数做清理工作并返回到初始入口点，然后再从这个入口点跳到函数ret_from_intr().该函数类似初始入口代码，以汇编编写，它会检查重新调度是否正在挂起，如果重新调度正在挂起，而且内核正在返回用户空间(也就是说，中断了用户进程)，那么schedule()被调用。如果内核正在返回内核空间(也就是中断了内核本身)，只有在preempt_count为0时，schedule()才会被调用(否则，抢占内核是不安全的)。在schedule()返回之前，或者如果没有挂起的工作，那么，原来的寄存器被恢复，内核恢复到曾经中断的点。在x86上，初始化的汇编例程位于arch/i386/kernel/entry.S,C方法位于arch/i386/kernel/irq.c其它支持的结构类似。</span></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 下边给出PC机上位于/proc/interrupts文件的输出结果，这个文件存放的是系统中与中断相关的统计信息，这里就解释一下这个表：</span></p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<img title="interruptinfo" src="https://yqfile.alicdn.com/img_95f06f06037d0b01d787b2dd6796008d.jpg" alt="interruptinfo" width="425" height="166"></p> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 上面是这个文件的输入，第一列是中断线(中断号)，第二列是一个接收中断数目的计数器，第三列是处理这个中断的中断控制器，最后一列是与这个中断有关的设备名字，这个名字是通过参数devname提供给函数request_irq()的。最后，如果中断是共享的，则这条中断线上注册的所有设备都会列出来，如4号中断。</span></p> 
+   <p><span><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Linux内核给我们提供了一组接口能够让我们控制机器上的中断状态，这些接口可以在&lt;asm/system.h&gt;和&lt;asm/irq.h&gt;中找到。一般来说，控制中断系统的原因在于需要提供同步，通过禁止中断，可以确保某个中断处理程序不会抢占当前的代码。此外，禁止中断还可以禁止内核抢占。然而，不管是禁止中断还是禁止内核抢占，都没有提供任何保护机制来防止来自其他处理器的并发访问。Linux支持多处理器，因此，内核代码一般都需要获取某种锁，防止来自其他处理器对共享数据的并发访问，获取这些锁的同时也伴随着禁止本地中断。锁提供保护机制，防止来自其他处理器的并发访问，而禁止中断提供保护机制，则是防止来自其他中断处理程序的并发访问。</span></span></p> 
+   <p><span><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;在linux设备驱动理论帖里详细介绍过linux的中断操作接口，这里就大致过一下，禁止/使能本地中断(仅仅是当前处理器)用：</span></span></p> 
+   <div> 
+    <div class="syntaxhighlighter cpp"> 
+     <table border="0">
+      <tbody>
+       <tr>
+        <td class="gutter"> 
+         <div class="line number1 index0 alt2">
+          1
+         </div> 
+         <div class="line number2 index1 alt1">
+          2
+         </div> </td> 
+        <td class="code"> 
+         <div> 
+          <div class="line number1 index0 alt2">
+           <code class="cpp plain">local_irq_disable();</code>
+          </div> 
+          <div class="line number2 index1 alt1">
+           <code class="cpp plain">local_irq_enable();</code>
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 如果在调用local_irq_disable()之前已经禁止了中断，那么该函数往往会带来潜在的危险，同样的local_irq_enable()也存在潜在的危险，因为它将无条件的激活中断，尽管中断可能在开始时就是关闭的。所以我们需要一种机制把中断恢复到以前的状态而不是简单地禁止或激活，内核普遍关心这点，是因为内核中一个给定的代码路径可以在中断激活饿情况下达到，也可以在中断禁止的情况下达到，这取决于具体的调用链。面对这种情况，在禁止中断之前保存中断系统的状态会更加安全一些。相反，在准备激活中断时，只需把中断恢复到它们原来的状态：</span></p> 
+   <div> 
+    <div class="syntaxhighlighter cpp"> 
+     <table border="0">
+      <tbody>
+       <tr>
+        <td class="gutter"> 
+         <div class="line number1 index0 alt2">
+          1
+         </div> 
+         <div class="line number2 index1 alt1">
+          2
+         </div> 
+         <div class="line number3 index2 alt2">
+          3
+         </div> </td> 
+        <td class="code"> 
+         <div> 
+          <div class="line number1 index0 alt2"> 
+           <code class="cpp plain">unsigned </code>
+           <code class="cpp color1 bold">long</code>&nbsp;
+           <code class="cpp plain">flags;</code> 
+          </div> 
+          <div class="line number2 index1 alt1">
+           <code class="cpp plain">local_irq_save(flags);</code>
+          </div> 
+          <div class="line number3 index2 alt2">
+           <code class="cpp plain">local_irq_restore(flags);</code>
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 参数包含具体体系结构的数据，也就是包含中断系统的状态。至少有一种体系结构把栈信息与值相结合(SPARC),因此flags不能传递给另一个函数(换句话说，它必须驻留在同一个栈帧中)，基于这个原因，对local_irq_save()的调用和local_irq_restore()的调用必须在同一个函数中进行。前面的所有的函数既可以在中断中调用，也可以在进程上下文使用。</span></p> 
+   <p><span><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;前面我提到过禁止整个CPU上所有中断的函数。但有时候，好奇的我就想，我干么没要禁止掉所有的中断，有时，我只需要禁止系统中一条特定的中断就可以了(屏蔽掉一条中断线)，这就有了我下面给出的接口：</span></span></p> 
+   <div> 
+    <div class="syntaxhighlighter cpp"> 
+     <table border="0">
+      <tbody>
+       <tr>
+        <td class="gutter"> 
+         <div class="line number1 index0 alt2">
+          1
+         </div> 
+         <div class="line number2 index1 alt1">
+          2
+         </div> 
+         <div class="line number3 index2 alt2">
+          3
+         </div> 
+         <div class="line number4 index3 alt1">
+          4
+         </div> </td> 
+        <td class="code"> 
+         <div> 
+          <div class="line number1 index0 alt2"> 
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">disable_irq(unsigned </code>
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">irq);</code> 
+          </div> 
+          <div class="line number2 index1 alt1"> 
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">disable_irq_nosync(unsigned </code>
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">irq);</code> 
+          </div> 
+          <div class="line number3 index2 alt2"> 
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">enable_irq(unsigned </code>
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">irq);</code> 
+          </div> 
+          <div class="line number4 index3 alt1"> 
+           <code class="cpp keyword bold">void</code>&nbsp;
+           <code class="cpp plain">synchronise_irq(unsigned </code>
+           <code class="cpp color1 bold">int</code>&nbsp;
+           <code class="cpp plain">irq);</code> 
+          </div> 
+         </div> </td> 
+       </tr>
+      </tbody>
+     </table>
+    </div> 
+   </div> 
+   <p><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 对有关函数的说明和注意，我前边已经说的很清楚了，这里飘过。另外，禁止多个中断处理程序共享的中断线是不合适的。禁止中断线也就禁止了这条线上所有设备的中断传递，因此，用于新设备的驱动程序应该倾向于不使用这些接口。另外，我们也可以通过宏定义在&lt;asm/system.h&gt;中的宏<span>irqs_disable()来获取中断的状态，如果中断系统被禁止，则它返回非0，否则，返回0；用定义在&lt;asm/hardirq.h&gt;中的两个宏in_interrupt()和in_irq()来检查内核的当前上下文的接口。由于代码有时要做一些像睡眠这样只能从进程上下文做的事，这时这两个函数的价值就体现出来了。</span></span></p> 
+   <p><span><span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;最后，作为对这篇博客的总结，这里给出我前边提到的用于控制中断的方法列表：</span></span></p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<img title="interruptslist" src="https://yqfile.alicdn.com/img_a9ae58139a263eb47778f2e8d81e257e.jpg" alt="interruptslist" width="546" height="164"></p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

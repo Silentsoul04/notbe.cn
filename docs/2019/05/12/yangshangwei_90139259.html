@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>白话Elasticsearch02- filter执行原理bitset机制与caching机制 « NotBeCN</title>
+  <meta name="description" content="                        文章目录       概述    步骤         Step1 在倒排索引中查找搜索串，获取document list     Step2 为每个在倒排索引中搜索到的结果，构建一个bitset .     Step3 遍历每个过滤条件对应的bitset，优先从最...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/yangshangwei_90139259.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">白话Elasticsearch02- filter执行原理bitset机制与caching机制</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-dracula"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p></p>
+  <div class="toc">
+   <h3>文章目录</h3>
+   <ul>
+    <li><a href="#_2" rel="nofollow">概述</a></li>
+    <li><a href="#_11" rel="nofollow">步骤</a></li>
+    <ul>
+     <li><a href="#Step1_document_list_32" rel="nofollow">Step1 在倒排索引中查找搜索串，获取document list</a></li>
+     <li><a href="#Step2__font_colorredbitset__70" rel="nofollow">Step2 <font color="red">为每个在倒排索引中搜索到的结果，构建一个bitset .</font></a></li>
+     <li><a href="#Step3_bitsetdocument_97" rel="nofollow">Step3 遍历每个过滤条件对应的bitset，优先从最稀疏的开始搜索，查找满足所有条件的document</a></li>
+     <li><a href="#Step4__caching__bitsetquery256querybitset_129" rel="nofollow">Step4 caching bitset，跟踪query，在最近256个query中超过一定次数的过滤条件，缓存其bitset</a></li>
+     <li><a href="#Step5__filterquery_150" rel="nofollow">Step5 filter大部分情况下来说，在query之前执行，先尽量过滤掉尽可能多的数据</a></li>
+     <li><a href="#Step6_documentcached_bitset_160" rel="nofollow">Step6 如果document有新增或修改，那么cached bitset会被自动更新</a></li>
+     <li><a href="#Step7_filtercached_bitset_172" rel="nofollow">Step7 以后只要是有相同的filter条件的，会直接来使用这个过滤条件对应的cached bitset</a></li>
+    </ul>
+   </ul>
+  </div>
+  <p></p> 
+  <h1><a id="_2"></a>概述</h1> 
+  <p>继续跟中华石杉老师学习ES，第二篇</p> 
+  <p>课程地址： <a href="https://www.roncoo.com/view/55" rel="nofollow">https://www.roncoo.com/view/55</a></p> 
+  <p><a href="https://blog.csdn.net/yangshangwei/article/details/90116340" rel="nofollow">白话Elasticsearch01- 使用term filter来搜索数据</a>中演示了 term filter的用法，这里我们来剖析下执行原理</p> 
+  <hr> 
+  <h1><a id="_11"></a>步骤</h1> 
+  <ol> 
+   <li> <p>在倒排索引中查找搜索串，获取document list</p> </li> 
+   <li> <p><font color="red">为每个在倒排索引中搜索到的结果，构建一个bitset .</font></p> </li> 
+   <li> <p>遍历每个过滤条件对应的bitset，优先从最稀疏的开始搜索，查找满足所有条件的document</p> </li> 
+   <li> <p>caching bitset，跟踪query，在最近256个query中超过一定次数的过滤条件，缓存其bitset。对于小segment（&lt;1000，或&lt;3%），不缓存bitset。</p> </li> 
+   <li> <p>filter大部分情况下来说，在query之前执行，先尽量过滤掉尽可能多的数据</p> </li> 
+   <li> <p>如果document有新增或修改，那么cached bitset会被自动更新</p> </li> 
+   <li> <p>以后只要是有相同的filter条件的，会直接来使用这个过滤条件对应的cached bitset</p> </li> 
+  </ol> 
+  <p>接下来逐条来说一下过程</p> 
+  <hr> 
+  <h2><a id="Step1_document_list_32"></a>Step1 在倒排索引中查找搜索串，获取document list</h2> 
+  <p>举个例子 ， 上节中用到的 postDate字段，假设有3条数据，在document1 、document2、document3中的分布情况</p> 
+  <table> 
+   <thead> 
+    <tr> 
+     <th>postDate</th> 
+     <th>doc1</th> 
+     <th>doc2</th> 
+     <th>doc3</th> 
+    </tr> 
+   </thead> 
+   <tbody> 
+    <tr> 
+     <td>2017-01-01</td> 
+     <td>存在</td> 
+     <td>存在</td> 
+     <td>–</td> 
+    </tr> 
+    <tr> 
+     <td>2017-02-02</td> 
+     <td>–</td> 
+     <td>存在</td> 
+     <td>存在</td> 
+    </tr> 
+    <tr> 
+     <td>2017-03-03</td> 
+     <td>存在</td> 
+     <td>存在</td> 
+     <td>存在</td> 
+    </tr> 
+   </tbody> 
+  </table>
+  <p>filter : 2017-02-02</p> 
+  <p>比如：</p> 
+  <pre><code class="prism language-json"><span class="token constant">GET</span> <span class="token operator">/</span>forum<span class="token operator">/</span>article<span class="token operator">/</span>_search
+<span class="token punctuation">{</span>
+  <span class="token string">"query"</span><span class="token punctuation">:</span> <span class="token punctuation">{</span>
+    <span class="token string">"constant_score"</span><span class="token punctuation">:</span> <span class="token punctuation">{</span>
+      <span class="token string">"filter"</span><span class="token punctuation">:</span> <span class="token punctuation">{</span>
+        <span class="token string">"term"</span><span class="token punctuation">:</span> <span class="token punctuation">{</span>
+          <span class="token string">"postDate"</span><span class="token punctuation">:</span> <span class="token string">"2017-02-02"</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+
+</code></pre> 
+  <p>发现2017-02-02 对应的 document list 为 doc2 和 doc3 ，这样就完成了第一步，取到了document list</p> 
+  <hr> 
+  <h2><a id="Step2__font_colorredbitset__70"></a>Step2 <font color="red">为每个在倒排索引中搜索到的结果，构建一个bitset .</font></h2> 
+  <p><strong>这个地方很关键，非常重要。</strong></p> 
+  <p>上一步中，获取到了 document list , ES 会 根据这些document list 构建一个 bitset .</p> 
+  <p><font color="brown" size="4">啥是bitset ? bitset是一个二进制的数组， 数组的每个元素要么是0要么是1 ， 0 表示不匹配，1 表示匹配。</font></p> 
+  <p><font color="red">刚才filter 2017-02-02 的 document list就可以表示为 [0,1,1]</font></p> 
+  <p>表示<br> doc1 —&gt;0 , 不匹配该filter<br> doc2—&gt;1 ,匹配该filter<br> doc3----&gt; ,匹配该filter</p> 
+  <p>也就是说 这个filter，在整个document中（<strong>假设该document只有3条记录</strong>），对应的bitset就是 [0,1,1]</p> 
+  <p>使用二进制数组来标识有什么好处呢？ ES本着使用尽可能简单的su数据结构来实现复杂的功能，节省空间，提高性能。</p> 
+  <hr> 
+  <h2><a id="Step3_bitsetdocument_97"></a>Step3 遍历每个过滤条件对应的bitset，优先从最稀疏的开始搜索，查找满足所有条件的document</h2> 
+  <p><font color="blue">在一个search请求中，可以有多个filter条件，每个filter条件都会对应一个bitset。</font></p> 
+  <p><font color="blue">再获取到每个filter对应的bitset后 ,遍历每个filter条件对应的bitset，先从最稀疏的开始遍历。</font></p> 
+  <p>啥叫稀疏？ 举个例子</p> 
+  <p>[0, 0, 0, 1, 0, 0]<br> [0, 1, 0, 1, 0, 1]</p> 
+  <p>上面两个filter对应的匹配结果状况，第一个比较稀疏（不匹配的较多，因为0表示不匹配，也就是0越多越稀疏）</p> 
+  <p><font color="blue">先遍历比较稀疏的bitset，就可以先过滤掉尽可能多的数据</font></p> 
+  <p><font color="blue">遍历所有的bitset，找到匹配所有filter条件的doc</font></p> 
+  <p>举个例子请求：filter，postDate=2017-01-01，userID=1</p> 
+  <p>postDate: [0, 0, 1, 1, 0, 0]<br> userID: [0, 1, 0, 1, 0, 1]</p> 
+  <p>遍历完两个bitset之后，找到的匹配所有条件的doc，第4个doc均为1 ，均匹配这两个filter ，就是doc4</p> 
+  <p>就可以将document作为结果返回给client了</p> 
+  <hr> 
+  <h2><a id="Step4__caching__bitsetquery256querybitset_129"></a>Step4 caching bitset，跟踪query，在最近256个query中超过一定次数的过滤条件，缓存其bitset</h2> 
+  <p><font color="brown">比如postDate=2017-01-01这个条件的filter，对应的bitset[0, 0, 1, 1, 0, 0]，可以缓存在内存中，这样下次如果再有这个条件过来的时候，就不用重新扫描倒排索引，反复生成bitset，直接在内存中获取该filter对应的bitset即可，这样做可以大幅度提升性能。</font></p> 
+  <p><font color="blue">在最近的256个filter中，有某个filter超过了一定的次数，次数不固定，就会自动缓存这个filter对应的bitset</font></p> 
+  <p>filter针对小segment获取到的结果，可以不缓存，多小的segment算小segment呢？ segment记录数&lt;1000，或者segment大小&lt;index总大小的3%</p> 
+  <p><font color="blue">不缓存小segment的理由：</font></p> 
+  <ul> 
+   <li>1.segment数据量很小，此时哪怕是扫描也很快；</li> 
+   <li>2.segment会在后台自动合并，小segment很快就会跟其他小segment合并成大segment，此时就缓存也没有什么意义，segment很快就消失了</li> 
+  </ul> 
+  <p><font color="red" size="4">filter比query的好处就在于会caching，但是之前不知道caching的是什么东西，实际上并不是一个filter返回的完整的doc list数据结果。而是filter bitset缓存起来。下次不用扫描倒排索引了。</font></p> 
+  <hr> 
+  <h2><a id="Step5__filterquery_150"></a>Step5 filter大部分情况下来说，在query之前执行，先尽量过滤掉尽可能多的数据</h2> 
+  <p>query：是会计算doc对搜索条件的relevance score，还会根据这个score去排序<br> filter：只是简单过滤出想要的数据，不计算relevance score，也不排序</p> 
+  <hr> 
+  <h2><a id="Step6_documentcached_bitset_160"></a>Step6 如果document有新增或修改，那么cached bitset会被自动更新</h2> 
+  <p>举个例子<br> 我们的article document中有4条数据，postDate=2017-01-01这个filter对应的bitset为 [0, 0, 1, 0] ， 第三条数据符合这个条件</p> 
+  <p><font color="blue">我们又新增了一条数据，article document加上id=5 ,postDate=2017-01-01，会自动更新到postDate=2017-01-01这个filter的bitset中，全自动，缓存会自动更新。postDate=2017-01-01的bitset就自动变为了[0, 0, 1, 0, 1]</font></p> 
+  <p>如果我们修改了数值呢？ 假设修改document，id=1为postDate=2016-12-30，修改为postDate-2017-01-01，此时也会自动更新bitset，变为[1, 0, 1, 0, 1]</p> 
+  <hr> 
+  <h2><a id="Step7_filtercached_bitset_172"></a>Step7 以后只要是有相同的filter条件的，会直接来使用这个过滤条件对应的cached bitset</h2> 
+  <p><font color="blue">以后只要是有相同的filter条件的，会直接来使用这个过滤条件对应的cached bitset</font></p> 
+  <hr> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

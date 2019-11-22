@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>秒杀功能（6）RabbitMQ « NotBeCN</title>
+  <meta name="description" content="                  这篇讲解的内容较多。先解决业务问题再解决性能问题。   业务问题   之前的代码中有两类业务问题：       超卖；    若一个用户用两个平台同时秒杀某一商品，可能会出现该用户秒杀两件商品的情况。      这两个问题虽然业务问题很大，但代码改动特别小。       超卖 ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/Serena0814_90137835.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">秒杀功能（6）RabbitMQ</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>这篇讲解的内容较多。先解决业务问题再解决性能问题。</p> 
+  <h3><a id="_1"></a>业务问题</h3> 
+  <p>之前的代码中有两类业务问题：</p> 
+  <ol> 
+   <li>超卖；</li> 
+   <li>若一个用户用两个平台同时秒杀某一商品，可能会出现该用户秒杀两件商品的情况。</li> 
+  </ol> 
+  <p>这两个问题虽然业务问题很大，但代码改动特别小。</p> 
+  <ul> 
+   <li>超卖<br> 这里利用数据库本身的锁来解决，只需要改动dao层代码，修改GoodsDao的代码。</li> 
+  </ul> 
+  <pre><code class="prism language-javascript"><span class="token comment">//改动前的代码</span>
+@<span class="token function">Update</span><span class="token punctuation">(</span><span class="token string">"update miaosha_goods set stock_count = stock_count - 1 where goods_id = #{goodsId}"</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> int <span class="token function">reduceStock</span><span class="token punctuation">(</span>MiaoshaGoods g<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//改动后的代码</span>
+@<span class="token function">Update</span><span class="token punctuation">(</span><span class="token string">"update miaosha_goods set stock_count = stock_count - 1 where goods_id = #{goodsId} and stock_count &gt; 0"</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> int <span class="token function">reduceStock</span><span class="token punctuation">(</span>MiaoshaGoods g<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//利用数据库的锁来保证不会卖超（数据库本身会保证不会有两个线程同时改一条记录）</span>
+</code></pre> 
+  <ul> 
+   <li>一个用户秒杀多件商品的情况<br> 在数据库层面：把用户id和商品id组合设置成唯一索引，来防止一个用户多秒杀商品的情况；<br> 在缓存中：把用户id和商品id组合成一个键，下单前查询该键是否存在，若不存在则下单，并在缓存里存入键值对（值是秒杀订单），这样比直接查询数据库要快些。</li> 
+  </ul> 
+  <pre><code class="prism language-javascript">@Service
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">OrderService</span> <span class="token punctuation">{</span>
+
+    @Autowired
+    OrderDao orderDao<span class="token punctuation">;</span>
+
+    @Autowired
+    RedisService redisService<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> MiaoshaOrder <span class="token function">getMiaoshaOrderByUserIdGoodsId</span><span class="token punctuation">(</span>long userId<span class="token punctuation">,</span> long goodsId<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+       <span class="token comment">// return orderDao.getMiaoshaOrderByUserIdGoodsId(userId, goodsId);</span>
+        <span class="token comment">//在缓存中查</span>
+        <span class="token keyword">return</span> redisService<span class="token punctuation">.</span><span class="token keyword">get</span><span class="token punctuation">(</span>OrderKey<span class="token punctuation">.</span>getMiaoshaOrderByUidGid<span class="token punctuation">,</span> <span class="token string">""</span> <span class="token operator">+</span> userId <span class="token operator">+</span> <span class="token string">"_"</span> <span class="token operator">+</span> goodsId<span class="token punctuation">,</span> MiaoshaOrder<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    @Transactional
+    <span class="token keyword">public</span> OrderInfo <span class="token function">createOrder</span><span class="token punctuation">(</span>MiaoshaUser user<span class="token punctuation">,</span> GoodsVo goods<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        OrderInfo orderInfo <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">OrderInfo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setCreateDate</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Date</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setDeliveryAddrId</span><span class="token punctuation">(</span><span class="token number">0</span>L<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setGoodsCount</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setGoodsId</span><span class="token punctuation">(</span>goods<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setGoodsName</span><span class="token punctuation">(</span>goods<span class="token punctuation">.</span><span class="token function">getGoodsName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setGoodsPrice</span><span class="token punctuation">(</span>goods<span class="token punctuation">.</span><span class="token function">getMiaoshaPrice</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setOrderChannel</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setStatus</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderInfo<span class="token punctuation">.</span><span class="token function">setUserId</span><span class="token punctuation">(</span>user<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderDao<span class="token punctuation">.</span><span class="token function">insert</span><span class="token punctuation">(</span>orderInfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        MiaoshaOrder miaoshaOrder <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">MiaoshaOrder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        miaoshaOrder<span class="token punctuation">.</span><span class="token function">setGoodsId</span><span class="token punctuation">(</span>goods<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        miaoshaOrder<span class="token punctuation">.</span><span class="token function">setOrderId</span><span class="token punctuation">(</span>orderInfo<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        miaoshaOrder<span class="token punctuation">.</span><span class="token function">setUserId</span><span class="token punctuation">(</span>user<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        orderDao<span class="token punctuation">.</span><span class="token function">insertMiaoshaOrder</span><span class="token punctuation">(</span>miaoshaOrder<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//放入缓存中</span>
+        redisService<span class="token punctuation">.</span><span class="token keyword">set</span><span class="token punctuation">(</span>OrderKey<span class="token punctuation">.</span>getMiaoshaOrderByUidGid<span class="token punctuation">,</span> <span class="token string">""</span> <span class="token operator">+</span> user<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"_"</span> <span class="token operator">+</span> goods<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> miaoshaOrder<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> orderInfo<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>可以看到，代码中就改动了两点，一是查询重复订单时是在缓存中查，第二点是，在数据库中创建秒杀订单和订单详情后，会在缓存中插入用户id和商品id结合的键（值是秒杀订单），为之后在缓存中查找做准备。</p> 
+  <h3><a id="_62"></a>性能问题</h3> 
+  <p>秒杀系统的性能瓶颈一般是在对数据库的访问上，若能减少对数据的访问，就能在很大程度上提高并发量。<br> 大致的思路是：</p> 
+  <ol> 
+   <li>Redis预减库存减少数据库的访问；</li> 
+   <li>内存标记减少Redis访问；</li> 
+   <li>请求先入队缓冲，异步下单，增强用户体验。</li> 
+  </ol> 
+  <p>具体的代码流程是：</p> 
+  <ol> 
+   <li>系统初始化，把商品库存数量加载到Redis中；</li> 
+   <li>收到请求，先在内存标记上判断商品是否秒杀完毕，若没有，则进入下一步；</li> 
+   <li>Redis预减库存，库存不足，直接返回，否则进入下一步；</li> 
+   <li>Redis中判断是否重复下单，若没有进入下一步；</li> 
+   <li>请求入队，前端页面立即返回排队中；</li> 
+   <li>请求出队，数据库中判断库存、缓存中判断是否重复秒杀，若都成功进入下一步；</li> 
+   <li>数据库中减少库存，数据库中生成订单，在缓存中生成用户和商品的键以便之后验证是否重复下单；</li> 
+   <li>客户端轮询（前端中实现），是否秒杀成功。</li> 
+  </ol> 
+  <p><strong>Controller层</strong><br> 在这部分主要完成：</p> 
+  <ol> 
+   <li>系统的初始化，把秒杀商品的库存数量加载到Redis中；</li> 
+   <li>内存中判断商品是否秒杀完、Redis预减库存、判断是否重复秒杀、入队操作。</li> 
+  </ol> 
+  <pre><code class="prism language-javascript">@Controller
+@<span class="token function">RequestMapping</span><span class="token punctuation">(</span><span class="token string">"/miaosha"</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">MiaoshaController</span> <span class="token keyword">implements</span> <span class="token class-name">InitializingBean</span> <span class="token punctuation">{</span>
+
+    @Autowired
+    MiaoshaUserService userService<span class="token punctuation">;</span>
+
+    @Autowired
+    RedisService redisService<span class="token punctuation">;</span>
+
+    @Autowired
+    GoodsService goodsService<span class="token punctuation">;</span>
+
+    @Autowired
+    OrderService orderService<span class="token punctuation">;</span>
+
+    @Autowired
+    MiaoshaService miaoshaService<span class="token punctuation">;</span>
+
+    @Autowired
+    MQSender sender<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> HashMap<span class="token operator">&lt;</span>Long<span class="token punctuation">,</span> Boolean<span class="token operator">&gt;</span> localOverMap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashMap</span><span class="token operator">&lt;</span>Long<span class="token punctuation">,</span> Boolean<span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/** * 系统初始化,初始化的时候把数据库中的库存加载进缓存中 */</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">afterPropertiesSet</span><span class="token punctuation">(</span><span class="token punctuation">)</span> throws Exception <span class="token punctuation">{</span>
+        List<span class="token operator">&lt;</span>GoodsVo<span class="token operator">&gt;</span> goodsList <span class="token operator">=</span> goodsService<span class="token punctuation">.</span><span class="token function">listGoodsVo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>goodsList <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>GoodsVo goods <span class="token punctuation">:</span> goodsList<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            redisService<span class="token punctuation">.</span><span class="token keyword">set</span><span class="token punctuation">(</span>GoodsKey<span class="token punctuation">.</span>getMiaoshaGoodsStock<span class="token punctuation">,</span> <span class="token string">""</span> <span class="token operator">+</span> goods<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> goods<span class="token punctuation">.</span><span class="token function">getStockCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localOverMap<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>goods<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//第三版，消息队列的方式</span>
+    @<span class="token function">RequestMapping</span><span class="token punctuation">(</span>value <span class="token operator">=</span> <span class="token string">"/do_miaosha"</span><span class="token punctuation">,</span> method <span class="token operator">=</span> RequestMethod<span class="token punctuation">.</span><span class="token constant">POST</span><span class="token punctuation">)</span>
+    @ResponseBody
+    <span class="token keyword">public</span> Result<span class="token operator">&lt;</span>Integer<span class="token operator">&gt;</span> <span class="token function">miaosha</span><span class="token punctuation">(</span>Model model<span class="token punctuation">,</span> @<span class="token function">RequestParam</span><span class="token punctuation">(</span><span class="token string">"goodsId"</span><span class="token punctuation">)</span> long goodsId<span class="token punctuation">,</span> HttpServletResponse response<span class="token punctuation">,</span>
+                                     @<span class="token function">CookieValue</span><span class="token punctuation">(</span>value <span class="token operator">=</span> MiaoshaUserService<span class="token punctuation">.</span><span class="token constant">COOKI_NAME_TOKEN</span><span class="token punctuation">,</span>required <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">)</span> String cookieToken<span class="token punctuation">,</span>
+                                     @<span class="token function">RequestParam</span><span class="token punctuation">(</span>value <span class="token operator">=</span> MiaoshaUserService<span class="token punctuation">.</span><span class="token constant">COOKI_NAME_TOKEN</span><span class="token punctuation">,</span>required <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">)</span> String paramToken<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>StringUtils<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span>cookieToken<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> StringUtils<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span>paramToken<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            <span class="token keyword">return</span> Result<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span>CodeMsg<span class="token punctuation">.</span><span class="token constant">SESSION_ERROR</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//token不存在或失效</span>
+        <span class="token punctuation">}</span>
+        String token <span class="token operator">=</span> StringUtils<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span>paramToken<span class="token punctuation">)</span> <span class="token operator">?</span> cookieToken <span class="token punctuation">:</span> paramToken<span class="token punctuation">;</span>
+        MiaoshaUser user <span class="token operator">=</span> userService<span class="token punctuation">.</span><span class="token function">getByToken</span><span class="token punctuation">(</span>response<span class="token punctuation">,</span> token<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//从token中读用户信息</span>
+
+        <span class="token comment">//内存标记，减少redis访问</span>
+        boolean over <span class="token operator">=</span> localOverMap<span class="token punctuation">.</span><span class="token keyword">get</span><span class="token punctuation">(</span>goodsId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>over<span class="token punctuation">)</span> <span class="token punctuation">{</span><span class="token comment">//库存减去10后不必要访问redis，访问map即可</span>
+            <span class="token keyword">return</span> Result<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span>CodeMsg<span class="token punctuation">.</span><span class="token constant">MIAO_SHA_OVER</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//预减库存</span>
+        long stock <span class="token operator">=</span> redisService<span class="token punctuation">.</span><span class="token function">decr</span><span class="token punctuation">(</span>GoodsKey<span class="token punctuation">.</span>getMiaoshaGoodsStock<span class="token punctuation">,</span> <span class="token string">""</span> <span class="token operator">+</span> goodsId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>stock <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            localOverMap<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>goodsId<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> Result<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span>CodeMsg<span class="token punctuation">.</span><span class="token constant">MIAO_SHA_OVER</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//判断是否已经秒杀到了</span>
+        MiaoshaOrder order <span class="token operator">=</span> orderService<span class="token punctuation">.</span><span class="token function">getMiaoshaOrderByUserIdGoodsId</span><span class="token punctuation">(</span>user<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> goodsId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>order <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            <span class="token keyword">return</span> Result<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span>CodeMsg<span class="token punctuation">.</span><span class="token constant">REPEATE_MIAOSHA</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//入队</span>
+        MiaoshaMessage mm <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">MiaoshaMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        mm<span class="token punctuation">.</span><span class="token function">setUser</span><span class="token punctuation">(</span>user<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        mm<span class="token punctuation">.</span><span class="token function">setGoodsId</span><span class="token punctuation">(</span>goodsId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        sender<span class="token punctuation">.</span><span class="token function">sendMiaoshaMessage</span><span class="token punctuation">(</span>mm<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> Result<span class="token punctuation">.</span><span class="token function">success</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//排队中</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>其中，MiaoshaMessage的定义为：</p> 
+  <pre><code class="prism language-javascript"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">MiaoshaMessage</span> <span class="token punctuation">{</span>
+    <span class="token keyword">private</span> MiaoshaUser user<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> long goodsId<span class="token punctuation">;</span>
+    <span class="token comment">//Getter and Setter...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p><strong>RabbitMQ相关操作</strong></p> 
+  <ul> 
+   <li>MQSender：</li> 
+  </ul> 
+  <pre><code class="prism language-javascript">@Service
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">MQSender</span> <span class="token punctuation">{</span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> Logger log <span class="token operator">=</span> LoggerFactory<span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span>MQSender<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    @Autowired
+    AmqpTemplate amqpTemplate<span class="token punctuation">;</span> <span class="token comment">//操作queue的工具类</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">sendMiaoshaMessage</span><span class="token punctuation">(</span>MiaoshaMessage mm<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        String msg <span class="token operator">=</span> RedisService<span class="token punctuation">.</span><span class="token function">beanToString</span><span class="token punctuation">(</span>mm<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"send message:"</span> <span class="token operator">+</span> msg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        amqpTemplate<span class="token punctuation">.</span><span class="token function">convertAndSend</span><span class="token punctuation">(</span>MQConfig<span class="token punctuation">.</span><span class="token constant">MIAOSHA_QUEUE</span><span class="token punctuation">,</span> msg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <ul> 
+   <li>MQReceiver</li> 
+  </ul> 
+  <pre><code class="prism language-javascript">@Service
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">MQReceiver</span> <span class="token punctuation">{</span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> Logger log <span class="token operator">=</span> LoggerFactory<span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span>MQReceiver<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    @Autowired
+    RedisService redisService<span class="token punctuation">;</span>
+
+    @Autowired
+    GoodsService goodsService<span class="token punctuation">;</span>
+
+    @Autowired
+    OrderService orderService<span class="token punctuation">;</span>
+
+    @Autowired
+    MiaoshaService miaoshaService<span class="token punctuation">;</span>
+
+    @<span class="token function">RabbitListener</span><span class="token punctuation">(</span>queues <span class="token operator">=</span> MQConfig<span class="token punctuation">.</span><span class="token constant">MIAOSHA_QUEUE</span><span class="token punctuation">)</span> <span class="token comment">//监听的指定的队列</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">receive</span><span class="token punctuation">(</span>String message<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"receive message:"</span> <span class="token operator">+</span> message<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        MiaoshaMessage mm <span class="token operator">=</span> RedisService<span class="token punctuation">.</span><span class="token function">stringToBean</span><span class="token punctuation">(</span>message<span class="token punctuation">,</span> MiaoshaMessage<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        MiaoshaUser user <span class="token operator">=</span> mm<span class="token punctuation">.</span><span class="token function">getUser</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        long goodsId <span class="token operator">=</span> mm<span class="token punctuation">.</span><span class="token function">getGoodsId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//判断库存</span>
+        GoodsVo goods <span class="token operator">=</span> goodsService<span class="token punctuation">.</span><span class="token function">getGoodsVoByGoodsId</span><span class="token punctuation">(</span>goodsId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        int stock <span class="token operator">=</span> goods<span class="token punctuation">.</span><span class="token function">getStockCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>stock <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//判断是否已经秒杀到了</span>
+        MiaoshaOrder order <span class="token operator">=</span> orderService<span class="token punctuation">.</span><span class="token function">getMiaoshaOrderByUserIdGoodsId</span><span class="token punctuation">(</span>user<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> goodsId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>order <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//减库存 下订单 写入秒杀订单</span>
+        miaoshaService<span class="token punctuation">.</span><span class="token function">miaosha</span><span class="token punctuation">(</span>user<span class="token punctuation">,</span> goods<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>其中，miaoshaService.miaosha(user, goods)操作为：</p> 
+  <pre><code class="prism language-javascript">@Service
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">MiaoshaService</span> <span class="token punctuation">{</span>
+
+    @Autowired
+    GoodsService goodsService<span class="token punctuation">;</span>
+
+    @Autowired
+    OrderService orderService<span class="token punctuation">;</span>
+
+    @Autowired
+    RedisService redisService<span class="token punctuation">;</span>
+
+    @Transactional
+    <span class="token keyword">public</span> OrderInfo <span class="token function">miaosha</span><span class="token punctuation">(</span>MiaoshaUser user<span class="token punctuation">,</span> GoodsVo goods<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+        <span class="token comment">//减库存 下订单 写入秒杀订单</span>
+        boolean success <span class="token operator">=</span> goodsService<span class="token punctuation">.</span><span class="token function">reduceStock</span><span class="token punctuation">(</span>goods<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>success<span class="token punctuation">)</span><span class="token punctuation">{</span>
+            <span class="token comment">//order_info maiosha_order</span>
+            <span class="token keyword">return</span> orderService<span class="token punctuation">.</span><span class="token function">createOrder</span><span class="token punctuation">(</span>user<span class="token punctuation">,</span> goods<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token keyword">else</span> <span class="token punctuation">{</span>
+            <span class="token function">setGoodsOver</span><span class="token punctuation">(</span>goods<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>目前，优化完成了。当用户请求到达Controller层，在到达数据库之前，内存map和redis会抵挡大部分的数据库访问操作，大概只有与秒杀商品个数差不多的请求会进入队列从而访问数据库。</p> 
+  <h3><a id="_256"></a>压测</h3> 
+  <p>在之前写的秒杀功能（3）的压测中，初步版本的TPS = 808/sec;</p> 
+  <p>本次的<strong>压测结果</strong>为：<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512213712705.png" alt="在这里插入图片描述"><br> TPS = 908/sec，略高一些，没有提高太多，这可能是和硬件条件有关，我的服务器性能不高。</p> 
+  <p><strong>数据库情况</strong>：</p> 
+  <ul> 
+   <li>秒杀商品情况<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512213827748.png" alt="在这里插入图片描述"></li> 
+   <li>秒杀订单情况<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512213948652.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L1NlcmVuYTA4MTQ=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br> 正好9个订单，没有出现卖超的现象了。</li> 
+  </ul> 
+  <p>（<s>这篇写完我是奔溃的，，明明在几个小时前我就能写完。。中间开了个组会我掉网了。。我还没保存。。于是写了两遍。。又拖累了今天的进度，offer君又远离我一步。。</s> ）</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

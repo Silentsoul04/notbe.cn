@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核同步机制之（三）：memory barrier【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.wowotech.net/kernel_synchronization/memory-barrier.html    一、前言    我记得以前上学的时候大家经常说的一个词汇叫做所见即所得，有些编程工具是所见即所得的，给程序员带来极大的方便。对于一个c程序员，...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/03/22/weixin_34198583_90125299.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核同步机制之（三）：memory barrier【转】</h1>
+    <p class="post-meta">Mar 22, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.wowotech.net/kernel_synchronization/memory-barrier.html" rel="nofollow">http://www.wowotech.net/kernel_synchronization/memory-barrier.html</a></p> 
+   <p>一、前言</p> 
+   <p>我记得以前上学的时候大家经常说的一个词汇叫做所见即所得，有些编程工具是所见即所得的，给程序员带来极大的方便。对于一个c程序员，我们的编写的代码能所见即所得吗？我们看到的c程序的逻辑是否就是最后CPU运行的结果呢？很遗憾，不是，我们的“所见”和最后的执行结果隔着：</p> 
+   <p>1、编译器</p> 
+   <p>2、CPU取指执行</p> 
+   <p>编译器将符合人类思考的逻辑（c代码）翻译成了符合CPU运算规则的汇编指令，编译器了解底层CPU的思维模式，因此，它可以在将c翻译成汇编的时候进行优化（例如内存访问指令的重新排序），让产出的汇编指令在CPU上运行的时候更快。然而，这种优化产出的结果未必符合程序员原始的逻辑，因此，作为程序员，作为c程序员，必须有能力了解编译器的行为，并在通过内嵌在c代码中的memory barrier来指导编译器的优化行为（这种memory barrier又叫做优化屏障，Optimization barrier），让编译器产出即高效，又逻辑正确的代码。</p> 
+   <p>CPU的核心思想就是取指执行，对于in-order的单核CPU，并且没有cache（这种CPU在现实世界中还存在吗？），汇编指令的取指和执行是严格按照顺序进行的，也就是说，汇编指令就是所见即所得的，汇编指令的逻辑被严格的被CPU执行。然而，随着计算机系统越来越复杂（多核、cache、superscalar、out-of-order），使用汇编指令这样贴近处理器的语言也无法保证其被CPU执行的结果的一致性，从而需要程序员（看，人还是最不可以替代的）告知CPU如何保证逻辑正确。</p> 
+   <p>综上所述，memory barrier是一种保证内存访问顺序的一种方法，让系统中的HW block（各个cpu、DMA controler、device等）对内存有一致性的视角。</p> 
+   <p>&nbsp;</p> 
+   <p>二、不使用memory barrier会导致问题的场景</p> 
+   <p>1、编译器的优化</p> 
+   <p>我们先看下面的一个例子：</p> 
+   <blockquote> 
+    <p>preempt_disable（）</p> 
+    <p>临界区</p> 
+    <p>preempt_enable</p> 
+   </blockquote> 
+   <p>有些共享资源可以通过禁止任务抢占来进行保护，因此临界区代码被preempt_disable和preempt_enable给保护起来。其实，我们知道所谓的preempt enable和disable其实就是对当前进程的struct thread_info中的preempt_count进行加一和减一的操作。具体的代码如下：</p> 
+   <blockquote> 
+    <p>#define preempt_disable() \&nbsp;<br>do { \&nbsp;<br>&nbsp;&nbsp;&nbsp; preempt_count_inc(); \&nbsp;<br>&nbsp;&nbsp;&nbsp; barrier(); \&nbsp;<br>} while (0)</p> 
+   </blockquote> 
+   <p>linux kernel中的定义和我们的想像一样，除了barrier这个优化屏障。barrier就象是c代码中的一个栅栏，将代码逻辑分成两段，barrier之前的代码和barrier之后的代码在经过编译器编译后顺序不能乱掉。也就是说，barrier之后的c代码对应的汇编，不能跑到barrier之前去，反之亦然。之所以这么做是因为在我们这个场景中，如果编译为了榨取CPU的performace而对汇编指令进行重排，那么临界区的代码就有可能位于preempt_count_inc之外，从而起不到保护作用。</p> 
+   <p>现在，我们知道了增加barrier的作用，问题来了，barrier是否够呢？对于multi-core的系统，只有当该task被调度到该CPU上执行的时候，该CPU才会访问该task的preempt count，因此对于preempt enable和disable而言，不存在多个CPU同时访问的场景。但是，即便这样，如果CPU是乱序执行（out-of-order excution）的呢？其实，我们也不用担心，正如前面叙述的，preempt count这个memory实际上是不存在多个cpu同时访问的情况，因此，它实际上会本cpu的进程上下文和中断上下文访问。能终止当前thread执行preempt_disable的只有中断。为了方便描述，我们给代码编址，如下：</p> 
+   <table style="width:700px;" border="1">
+    <tbody>
+     <tr>
+      <td valign="top">地址</td> 
+      <td valign="top">该地址的汇编指令</td> 
+      <td valign="top">CPU的执行顺序</td> 
+     </tr>
+     <tr>
+      <td valign="top">a</td> 
+      <td valign="top">preempt_disable（）</td> 
+      <td valign="top">临界区指令1</td> 
+     </tr>
+     <tr>
+      <td valign="top">a+4</td> 
+      <td valign="top">临界区指令1</td> 
+      <td valign="top">preempt_disable（）</td> 
+     </tr>
+     <tr>
+      <td valign="top">a+8</td> 
+      <td valign="top">临界区指令2</td> 
+      <td valign="top">临界区指令2</td> 
+     </tr>
+     <tr>
+      <td valign="top">a+12</td> 
+      <td valign="top">preempt_enable</td> 
+      <td valign="top">preempt_enable</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>当发生中断的时候，硬件会获取当前PC值，并精确的得到了发生指令的地址。有两种情况：</p> 
+   <p>（1）在地址a发生中断。对于out-of-order的CPU，临界区指令1已经执行完毕，preempt_disable正在pipeline中等待执行。由于是在a地址发生中断，也就是preempt_disable地址上发生中断，对于硬件而言，它会保证a地址之前（包括a地址）的指令都被执行完毕，并且a地址之后的指令都没有执行。因此，在这种情况下，临界区指令1的执行结果被抛弃掉，因此，实际临界区指令不会先于preempt_disable执行</p> 
+   <p>（2）在地址a＋4发生中断。这时候，虽然发生中断的那一刻的地址上的指令（临界区指令1）已经执行完毕了，但是硬件会保证地址a＋4之前的所有的指令都执行完毕，因此，实际上CPU会执行完preempt_disable，然后跳转的中断异常向量执行。</p> 
+   <p>上面描述的是优化屏障在内存中的变量的应用，下面我们看看硬件寄存器的场景。一般而言，串口的驱动都会包括控制台部分的代码，例如：</p> 
+   <blockquote> 
+    <p>static struct console xx_serial_console = {&nbsp;<br>……&nbsp;<br>&nbsp;&nbsp;&nbsp; .write&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = xx_serial_console_write,&nbsp;<br>……&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>如果系统enable了串口控制台，那么当你的驱动调用printk的时候，实际上最终是通过console的write函数输出到了串口控制台。而这个console write的函数可能会包含下面的代码：</p> 
+   <blockquote> 
+    <p>do {&nbsp;<br>&nbsp;&nbsp;&nbsp; 获取TX FIFO状态寄存器&nbsp;<br>&nbsp;&nbsp;&nbsp; barrier();&nbsp;<br>} while (TX FIFO没有ready);&nbsp;<br>写TX FIFO寄存器;</p> 
+   </blockquote> 
+   <p>对于某些CPU archtecture而言（至少ARM是这样的），外设硬件的IO地址也被映射到了一段内存地址空间，对编译器而言，它并不知道这些地址空间是属于外设的。因此，对于上面的代码，如果没有barrier的话，获取TX FIFO状态寄存器的指令可能和写TX FIFO寄存器指令进行重新排序，在这种情况下，程序逻辑就不对了，因为我们必须要保证TX FIFO ready的情况下才能写TX FIFO寄存器。</p> 
+   <p>对于multi core的情况，上面的代码逻辑也是OK的，因为在调用console write函数的时候，要获取一个console semaphore，确保了只有一个thread进入，因此，console write的代码不会在多个CPU上并发。和preempt count的例子一样，我们可以问同样的问题，如果CPU是乱序执行（out-of-order excution）的呢？barrier只是保证compiler输出的汇编指令的顺序是OK的，不能确保CPU执行时候的乱序。 对这个问题的回答来自ARM architecture的内存访问模型：对于program order是A1--&gt;A2的情况（A1和A2都是对Device或是Strongly-ordered的memory进行访问的指令），ARM保证A1也是先于A2执行的。因此，在这样的场景下，使用barrier足够了。 对于X86也是类似的，虽然它没有对IO space采样memory mapping的方式，但是，X86的所有操作IO端口的指令都是被顺执行的，不需要考虑memory access order。<br>&nbsp;</p> 
+   <p>2、cpu architecture和cache的组织</p> 
+   <p>注：本章节的内容来自对Paul E. McKenney的Why memory barriers文档理解，更细致的内容可以参考该文档。这个章节有些晦涩，需要一些耐心。作为一个c程序员，你可能会抱怨，为何设计CPU的硬件工程师不能屏蔽掉memory barrier的内容，让c程序员关注在自己需要关注的程序逻辑上呢？本章可以展开叙述，或许能解决一些疑问。</p> 
+   <p>（1）基本概念</p> 
+   <p>在<a href="http://www.wowotech.net/basic_subject/memory-hierarchy.html" rel="nofollow">The Memory Hierarchy</a>文档中，我们已经了解了关于cache一些基础的知识，一些基础的内容，这里就不再重复了。我们假设一个多核系统中的cache如下：</p> 
+   <p>&nbsp;<a href="http://www.wowotech.net/content/uploadfile/201411/e35f2f4793d734a566d1d230d1b83b4620141114112002.gif" rel="nofollow"><img title="cache arch" src="https://yqfile.alicdn.com/img_cb83194f69d5754f001a4650d815ae56.gif" alt="cache arch" width="726" height="481"></a></p> 
+   <p>我们先了解一下各个cpu cache line状态的迁移过程：</p> 
+   <p>（a）我们假设在有一个memory中的变量为多个CPU共享，那么刚开始的时候，所有的CPU的本地cache中都没有该变量的副本，所有的cacheline都是invalid状态。</p> 
+   <p>（b）因此当cpu 0 读取该变量的时候发生cache miss（更具体的说叫做cold miss或者warmup miss）。当该值从memory中加载到chache 0中的cache line之后，该cache line的状态被设定为shared，而其他的cache都是Invalid。</p> 
+   <p>（c）当cpu 1 读取该变量的时候，chache 1中的对应的cache line也变成shared状态。其实shared状态就是表示共享变量在一个或者多个cpu的cache中有副本存在。既然是被多个cache所共享，那么其中一个CPU就不能武断修改自己的cache而不通知其他CPU的cache，否则会有一致性问题。</p> 
+   <p>（d）总是read多没劲，我们让CPU n对共享变量来一个load and store的操作。这时候，CPU n发送一个read invalidate命令，加载了Cache n的cache line，并将状态设定为exclusive，同时将所有其他CPU的cache对应的该共享变量的cacheline设定为invalid状态。正因为如此，CPU n实际上是独占了变量对应的cacheline（其他CPU的cacheline都是invalid了，系统中就这么一个副本），就算是写该变量，也不需要通知其他的CPU。CPU随后的写操作将cacheline设定为modified状态，表示cache中的数据已经dirty，和memory中的不一致了。modified状态和exclusive状态都是独占该cacheline，但是modified状态下，cacheline的数据是dirty的，而exclusive状态下，cacheline中的数据和memory中的数据是一致的。当该cacheline被替换出cache的时候，modified状态的cacheline需要write back到memory中，而exclusive状态不需要。</p> 
+   <p>（e）在cacheline没有被替换出CPU n的cache之前，CPU 0再次读该共享变量，这时候会怎么样呢？当然是cache miss了（因为之前由于CPU n写的动作而导致其他cpu的cache line变成了invalid，这种cache miss叫做communiction miss）。此外，由于CPU n的cache line是modified状态，它必须响应这个读得操作（memory中是dirty的）。因此，CPU 0的cacheline变成share状态（在此之前，CPU n的cache line应该会发生write back动作，从而导致其cacheline也是shared状态）。当然，也可能是CPU n的cache line不发生write back动作而是变成invalid状态，CPU 0的cacheline变成modified状态，这和具体的硬件设计相关。</p> 
+   <p>&nbsp;</p> 
+   <p>（2）Store buffer</p> 
+   <p>我们考虑另外一个场景：在上一节中step e中的操作变成CPU 0对共享变量进行写的操作。这时候，写的性能变得非常的差，因为CPU 0必须要等到CPU n上的cacheline 数据传递到其cacheline之后，才能进行写的操作（CPU n上的cacheline 变成invalid状态，CPU 0则切换成exclusive状态，为后续的写动作做准备）。而从一个CPU的cacheline传递数据到另外一个CPU的cacheline是非常消耗时间的，而这时候，CPU 0的写的动作只是hold住，直到cacheline的数据完成传递。而实际上，这样的等待是没有意义的，因此，这时候cacheline的数据仍然会被覆盖掉。为了解决这个问题，多核系统中的cache修改如下：</p> 
+   <p><a href="http://www.wowotech.net/content/uploadfile/201411/a872a1863fec02585bb786a5c382d3eb20141114112005.gif" rel="nofollow"><img title="cache arch1" src="https://yqfile.alicdn.com/img_a715dbc8f4891196ab76a73721e19cd3.gif" alt="cache arch1" width="724" height="498"></a></p> 
+   <p>这样，问题解决了，写操作不必等到cacheline被加载，而是直接写到store buffer中然后欢快的去干其他的活。在CPU n的cacheline把数据传递到其cache 0的cacheline之后，硬件将store buffer中的内容写入cacheline。</p> 
+   <p>虽然性能问题解决了，但是逻辑错误也随之引入，我们可以看下面的例子：</p> 
+   <p>我们假设a和b是共享变量，初始值都是0，可以被cpu0和cpu1访问。cpu 0的cache中保存了b的值（exclusive状态），没有a的值，而cpu 1的cache中保存了a的值，没有b的值，cpu 0执行的汇编代码是（用的是ARM汇编，没有办法，其他的都不是那么熟悉）：</p> 
+   <blockquote> 
+    <p>ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [pc, #28]&nbsp;&nbsp; -------------------------- 取变量a的地址&nbsp;<br>ldr&nbsp;&nbsp;&nbsp;&nbsp; r4, [pc, #20]&nbsp;&nbsp; -------------------------- 取变量b的地址&nbsp;<br>mov&nbsp;&nbsp;&nbsp;&nbsp; r3, #1&nbsp;<br>str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r2]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --------------------------a=1&nbsp;<br>str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r4]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --------------------------b=1</p> 
+   </blockquote> 
+   <p>CPU 1执行的代码是：</p> 
+   <blockquote> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [pc, #28]&nbsp;&nbsp; -------------------------- 取变量a的地址</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [pc, #20]&nbsp; -------------------------- 取变量b的地址&nbsp;<br>start:&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [r3]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -------------------------- 取变量b的值&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cmp&nbsp;&nbsp;&nbsp;&nbsp; r3, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ------------------------ b的值是否等于0？&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; beq&nbsp;&nbsp;&nbsp;&nbsp; start&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ------------------------ 等于0的话跳转到start</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [r2]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -------------------------- 取变量a的值</p> 
+   </blockquote> 
+   <p>当cpu 1执行到--取变量a的值--这条指令的时候，b已经是被cpu0修改为1了，这也就是说a＝1这个代码已经执行了，因此，从汇编代码的逻辑来看，这时候a值应该是确定的1。然而并非如此，cpu 0和cpu 1执行的指令和动作描述如下：</p> 
+   <table style="width:700px;" border="1">
+    <tbody>
+     <tr>
+      <td valign="top">cpu 0执行的指令</td> 
+      <td valign="top">cpu 0动作描述</td> 
+      <td valign="top">cpu 1执行的指令</td> 
+      <td valign="top">cpu 1动作描述</td> 
+     </tr>
+     <tr>
+      <td valign="top">str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r2]&nbsp;<br>（a=1）</td> 
+      <td valign="top">1、发生cache miss&nbsp;<br>2、将1保存在store buffer中&nbsp;<br>3、发送read invalidate命令，试图从cpu 1的cacheline中获取数据，并invalidate其cache line&nbsp;<br><br>注：这里无需等待response，立刻执行下一条指令</td> 
+      <td valign="top">ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [r3]&nbsp;&nbsp;<br>（获取b的值）</td> 
+      <td valign="top">1、发生cache miss&nbsp;<br>2、发送read命令，试图加载b对应的cacheline&nbsp;<br><br>注：这里cpu必须等待read response，下面的指令依赖于这个读取的结果</td> 
+     </tr>
+     <tr>
+      <td valign="top">str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r4]&nbsp;&nbsp;<br>（b=1）</td> 
+      <td valign="top">1、cache hit&nbsp;<br>2、cacheline中的值被修改为1，状态变成modified&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">响应cpu 1的read命令，发送read response（b＝1）给CPU 0。write back，将状态设定为shared</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">cmp&nbsp;&nbsp;&nbsp;&nbsp; r3, #0</td> 
+      <td valign="top">1、cpu 1收到来自cpu 0的read response，加载b对应的cacheline，状态为shared&nbsp;<br>2、b等于1，因此不必跳转到start执行</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [r2]&nbsp;<br>（获取a的值）</td> 
+      <td valign="top">1、cache hit&nbsp;<br>2、获取了a的旧值，也就是0</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">响应CPU 0的read invalid命令，将a对应的cacheline设为invalid状态，发送read response和invalidate ack。但是已经酿成大错了。</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到来自cpu 1的响应，将store buffer中的1写入cache line。</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp; 对于硬件，CPU不清楚具体的代码逻辑，它不可能直接帮助软件工程师，只是提供一些memory barrier的指令，让软件工程师告诉CPU他想要的内存访问逻辑顺序。这时候，cpu 0的代码修改如下：</p> 
+   <blockquote> 
+    <p>ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [pc, #28]&nbsp;&nbsp; -------------------------- 取变量a的地址&nbsp;<br>ldr&nbsp;&nbsp;&nbsp;&nbsp; r4, [pc, #20]&nbsp;&nbsp; -------------------------- 取变量b的地址&nbsp;<br>mov&nbsp;&nbsp;&nbsp;&nbsp; r3, #1&nbsp;<br>str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r2]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --------------------------a=1</p> 
+    <p>确保清空store buffer的memory barrier instruction&nbsp;<br>str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r4]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --------------------------b=1</p> 
+   </blockquote> 
+   <p>这种情况下，cpu 0和cpu 1执行的指令和动作描述如下：</p> 
+   <table style="width:700px;" border="1">
+    <tbody>
+     <tr>
+      <td valign="top">cpu 0执行的指令</td> 
+      <td valign="top">cpu 0动作描述</td> 
+      <td valign="top">cpu 1执行的指令</td> 
+      <td valign="top">cpu 1动作描述</td> 
+     </tr>
+     <tr>
+      <td valign="top">str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r2]&nbsp;<br>（a=1）</td> 
+      <td valign="top">1、发生cache miss&nbsp;<br>2、将1保存在store buffer中&nbsp;<br>3、发送read invalidate命令，试图从cpu 1的cacheline中获取数据，并invalidate其cache line&nbsp;<br><br>注：这里无需等待response，立刻执行下一条指令</td> 
+      <td valign="top">ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [r3]&nbsp;&nbsp;<br>（获取b的值）</td> 
+      <td valign="top">1、发生cache miss&nbsp;<br>2、发送read命令，试图加载b对应的cacheline&nbsp;<br><br>注：这里cpu必须等待read response，下面的指令依赖于这个读取的结果</td> 
+     </tr>
+     <tr>
+      <td valign="top">memory barrier instruction</td> 
+      <td valign="top">CPU收到memory barrier指令，知道软件要控制访问顺序，因此不会执行下一条str指令，要等到收到read response和invalidate ack后，将store buffer中所有数据写到cacheline之后才会执行后续的store指令</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">cmp&nbsp;&nbsp;&nbsp;&nbsp; r3, #0&nbsp;<br>beq&nbsp;&nbsp;&nbsp;&nbsp; start</td> 
+      <td valign="top">1、cpu 1收到来自cpu 0的read response，加载b对应的cacheline，状态为shared&nbsp;<br>2、b等于0，跳转到start执行</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">响应CPU 0的read invalid命令，将a对应的cacheline设为invalid状态，发送read response和invalidate ack。</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到来自cpu 1的响应，将store buffer中的1写入cache line。</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r4]&nbsp;&nbsp;<br>（b=1）</td> 
+      <td valign="top">1、cache hit，但是cacheline状态是shared，需要发送invalidate到cpu 1&nbsp;<br>2、将1保存在store buffer中&nbsp;<br><br>注：这里无需等待invalidate ack，立刻执行下一条指令&nbsp;<br><br><br></td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">…</td> 
+      <td valign="top">…</td> 
+      <td valign="top">…</td> 
+      <td valign="top">…</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>由于增加了memory barrier，保证了a、b这两个变量的访问顺序，从而保证了程序逻辑。</p> 
+   <p>&nbsp;</p> 
+   <p>（3）Invalidate Queue</p> 
+   <p>我们先回忆一下为何出现了stroe buffer：为了加快cache miss状态下写的性能，硬件提供了store buffer，以便让CPU先写入，从而不必等待invalidate ack（这些交互是为了保证各个cpu的cache的一致性）。然而，store buffer的size比较小，不需要特别多的store命令（假设每次都是cache miss）就可以将store buffer填满，这时候，没有空间写了，因此CPU也只能是等待invalidate ack了，这个状态和memory barrier指令的效果是一样的。</p> 
+   <p>怎么解决这个问题？CPU设计的硬件工程师对性能的追求是不会停歇的。我们首先看看invalidate ack为何如此之慢呢？这主要是因为cpu在收到invalidate命令后，要对cacheline执行invalidate命令，确保该cacheline的确是invalid状态后，才会发送ack。如果cache正忙于其他工作，当然不能立刻执行invalidate命令，也就无法会ack。</p> 
+   <p>怎么破？CPU设计的硬件工程师提供了下面的方法：</p> 
+   <p><a href="http://www.wowotech.net/content/uploadfile/201411/46e1bbd0ba094941caf23050e1db2d2d20141114112008.gif" rel="nofollow"><img title="cache arch2" src="https://yqfile.alicdn.com/img_ab3321cb7ef36a438fa785fbace0f4c0.gif" alt="cache arch2" width="674" height="597"></a></p> 
+   <p>Invalidate Queue这个HW block从名字就可以看出来是保存invalidate请求的队列。其他CPU发送到本CPU的invalidate命令会保存于此，这时候，并不需要等到实际对cacheline的invalidate操作完成，CPU就可以回invalidate ack了。</p> 
+   <p>同store buffer一样，虽然性能问题解决了，但是对memory的访问顺序导致的逻辑错误也随之引入，我们可以看下面的例子（和store buffer中的例子类似）：</p> 
+   <p>我们假设a和b是共享变量，初始值都是0，可以被cpu0和cpu1访问。cpu 0的cache中保存了b的值（exclusive状态），而CPU 1和CPU 0的cache中都保存了a的值，状态是shared。cpu 0执行的汇编代码是：</p> 
+   <blockquote> 
+    <p>ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [pc, #28]&nbsp;&nbsp; -------------------------- 取变量a的地址&nbsp;<br>ldr&nbsp;&nbsp;&nbsp;&nbsp; r4, [pc, #20]&nbsp;&nbsp; -------------------------- 取变量b的地址&nbsp;<br>mov&nbsp;&nbsp;&nbsp;&nbsp; r3, #1&nbsp;<br>str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r2]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --------------------------a=1</p> 
+    <p>确保清空store buffer的memory barrier instruction&nbsp;<br>str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r4]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --------------------------b=1</p> 
+   </blockquote> 
+   <p>CPU 1执行的代码是：</p> 
+   <blockquote> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [pc, #28]&nbsp;&nbsp; -------------------------- 取变量a的地址</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [pc, #20]&nbsp; -------------------------- 取变量b的地址&nbsp;<br>start:&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [r3]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -------------------------- 取变量b的值&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cmp&nbsp;&nbsp;&nbsp;&nbsp; r3, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ------------------------ b的值是否等于0？&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; beq&nbsp;&nbsp;&nbsp;&nbsp; start&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ------------------------ 等于0的话跳转到start</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [r2]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -------------------------- 取变量a的值</p> 
+   </blockquote> 
+   <p>这种情况下，cpu 0和cpu 1执行的指令和动作描述如下：</p> 
+   <table style="width:700px;" border="1">
+    <tbody>
+     <tr>
+      <td valign="top">cpu 0执行的指令</td> 
+      <td valign="top">cpu 0动作描述</td> 
+      <td valign="top">cpu 1执行的指令</td> 
+      <td valign="top">cpu 1动作描述</td> 
+     </tr>
+     <tr>
+      <td valign="top">str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r2]&nbsp;<br>（a=1）</td> 
+      <td valign="top">1、a值在CPU 0的cache中状态是shared，是read only的，因此，需要通知其他的CPU&nbsp;<br>2、将1保存在store buffer中&nbsp;<br>3、发送invalidate命令，试图invalidate CPU 1中a对应的cache line&nbsp;<br><br>注：这里无需等待response，立刻执行下一条指令</td> 
+      <td valign="top">ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [r3]&nbsp;&nbsp;<br>（获取b的值）</td> 
+      <td valign="top">1、发生cache miss&nbsp;<br>2、发送read命令，试图加载b对应的cacheline&nbsp;<br><br>注：这里cpu必须等待read response，下面的指令依赖于这个读取的结果</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到来自CPU 0的invalidate命令，放入invalidate queue，立刻回ack。</td> 
+     </tr>
+     <tr>
+      <td valign="top">memory barrier instruction</td> 
+      <td valign="top">CPU收到memory barrier指令，知道软件要控制访问顺序，因此不会执行下一条str指令，要等到收到invalidate ack后，将store buffer中所有数据写到cacheline之后才会执行后续的store指令</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到invalidate ack后，将store buffer中的1写入cache line。OK，可以继续执行下一条指令了</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r4]&nbsp;&nbsp;<br>（b=1）</td> 
+      <td valign="top">1、cache hit&nbsp;<br>2、cacheline中的值被修改为1，状态变成modified</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到CPU 1发送来的read命令，将b值（等于1）放入read response中，回送给CPU 1，write back并将状态修改为shared。</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到response（b＝1），并加载cacheline，状态是shared</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top"> <br><br><br></td> 
+      <td valign="top">cmp&nbsp;&nbsp;&nbsp;&nbsp; r3, #0</td> 
+      <td valign="top">b等于1，不会执行beq指令，而是执行下一条指令</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [r2]&nbsp;<br>（获取a的值）</td> 
+      <td valign="top">1、cache hit （还没有执行invalidate动作，命令还在invalidate queue中呢）&nbsp;<br>2、获取了a的旧值，也就是0</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">对a对应的cacheline执行invalidate 命令，但是，已经晚了</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>可怕的memory misorder问题又来了，都是由于引入了invalidate queue引起，看来我们还需要一个memory barrier的指令，我们将程序修改如下：</p> 
+   <blockquote> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [pc, #28]&nbsp;&nbsp; -------------------------- 取变量a的地址</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [pc, #20]&nbsp; -------------------------- 取变量b的地址&nbsp;<br>start:&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [r3]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -------------------------- 取变量b的值&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cmp&nbsp;&nbsp;&nbsp;&nbsp; r3, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ------------------------ b的值是否等于0？&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; beq&nbsp;&nbsp;&nbsp;&nbsp; start&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ------------------------ 等于0的话跳转到start</p> 
+    <p>确保清空invalidate queue的memory barrier instruction</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [r2]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -------------------------- 取变量a的值</p> 
+   </blockquote> 
+   <p>这种情况下，cpu 0和cpu 1执行的指令和动作描述如下：</p> 
+   <table style="width:700px;" border="1">
+    <tbody>
+     <tr>
+      <td valign="top">cpu 0执行的指令</td> 
+      <td valign="top">cpu 0动作描述</td> 
+      <td valign="top">cpu 1执行的指令</td> 
+      <td valign="top">cpu 1动作描述</td> 
+     </tr>
+     <tr>
+      <td valign="top">str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r2]&nbsp;<br>（a=1）</td> 
+      <td valign="top">1、a值在CPU 0的cache中状态是shared，是read only的，因此，需要通知其他的CPU&nbsp;<br>2、将1保存在store buffer中&nbsp;<br>3、发送invalidate命令，试图invalidate CPU 1中a对应的cache line&nbsp;<br><br>注：这里无需等待response，立刻执行下一条指令</td> 
+      <td valign="top">ldr&nbsp;&nbsp;&nbsp;&nbsp; r3, [r3]&nbsp;&nbsp;<br>（获取b的值）</td> 
+      <td valign="top">1、发生cache miss&nbsp;<br>2、发送read命令，试图加载b对应的cacheline&nbsp;<br><br>注：这里cpu必须等待read response，下面的指令依赖于这个读取的结果</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到来自CPU 0的invalidate命令，放入invalidate queue，立刻回ack。</td> 
+     </tr>
+     <tr>
+      <td valign="top">memory barrier instruction</td> 
+      <td valign="top">CPU收到memory barrier指令，知道软件要控制访问顺序，因此不会执行下一条str指令，要等到收到invalidate ack后，将store buffer中所有数据写到cacheline之后才会执行后续的store指令</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到invalidate ack后，将store buffer中的1写入cache line。OK，可以继续执行下一条指令了</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">str&nbsp;&nbsp;&nbsp;&nbsp; r3, [r4]&nbsp;&nbsp;<br>（b=1）</td> 
+      <td valign="top">1、cache hit&nbsp;<br>2、cacheline中的值被修改为1，状态变成modified</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到CPU 1发送来的read命令，将b值（等于1）放入read response中，回送给CPU 1，write back并将状态修改为shared。</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">收到response（b＝1），并加载cacheline，状态是shared</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top"> <br><br><br></td> 
+      <td valign="top">cmp&nbsp;&nbsp;&nbsp;&nbsp; r3, #0</td> 
+      <td valign="top">b等于1，不会执行beq指令，而是执行下一条指令</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">memory barrier instruction</td> 
+      <td valign="top">CPU收到memory barrier指令，知道软件要控制访问顺序，因此不会执行下一条ldr指令，要等到执行完invalidate queue中的所有的invalidate命令之后才会执行下一个ldr指令</td> 
+     </tr>
+     <tr>
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">&nbsp;</td> 
+      <td valign="top">ldr&nbsp;&nbsp;&nbsp;&nbsp; r2, [r2]&nbsp;<br>（获取a的值）</td> 
+      <td valign="top">1、cache miss&nbsp;<br>2、发送read命令，从CPU 0那里加载新的a值</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp; 由于增加了memory barrier，保证了a、b这两个变量的访问顺序，从而保证了程序逻辑。</p> 
+   <p>&nbsp;</p> 
+   <p>三、linux kernel的API</p> 
+   <p>linux kernel的memory barrier相关的API列表如下：</p> 
+   <table style="width:700px;" border="1">
+    <tbody>
+     <tr>
+      <td valign="top">接口名称</td> 
+      <td valign="top">作用</td> 
+     </tr>
+     <tr>
+      <td valign="top">barrier()</td> 
+      <td valign="top">优化屏障，阻止编译器为了进行性能优化而进行的memory access reorder</td> 
+     </tr>
+     <tr>
+      <td valign="top">mb()</td> 
+      <td valign="top">内存屏障（包括读和写），用于SMP和UP</td> 
+     </tr>
+     <tr>
+      <td valign="top">rmb()</td> 
+      <td valign="top">读内存屏障，用于SMP和UP</td> 
+     </tr>
+     <tr>
+      <td valign="top">wmb()</td> 
+      <td valign="top">写内存屏障，用于SMP和UP</td> 
+     </tr>
+     <tr>
+      <td valign="top">smp_mb()</td> 
+      <td valign="top">用于SMP场合的内存屏障，对于UP不存在memory order的问题（对汇编指令），因此，在UP上就是一个优化屏障，确保汇编和c代码的memory order是一致的</td> 
+     </tr>
+     <tr>
+      <td valign="top">smp_rmb()</td> 
+      <td valign="top">用于SMP场合的读内存屏障</td> 
+     </tr>
+     <tr>
+      <td valign="top">smp_wmb()</td> 
+      <td valign="top">用于SMP场合的写内存屏障</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>barrier()这个接口和编译器有关，对于gcc而言，其代码如下：</p> 
+   <blockquote> 
+    <p>#define barrier() __asm__ __volatile__("": : :"memory")</p> 
+   </blockquote> 
+   <p>这里的__volatile__主要是用来防止编译器优化的。而这里的优化是针对代码块而言的，使用嵌入式汇编的代码分成三块：</p> 
+   <p>1、嵌入式汇编之前的c代码块</p> 
+   <p>2、嵌入式汇编代码块</p> 
+   <p>3、嵌入式汇编之后的c代码块</p> 
+   <p>这里__volatile__就是告诉编译器：不要因为性能优化而将这些代码重排，我需要清清爽爽的保持这三块代码块的顺序（代码块内部是否重排不是这里的__volatile__管辖范围了）。</p> 
+   <p>barrier中的嵌入式汇编中的clobber list没有描述汇编代码对寄存器的修改情况，只是有一个memory的标记。我们知道，clober list是gcc和gas的接口，用于gas通知gcc它对寄存器和memory的修改情况。因此，这里的memory就是告知gcc，在汇编代码中，我修改了memory中的内容，嵌入式汇编之前的c代码块和嵌入式汇编之后的c代码块看到的memory是不一样的，对memory的访问不能依赖于嵌入式汇编之前的c代码块中寄存器的内容，需要重新加载。</p> 
+   <p>优化屏障是和编译器相关的，而内存屏障是和CPU architecture相关的，当然，我们选择ARM为例来描述内存屏障。</p> 
+   <p>&nbsp;</p> 
+   <p>四、内存屏障在ARM中的实现</p> 
+   <p>TODO</p> 
+   <p>&nbsp;</p> 
+   <p><em>原创文章，转发请注明出处。蜗窝科技</em></p> 
+   <p><a href="http://www.wowotech.net/kernel_synchronization/memory-barrier.html" rel="nofollow">http://www.wowotech.net/kernel_synchronization/memory-barrier.html</a></p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>从 Linux 内核的角度来看 Binder 驱动 « NotBeCN</title>
+  <meta name="description" content="                   关于进程间通信我们是再熟悉不过了，有时面试也经常被问到你了解 IPC 吗？我们一般都会答 AIDL ，Binder 驱动，共享内存？如果要我们再说详细点呢？或者说说共享内存的具体实现？这里推荐一篇罗升阳的博客 《Android进程间通信（IPC）机制Binder简要介绍和学习...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/z240336124_90137352.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">从 Linux 内核的角度来看 Binder 驱动</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>关于进程间通信我们是再熟悉不过了，有时面试也经常被问到你了解 IPC 吗？我们一般都会答 AIDL ，Binder 驱动，共享内存？如果要我们再说详细点呢？或者说说共享内存的具体实现？这里推荐一篇罗升阳的博客 《Android进程间通信（IPC）机制Binder简要介绍和学习计划》。本文是基于 linux 进程间通信来写的，我们都知道 Android 是基于 linux 内核，因此了解了 linux 进程间通信也就基本了解了 Android 底层进程间通信。去年初来深圳去腾讯面试，被问到了知道进程间通信吗？我说 binder 驱动，还有吗？我说 Socket ，还有吗？我说其他的就不了解了。最后面试的结果也是不出所料，GG。</p> 
+  <p>首先来了解一下进程间通信的本质是什么。在 <a href="https://www.jianshu.com/p/cb51a149131f" rel="nofollow">Android 开发者需要知道的 Linux 知识</a> 一文中提到，一个完整的进程在 32 位系统上的虚拟内存分布为： 0-3G 是用户空间，3-4G 是内核空间。操作系统在映射开辟物理内存时，每个进程的用户空间会映射到不同区域，每个进程的内核空间会映射到同一区域（可以简单的这么理解）。因此如果两个进程间需要传递数据是不能直接访问的，要交换数据必须通过内核，在内核中开辟一块缓冲区，进程 A 把数据拷贝到内存缓冲区，进程 B 再从内核缓冲区把数据读走，这种机制称为进程间通信（IPC，InterProcess Communication），因此进程间通信得要借助内核空间。</p> 
+  <p>在 linux 中常见的进程间通信方式有：文件，管道，信号，信号量，共享内存，消息队列，套接字，命名管道，随着 linux 的发展到目前最最常见的有：</p> 
+  <ul> 
+   <li>管道（使用最简单）</li> 
+   <li>信号（开销最小）</li> 
+   <li>共享映射区（无血缘关系）</li> 
+   <li>本地套接字（低速稳定）</li> 
+  </ul> 
+  <p>对于一个 Android 开发者来说，最最最常见的就只剩<strong>共享映射区</strong>了，像我们最熟悉的 Binder 驱动，腾讯开源的 MMKV, 自己实现高性能的日志库等等，都是基于共享映射区也就是我们所说的共享内存。因此本文我们着重来分析<strong>共享映射区</strong>，其他的内容就一笔带过了，如果大家实在感兴趣，可以自行查阅资料。</p> 
+  <h4><a id="1__12"></a>1. 管道</h4> 
+  <p>我们通常所说的管道一般是指无名管道，是 IPC 中最古老的一种形式。1. 数据不能自己写，自己读；2. 管道中数据不可反复读，一旦读走，管道中不再存在；3. 采用半双工通信方式，数据只能单方向上流动；4. 只能在带有血缘关系的进程间通信；5. 管道可以看成是一种特殊的文件，对于它的读写也可以使用普通的 read、write 等函数，但是它不是普通的文件，并不属于其他任何文件系统，并且只存在于内存中。</p> 
+  <pre><code>#include&lt;stdio.h&gt;
+#include&lt;unistd.h&gt;
+  
+int main()
+ {
+     int fd[2];  // 两个文件描述符
+     pid_t pid;
+     char buff[20];
+ 
+     if(pipe(fd) &lt; 0)  // 创建管道
+         printf("Create Pipe Error!\n");
+ 
+     if((pid = fork()) &lt; 0)  // 创建子进程
+         printf("Fork Error!\n");
+     else if(pid &gt; 0)  // 父进程
+     {
+         close(fd[0]); // 关闭读端
+         write(fd[1], "hello pipe\n", 11);
+     }
+     else
+     {
+         close(fd[1]); // 关闭写端
+         read(fd[0], buff, 20);
+         printf("%s", buff);
+     }
+     return 0;
+ }
+</code></pre> 
+  <h4><a id="2__45"></a>2. 信号</h4> 
+  <p>信号 (signal) 机制是 Linux 系统中最为古老的进程间通信机制，信号不能携带大量的数据信息，一般在满足特定场景时才会触发信号。信号啥时会产生？</p> 
+  <ol> 
+   <li>按键产生，ctrl+c，ctrl+z</li> 
+   <li>系统调用产生，kill，raise，abort</li> 
+   <li>软件条件产生，alarm</li> 
+   <li>硬件异常产生，非法访问内存，除0，内存对齐出错</li> 
+   <li>命令产生，kill</li> 
+  </ol> 
+  <p>信号出现时怎么处理？</p> 
+  <ol> 
+   <li>忽略此信号，但有两种信号决不能被忽略,它们是： SIGKILL\SIGSTOP。 这是因为这两种信号向超级用户提供了一种终止或停止进程的方法。</li> 
+   <li>执行系统默认动作，对大多数信号的系统默认动作是终止该进程。</li> 
+   <li>执行用户希望的动作，通知内核在某种信号发生时，调用一个用户函数。在用户函数中，执行用户希望的处理。</li> 
+  </ol> 
+  <pre><code>#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;signal.h&gt;
+
+int main(int argc, char* argv[]){
+        pid_t pid = fork();
+        if(pid &lt; 0){
+                printf("fork error!\n");
+        }else if(pid &gt; 0){
+                while(1){
+                        printf("I am parent!\n");
+                        sleep(1);
+                }
+        }else if(pid == 0){
+                sleep(5);
+                kill(getppid(), SIGKILL);
+        }
+        return 0;
+}
+</code></pre> 
+  <p>上面是一个非常简单的小例子，大家不妨看一下 Process.killProcess() 的源码。</p> 
+  <h4><a id="3__85"></a>3. 共享映射区</h4> 
+  <p>有关于共享内存的实现方式，大家可以参考一下这篇文章<a href="https://www.jianshu.com/p/8e44625c3945" rel="nofollow">《JNI 基础 - Android 共享内存的序列化过程》</a> ，这里我们主要来讲讲 mmap 这个函数作用与实现原理，在 Android 的 binder 驱动中，在腾讯开源的 MMKV库中，在一些高性能的日志库中，凡是关于共享映射区的地方都会有它的存在。先来看下函数的原型：</p> 
+  <pre><code>void *mmap(void *start,size_t length,int prot,int flags,int fd,off_t offsize);
+</code></pre> 
+  <p>参数 start：指向欲映射的内存起始地址，通常设为 NULL，代表让系统自动选定地址，映射成功后返回该地址。</p> 
+  <p>参数 length：代表将文件中多大的部分映射到内存。</p> 
+  <p>参数 prot：映射区域的保护方式。可以为以下几种方式的组合：</p> 
+  <ul> 
+   <li>PROT_EXEC 页内容可以被执行</li> 
+   <li>PROT_READ 页内容可以被读取</li> 
+   <li>PROT_WRITE 页可以被写入</li> 
+   <li>PROT_NONE 页不可访问</li> 
+  </ul> 
+  <p>参数 flags：指定映射对象的类型，映射选项和映射页是否可以共享。可以为以下几种方式的组合：</p> 
+  <ul> 
+   <li>AP_FIXED 使用指定的映射起始地址，如果由start和len参数指定的内存区重叠于现存的映射空间，重叠部分将会被丢弃。如果指定的起始地址不可用，操作将会失败。并且起始地址必须落在页的边界上。</li> 
+   <li>MAP_SHARED 与其它所有映射这个对象的进程共享映射空间。对共享区的写入，相当于输出到文件。直到msync()或者munmap()被调用，文件实际上不会被更新。</li> 
+   <li>MAP_PRIVATE 建立一个写入时拷贝的私有映射。内存区域的写入不会影响到原文件。这个标志和以上标志是互斥的，只能使用其中一个。</li> 
+   <li>MAP_NORESERVE 不要为这个映射保留交换空间。当交换空间被保留，对映射区修改的可能会得到保证。当交换空间不被保留，同时内存不足，对映射区的修改会引起段违例信号。</li> 
+   <li>MAP_ANONYMOUS 匿名映射，映射区不与任何文件关联。</li> 
+   <li>等等不常用的</li> 
+  </ul> 
+  <p>参数 fd：文件句柄 fd。如果 MAP_ANONYMOUS 被设定，为了兼容问题，其值应为-1。</p> 
+  <p>参数 offset：被映射对象内容的偏移位置（起点）。</p> 
+  <pre><code>#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;pthread.h&gt;
+
+struct person{
+        char name[24];
+        int age;
+};
+
+void sys_err(const char *str){
+        perror(str);
+        exit(0);
+}
+
+int main(int argc, char *argv[]){
+        int fd;
+        struct person stu = {"Darren", 25};
+        struct person *p;
+        fd = open("test_map", O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if(fd == -1)
+                sys_err("open error");
+
+        ftruncate(fd, sizeof(stu));
+
+        p = (person*)mmap(NULL, sizeof(stu), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+        if(p == MAP_FAILED)
+                sys_err("mmap error");
+        while(1){
+                memcpy(p, &amp;stu, sizeof(stu));
+                stu.age++;
+                sleep(1);
+        }
+
+        munmap(p, sizeof(stu));
+        close(fd);
+        return 0;
+}
+</code></pre> 
+  <pre><code>#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;pthread.h&gt;
+
+struct person{
+        char name[24];
+        int age;
+};
+
+void sys_err(const char *str){
+        perror(str);
+        exit(0);
+}
+
+int main(int argc, char *argv[]){
+        int fd;
+        struct person *p;
+        fd = open("test_map", O_RDONLY);
+        if(fd == -1)
+                sys_err("open error");
+
+        p = (person*)mmap(NULL, sizeof(person), PROT_READ, MAP_SHARED, fd, 0);
+        if(p == MAP_FAILED)
+                sys_err("mmap error");
+        while(1){
+                printf("name = %s, age = %d\n", p-&gt;name, p-&gt;age);
+                sleep(2);
+        }
+
+        munmap(p, sizeof(person));
+        close(fd);
+        return 0;
+}
+</code></pre> 
+  <p>关于其实现的原理，最好的方式自然是看源码，但这里我们主要来聊聊 <strong>Android binder 中 mmap 的作用及原理（一次内存拷贝）</strong>，关于 mmap 的源码大家可以自行阅读（不难的），具体的位置在</p> 
+  <pre><code>android/platform/bionic/libc/bionic/mmap.cpp 
+</code></pre> 
+  <p>Android 应用在进程启动之初会创建一个单例的 ProcessState 对象，其构造函数执行时会同时完成 binder 的 mmap，为进程分配一块内存，专门用于 Binder 通信，如下。</p> 
+  <pre><code>ProcessState::ProcessState(const char *driver)
+    : mDriverName(String8(driver))
+    , mDriverFD(open_driver(driver))
+    ...
+ {
+    if (mDriverFD &gt;= 0) {
+        // mmap the binder, providing a chunk of virtual address space to receive transactions.
+        mVMStart = mmap(0, BINDER_VM_SIZE, PROT_READ, MAP_PRIVATE | MAP_NORESERVE, mDriverFD, 0);
+        ...
+    }
+}
+</code></pre> 
+  <p>第一个参数是分配地址，为0意味着让系统自动分配，先在用户空间找到一块合适的虚拟内存，之后，在内核空间也找到一块合适的虚拟内存，修改两个控件的页表，使得两者映射到同一块物理内存。</p> 
+  <p>Linux 的内存分用户空间跟内核空间，同时页表也分两类，用户空间页表跟内核空间页表，每个进程有一个用户空间页表，但是系统只有一个内核空间页表。而 Binder mmap 的关键是：也更新用户空间对应的页表的同时也同步映射内核页表，让两个页表都指向同一块地址，这样一来，数据只需要从 A 进程的用户空间，直接拷贝拷贝到 B 所对应的内核空间，而 B 多对应的内核空间在 B 进程的用户空间也有相应的映射，这样就无需从内核拷贝到用户空间了。</p> 
+  <pre><code>static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+    int ret;
+    ...
+    if ((vma-&gt;vm_end - vma-&gt;vm_start) &gt; SZ_4M)
+        vma-&gt;vm_end = vma-&gt;vm_start + SZ_4M;
+    ...
+    // 在内核空间找合适的虚拟内存块
+    area = get_vm_area(vma-&gt;vm_end - vma-&gt;vm_start, VM_IOREMAP);
+    proc-&gt;buffer = area-&gt;addr;
+    // 记录用户空间虚拟地址跟内核空间虚拟地址的差值 
+    proc-&gt;user_buffer_offset = vma-&gt;vm_start - (uintptr_t)proc-&gt;buffer;
+    ...
+    proc-&gt;pages = kzalloc(sizeof(proc-&gt;pages[0]) * ((vma-&gt;vm_end - vma-&gt;vm_start) / PAGE_SIZE), GFP_KERNEL);
+    // 分配page，并更新用户空间及内核空间对应的页表 
+    ret = binder_update_page_range(proc, 1, proc-&gt;buffer, proc-&gt;buffer + PAGE_SIZE, vma);
+    ...
+    return ret;
+}
+
+static int binder_update_page_range(struct binder_proc *proc, int allocate,
+            void *start, void *end,
+            struct vm_area_struct *vma)
+{
+  ...
+  // 一页页分配
+  for (page_addr = start; page_addr &lt; end; page_addr += PAGE_SIZE) {
+    int ret;
+    struct page **page_array_ptr;
+    // 分配一页
+    page = &amp;proc-&gt;pages[(page_addr - proc-&gt;buffer) / PAGE_SIZE];
+    *page = alloc_page(GFP_KERNEL | __GFP_HIGHMEM | __GFP_ZERO);
+    ...
+    // 修改页表，让物理空间映射到内核空间 
+    ret = map_vm_area(&amp;tmp_area, PAGE_KERNEL, &amp;page_array_ptr);
+    ..
+    // 根据之前记录过差值，计算用户空间对应的虚拟地址 
+    user_page_addr =
+        (uintptr_t)page_addr + proc-&gt;user_buffer_offset;
+    // 修改页表，让物理空间映射到用户空间 
+    ret = vm_insert_page(vma, user_page_addr, page[0]);
+  }
+  ...
+  return -ENOMEM;
+}
+</code></pre> 
+  <p>上面的代码可以看到，binder 一次拷贝的关键是，完成内存的时候，同时完成了内核空间跟用户空间的映射，也就是说，同一份物理内存，既可以在用户空间用虚拟地址访问，也可以在内核空间用虚拟地址访问。</p> 
+  <p>视频链接：<a href="https://pan.baidu.com/s/17kmg5JUhFrlNIvhKRaNv4Q" rel="nofollow">https://pan.baidu.com/s/17kmg5JUhFrlNIvhKRaNv4Q</a><br> 视频密码：a4pw</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>解开 Windows 下的临界区中的代码死锁 « NotBeCN</title>
+  <meta name="description" content="                  本文假定您熟悉 Win32、C++ 和多线程处理。     下载本文的代码：CriticalSections.exe (415KB)      摘要     临界区是一种防止多个线程同时执行一个特定代码节的机制，这一主题并没有引起太多关注，因而人们未能对其深刻理解。在需要跟踪代...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/10/30/weixin_34025151_90122322.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">解开 Windows 下的临界区中的代码死锁</h1>
+    <p class="post-meta">Oct 30, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="blogpost-body"> 
+    <p>本文假定您熟悉 Win32、C++ 和多线程处理。</p> 
+    <p>下载本文的代码：<a href="http://download.microsoft.com/download/a/5/f/a5f7e731-af88-476e-9d57-02b44945ed3a/CriticalSections.exe" rel="nofollow">CriticalSections.exe</a> (415KB) </p> 
+    <p><strong>摘要</strong><strong></strong></p> 
+    <p>临界区是一种防止多个线程同时执行一个特定代码节的机制，这一主题并没有引起太多关注，因而人们未能对其深刻理解。在需要跟踪代码中的多线程处理的性能时，对 Windows 中临界区的深刻理解非常有用。 本文深入研究临界区的原理，以揭示在查找死锁和确认性能问题过程中的有用信息。它还包含一个便利的实用工具程序，可以显示所有临界区及其当前状态。</p> 
+    <p>在我们许多年的编程实践中，对于 Win32® 临界区没有受到非常多的“under the hood”关注而感到非常奇怪。当然，您可能了解有关临界区初始化与使用的基础知识，但您是否曾经花费时间来深入研究 WINNT.H 中所定义的 CRITICAL_SECTION 结构呢？在这一结构中有一些非常有意义的好东西被长期忽略。我们将对此进行补充，并向您介绍一些很有意义的技巧，这些技巧对于跟踪那些难以察觉的多线程处理错误非常有用。更重要的是，使用我们的 MyCriticalSections 实用工具，可以明白如何对 CRITICAL_SECTION 进行微小地扩展，以提供非常有用的特性，这些特性可用于调试和性能调整（要下载完整代码，参见本文顶部的链接）。</p> 
+    <p>老实说，作者们经常忽略 CRITICAL_SECTION 结构的部分原因在于它在以下两个主要 Win32 代码库中的实现有很大不同：Microsoft® Windows® 95 和 Windows NT®。人们知道这两种代码库都已经发展出大量后续版本（其最新版本分别为 Windows Me 和 Windows XP），但没有必要在此处将其一一列出。关键在于 Windows XP 现在已经发展得非常完善，开发商可能很快就会停止对 Windows 95 系列操作系统的支持。我们在本文中就是这么做的。</p> 
+    <p>诚然，当今最受关注的是 Microsoft .NET Framework，但是良好的旧式 Win32 编程不会很快消失。如果您拥有采用了临界区的现有 Win32 代码，您会发现我们的工具以及对临界区的说明都非常有用。但是请注意，我们只讨论 Windows NT 及其后续版本，而没有涉及与 .NET 相关的任何内容，这一点非常重要。</p> 
+    <p>临界区：简述</p> 
+    <p>如果您非常熟悉临界区，并可以不假思索地进行应用，那就可以略过本节。否则，请向下阅读，以对这些内容进行快速回顾。如果您不熟悉这些基础内容，则本节之后的内容就没有太大意义。</p> 
+    <p>临界区是一种轻量级机制，在某一时间内只允许一个线程执行某个给定代码段。通常在修改全局数据（如集合类）时会使用临界区。事件、多用户终端执行程序和信号量也用于多线程同步，但临界区与它们不同，它并不总是执行向内核模式的控制转换，这一转换成本昂贵。稍后将会看到，要获得一个未占用临界区，事实上只需要对内存做出很少的修改，其速度非常快。只有在尝试获得已占用临界区时，它才会跳至内核模式。这一轻量级特性的缺点在于临界区只能用于对同一进程内的线程进行同步。</p> 
+    <p>临界区由 WINNT.H 中所定义的 RTL_CRITICAL_SECTION 结构表示。因为您的 C++ 代码通常声明一个 CRITICAL_SECTION 类型的变量，所以您可能对此并不了解。研究 WINBASE.H 后您会发现： </p> 
+    <pre class="codeSample">typedef RTL_CRITICAL_SECTION CRITICAL_SECTION;
+</pre> 
+    <p>我们将在短时间内揭示 RTL_CRITICAL_SECTION 结构的实质。此时，重要问题在于 CRITICAL_SECTION（也称作 RTL_CRITICAL_SECTION）只是一个拥有易访问字段的结构，这些字段可以由 KERNEL32 API 操作。</p> 
+    <p>在将临界区传递给 InitializeCriticalSection 时（或者更准确地说，是在传递其地址时），临界区即开始存在。初始化之后，代码即将临界区传递给 EnterCriticalSection 和 LeaveCriticalSection API。一个线程自 EnterCriticalSection 中返回后，所有其他调用 EnterCriticalSection 的线程都将被阻止，直到第一个线程调用 LeaveCriticalSection 为止。最后，当不再需要该临界区时，一种良好的编码习惯是将其传递给 DeleteCriticalSection。</p> 
+    <p>在临界区未被使用的理想情况中，对 EnterCriticalSection 的调用非常快速，因为它只是读取和修改用户模式内存中的内存位置。否则（在后文将会遇到一种例外情况），阻止于临界区的线程有效地完成这一工作，而不需要消耗额外的 CPU 周期。所阻止的线程以内核模式等待，在该临界区的所有者将其释放之前，不能对这些线程进行调度。如果有多个线程被阻止于一个临界区中，当另一线程释放该临界区时，只有一个线程获得该临界区。</p> 
+    <p>深入研究：RTL_CRITICAL_SECTION 结构</p> 
+    <p>即使您已经在日常工作中使用过临界区，您也非常可能并没有真正了解超出文档之外的内容。事实上存在着很多非常容易掌握的内容。例如，人们很少知道一个进程的临界区是保存于一个链表中，并且可以对其进行枚举。实际上，WINDBG 支持 !locks 命令，这一命令可以列出目标进程中的所有临界区。我们稍后将要谈到的实用工具也应用了临界区这一鲜为人知的特征。为了真正理解这一实用工具如何工作，有必要真正掌握临界区的内部结构。记着这一点，现在开始研究 RTL_CRITICAL_SECTION 结构。为方便起见，将此结构列出如下： </p> 
+    <pre class="codeSample">struct RTL_CRITICAL_SECTION
+{
+PRTL_CRITICAL_SECTION_DEBUG DebugInfo;
+LONG LockCount;
+LONG RecursionCount;
+HANDLE OwningThread;
+HANDLE LockSemaphore;
+ULONG_PTR SpinCount;
+};
+</pre> 
+    <p>以下各段对每个字段进行说明。</p> 
+    <p><strong>DebugInfo</strong> 此字段包含一个指针，指向系统分配的伴随结构，该结构的类型为 RTL_CRITICAL_SECTION_DEBUG。这一结构中包含更多极有价值的信息，也定义于 WINNT.H 中。我们稍后将对其进行更深入地研究。</p> 
+    <p><strong>LockCount</strong> 这是临界区中最重要的一个字段。它被初始化为数值 -1；此数值等于或大于 0 时，表示此临界区被占用。当其不等于 -1 时，OwningThread 字段（此字段被错误地定义于 WINNT.H 中 — 应当是 DWORD 而不是 HANDLE）包含了拥有此临界区的线程 ID。此字段与 (RecursionCount -1) 数值之间的差值表示有多少个其他线程在等待获得该临界区。</p> 
+    <p><strong>RecursionCount</strong> 此字段包含所有者线程已经获得该临界区的次数。如果该数值为零，下一个尝试获取该临界区的线程将会成功。</p> 
+    <p><strong>OwningThread</strong> 此字段包含当前占用此临界区的线程的线程标识符。此线程 ID 与 GetCurrentThreadId 之类的 API 所返回的 ID 相同。</p> 
+    <p><strong>LockSemaphore</strong> 此字段的命名不恰当，它实际上是一个自复位事件，而不是一个信号。它是一个内核对象句柄，用于通知操作系统：该临界区现在空闲。操作系统在一个线程第一次尝试获得该临界区，但被另一个已经拥有该临界区的线程所阻止时，自动创建这样一个句柄。应当调用 DeleteCriticalSection（它将发出一个调用该事件的 CloseHandle 调用，并在必要时释放该调试结构），否则将会发生资源泄漏。</p> 
+    <p><strong>SpinCount</strong> 仅用于多处理器系统。MSDN® 文档对此字段进行如下说明：“在多处理器系统中，如果该临界区不可用，调用线程将在对与该临界区相关的信号执行等待操作之前，旋转 dwSpinCount 次。如果该临界区在旋转操作期间变为可用，该调用线程就避免了等待操作。”旋转计数可以在多处理器计算机上提供更佳性能，其原因在于在一个循环中旋转通常要快于进入内核模式等待状态。此字段默认值为零，但可以用 InitializeCriticalSectionAndSpinCount API 将其设置为一个不同值。</p> 
+    <p>RTL_CRITICAL_SECTION_DEBUG 结构</p> 
+    <p>前面我们注意到，在 RTL_CRITICAL_SECTION 结构内，DebugInfo 字段指向一个 RTL_CRITICAL_SECTION_DEBUG 结构，该结构给出如下： </p> 
+    <pre class="codeSample">struct _RTL_CRITICAL_SECTION_DEBUG
+{
+WORD   Type;
+WORD   CreatorBackTraceIndex;
+RTL_CRITICAL_SECTION *CriticalSection;
+LIST_ENTRY ProcessLocksList;
+DWORD EntryCount;
+DWORD ContentionCount;
+DWORD Spare[ 2 ];
+}
+</pre> 
+    <p>这一结构由 InitializeCriticalSection 分配和初始化。它既可以由 NTDLL 内的预分配数组分配，也可以由进程堆分配。RTL_CRITICAL_SECTION 的这一伴随结构包含一组匹配字段，具有迥然不同的角色：有两个难以理解，随后两个提供了理解这一临界区链结构的关键，两个是重复设置的，最后两个未使用。 </p> 
+    <p>下面是对 RTL_CRITICAL_SECTION 字段的说明。</p> 
+    <p><strong>Type</strong> 此字段未使用，被初始化为数值 0。</p> 
+    <p><strong>CreatorBackTraceIndex</strong> 此字段仅用于诊断情形中。在注册表项 HKLM\Software\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\YourProgram 之下是 keyfield、GlobalFlag 和 StackTraceDatabaseSizeInMb 值。注意，只有在运行稍后说明的 Gflags 命令时才会显示这些值。这些注册表值的设置正确时，CreatorBackTraceIndex 字段将由堆栈跟踪中所用的一个索引值填充。在 <a href="http://www.msdn.microsoft.com/" rel="nofollow">MSDN</a> 中搜索 GFlags 文档中的短语“create user mode stack trace database”和“enlarging the user-mode stack trace database”，可以找到有关这一内容的更多信息。</p> 
+    <p><strong>CriticalSection</strong> 指向与此结构相关的 RTL_CRITICAL_SECTION。<strong>图 1</strong> 说明该基础结构以及 RTL_CRITICAL_SECTION、RTL_CRITICAL_SECTION_DEBUG 和事件链中其他参与者之间的关系。</p> 
+    <div style="width:271px;"> 
+     <img width="271" height="378" alt="fig01" src="http://www.microsoft.com/china/MSDN/library/enterprisedevelopment/softwaredev/art/Deadlockfig01.gif">
+     <br>
+     <p><strong>图 1 临界区处理流程</strong></p> 
+     <div class="figureRule"></div> 
+    </div> 
+    <p><strong>ProcessLocksList</strong> LIST_ENTRY 是用于表示双向链表中节点的标准 Windows 数据结构。RTL_CRITICAL_SECTION_DEBUG 包含了链表的一部分，允许向前和向后遍历该临界区。本文后面给出的实用工具说明如何使用 Flink（前向链接）和 Blink（后向链接）字段在链表中的成员之间移动。任何从事过设备驱动程序或者研究过 Windows 内核的人都会非常熟悉这一数据结构。</p> 
+    <p><strong>EntryCount/ContentionCount</strong> 这些字段在相同的时间、出于相同的原因被递增。这是那些因为不能马上获得临界区而进入等待状态的线程的数目。与 LockCount 和 RecursionCount 字段不同，这些字段永远都不会递减。</p> 
+    <p><strong>Spares</strong> 这两个字段未使用，甚至未被初始化（尽管在删除临界区结构时将这些字段进行了清零）。后面将会说明，可以用这些未被使用的字段来保存有用的诊断值。</p> 
+    <p>即使 RTL_CRITICAL_SECTION_DEBUG 中包含多个字段，它也是常规临界区结构的必要成分。事实上，如果系统恰巧不能由进程堆中获得这一结构的存储区，InitializeCriticalSection 将返回为 STATUS_NO_MEMORY 的 LastError 结果，然后返回处于不完整状态的临界区结构。</p> 
+    <p>临界区状态</p> 
+    <p>当程序执行、进入与离开临界区时，RTL_CRITICAL_SECTION 和 RTL_CRITICAL_SECTION_DEBUG 结构中的字段会根据临界区所处的状态变化。这些字段由临界区 API 中的簿记代码更新，在后面将会看到这一点。如果程序为多线程，并且其线程访问是由临界区保护的公用资源，则这些状态就更有意义。</p> 
+    <p>但是，不管代码的线程使用情况如何，有两种状态都会出现。第一种情况，如果 LockCount 字段有一个不等于 -1 的数值，此临界区被占用，OwningThread 字段包含拥有该临界区的线程的线程标识符。在多线程程序中，LockCount 与 RecursionCount 联合表明当前有多少线程被阻止于该临界区。第二种情况，如果 RecursionCount 是一个大于 1 的数值，其告知您所有者线程已经重新获得该临界区多少次（也许不必要），该临界区既可以通过调用 EnterCriticalSection、也可以通过调用 TryEnterCriticalSection 获得。大于 1 的任何数值都表示代码的效率可能较低或者可能在以后发生错误。例如，访问公共资源的任何 C++ 类方法可能会不必要地重新进入该临界区。</p> 
+    <p>注意，在大多数时间里，LockCount 与 RecursionCount 字段中分别包含其初始值 -1 和 0，这一点非常重要。事实上，对于单线程程序，不能仅通过检查这些字段来判断是否曾获得过临界区。但是，多线程程序留下了一些标记，可以用来判断是否有两个或多个线程试图同时拥有同一临界区。</p> 
+    <p>您可以找到的标记之一是即使在该临界区未被占用时 LockSemaphore 字段中仍包含一个非零值。这表示：在某一时间，此临界区阻止了一个或多个线程 — 事件句柄用于通知该临界区已被释放，等待该临界区的线程之一现在可以获得该临界区并继续执行。因为 OS 在临界区阻止另一个线程时自动分配事件句柄，所以如果您在不再需要临界区时忘记将其删除，LockSemaphore 字段可能会导致程序中发生资源泄漏。</p> 
+    <p>在多线程程序中可能遇到的另一状态是 EntryCount 和 ContentionCount 字段包含一个大于零的数值。这两个字段保存有临界区对一个线程进行阻止的次数。在每次发生这一事件时，这两个字段被递增，但在临界区存在期间不会被递减。这些字段可用于间接确定程序的执行路径和特性。例如，EntryCount 非常高时则意味着该临界区经历着大量争用，可能会成为代码执行过程中的一个潜在瓶颈。</p> 
+    <p>在研究一个死锁程序时，还会发现一种似乎无法进行逻辑解释的状态。一个使用非常频繁的临界区的 LockCount 字段中包含一个大于 -1 的数值，也就是说它被线程所拥有，但是 OwningThread 字段为零（这样就无法找出是哪个线程导致问题）。测试程序是多线程的，在单处理器计算机和多处理器计算机中都会出现这种情况。尽管 LockCount 和其他值在每次运行中都不同，但此程序总是死锁于同一临界区。我们非常希望知道是否有任何其他开发人员也遇到了导致这一状态的 API 调用序列。</p> 
+    <p>构建一个更好的捕鼠器</p> 
+    <p>在我们学习临界区的工作方式时，非常偶然地得到一些重要发现，利用这些发现可以得到一个非常好的实用工具。第一个发现是 ProcessLocksList LIST_ENTRY 字段的出现，这使我们想到进程的临界区可能是可枚举的。另一个重大发现是我们知道了如何找出临界区列表的头。还有一个重要发现是可以在没有任何损失的情况下写 RTL_CRITICAL_SECTION 的 Spare 字段（至少在我们的所有测试中如此）。我们还发现可以很容易地重写系统的一些临界区例程，而不需要对源文件进行任何修改。</p> 
+    <p>最初，我们由一个简单的程序开始，其检查一个进程中的所有临界区，并列出其当前状态，以查看是否拥有这些临界区。如果拥有，则找出由哪个线程拥有，以及该临界区阻止了多少个线程？这种做法对于 OS 的狂热者们比较适合，但对于只是希望有助于理解其程序的典型的程序员就不是非常有用了。</p> 
+    <p>即使是在最简单的控制台模式“Hello World”程序中也存在许多临界区。其中大部分是由 USER32 或 GDI32 之类的系统 DLL 创建，而这些 DLL 很少会导致死锁或性能问题。我们希望有一种方法能滤除这些临界区，而只留下代码中所关心的那些临界区。RTL_CRITICAL_SECTION_DEBUG 结构中的 Spare 字段可以很好地完成这一工作。可以使用其中的一个或两个来指示：这些临界区是来自用户编写的代码，而不是来自 OS。</p> 
+    <p>于是，下一个逻辑问题就变为如何确定哪些临界区是来自您编写的代码。有些读者可能还记得 Matt Pietrek 2001 年 1 月的 <a href="http://www.msdn.microsoft.com/msdnmag/issues/01/01/hood/" rel="nofollow">Under The Hood</a> 专栏中的 LIBCTINY.LIB。LIBCTINY 所采用的一个技巧是一个 LIB 文件，它重写了关键 Visual C++ 运行时例程的标准实现。将 LIBCTINY.LIB 文件置于链接器行的其他 LIB 之前，链接器将使用这一实现，而不是使用 Microsoft 所提供的导入库中的同名后续版本。</p> 
+    <p>为对临界区应用类似技巧，我们创建 InitializeCriticalSection 的一个替代版本及其相关导入库。将此 LIB 文件置于 KERNEL32.LIB 之前，链接器将链接我们的版本，而不是 KERNEL32 中的版本。对 InitializeCriticalSection 的实现显示在<a href="http://www.msdn.microsoft.com/msdnmag/issues/03/12/CriticalSections/default.aspx?fig=true#fig2" rel="nofollow">图 2</a> 中。此代码在概念上非常简单。它首先调用 KERNEL32.DLL 中的实际 InitializeCriticalSection。接下来，它获得调用 InitializeCriticalSection 的代码地址，并将其贴至 RTL_CRITICAL_SECTION_DEBUG 结构的备用字段之一。我们的代码如何确定调用代码的地址呢？x86 CALL 指令将返回地址置于堆栈中。CriticalSectionHelper 代码知道该返回地址位于堆栈帧中一个已知的固定位置。</p> 
+    <p>实际结果是：与 CriticalSectionHelper.lib 正确链接的任何 EXE 或 DLL 都将导入我们的 DLL (CriticalSectionHelper.DLL)，并占用应用了备用字段的临界区。这样就使事情简单了许多。现在我们的实用工具可以简单地遍历进程中的所有临界区，并且只显示具有正确填充的备用字段的临界区信息。那么需要为这一实用工具付出什么代价呢？请稍等，还有更多的内容！</p> 
+    <p>因为您的所有临界区现在都包含对其进行初始化时的地址，实用工具可以通过提供其初始化地址来识别各个临界区。原始代码地址本身没有那么有用。幸运的是，DBGHELP.DLL 使代码地址向源文件、行号和函数名称的转换变得非常容易。即使一个临界区中没有您在其中的签名，也可以将其地址提交给 DBGHELP.DLL。如果将其声明为一个全局变量，并且如果符号可用，则您就可以在原始源代码中确定临界区的名称。顺便说明一下，如果通过设置 _NT_SYMBOL_PATH 环境变量，并设置 DbgHelp 以使用其 Symbol Server 下载功能，从而使 DbgHelp 发挥其效用，则会得到非常好的结果。</p> 
+    <p>MyCriticalSections 实用工具</p> 
+    <p>我们将所有这些思想结合起来，提出了 MyCriticalSections 程序。MyCriticalSections 是一个命令行程序，在不使用参数运行该程序时可以看到一些选项： </p> 
+    <pre class="codeSample">Syntax: MyCriticalSections &lt;PID&gt; [options]
+Options:
+/a = all critical sections
+/e = show only entered critical sections
+/v = verbose
+</pre> 
+    <p>唯一需要的参数是 Program ID 或 PID（十进制形式）。可以用多种方法获得 PID，但最简单的方法可能就是通过 Task Manager。在没有其他选项时，MyCriticalSections 列出了来自代码模块的所有临界区状态，您已经将 CriticalSectionHelper.DLL 链接至这些代码模块。如果有可用于这一（些）模块的符号，代码将尝试提供该临界区的名称，以及对其进行初始化的位置。</p> 
+    <p>要查看 MyCriticalSections 是如何起作用的，请运行 Demo.EXE 程序，该程序包含在下载文件中。Demo.EXE 只是初始化两个临界区，并由一对线程进入这两个临界区。<a href="http://www.msdn.microsoft.com/msdnmag/issues/03/12/CriticalSections/default.aspx?fig=true#fig3" rel="nofollow">图 3</a> 显示运行“MyCriticalSections 2040”的结果（其中 2040 为 Demo.EXE 的 PID）。</p> 
+    <p>在该图中，列出了两个临界区。在本例中，它们被命名为 csMain 和 yetAnotherCriticalSection。每个“Address:”行显示了 CRITICAL_SECTION 的地址及其名称。“Initialized in”行包含了在其中初始化 CRITICAL_SECTION 的函数名。代码的“Initialized at”行显示了源文件和初始化函数中的行号。</p> 
+    <p>对于 csMain 临界区，您将看到锁定数为 0、递归数为 1，表示一个已经被一线程获得的临界区，并且没有其他线程在等待该临界区。因为从来没有线程被阻止于该临界区，所以 Entry Count 字段为 0。</p> 
+    <p>现在来看 yetAnotherCriticalSection，会发现其递归数为 3。快速浏览 Demo 代码可以看出：主线程调用 EnterCriticalSection 三次，所以事情的发生与预期一致。但是，还有一个第二线程试图获得该临界区，并且已经被阻止。同样，LockCount 字段也为 3。此输出显示有一个等待线程。</p> 
+    <p>MyCriticalSections 拥有一些选项，使其对于更为勇敢的探索者非常有用。/v 开关显示每个临界区的更多信息。旋转数与锁定信号字段尤为重要。您经常会看到 NTDLL 和其他 DLL 拥有一些旋转数非零的临界区。如果一个线程在获得临界区的过程中曾被锁定，则锁定信号字段为非零值。/v 开关还显示了 RTL_CRITICAL_SECTION_DEBUG 结构中备用字段的内容。</p> 
+    <p>/a 开关显示进程中的所有临界区，即使其中没有 CriticalSectionHelper.DLL 签名也会显示。如果使用 /a，则请做好有大量输出的准备。真正的黑客希望同时使用 /a 和 /v，以显示进程中全部内容的最多细节。使用 /a 的一个小小的好处是会看到 NTDLL 中的LdrpLoaderLock 临界区。此临界区在 DllMain 调用和其他一些重要时间内被占用。LdrpLoaderLock 是许多不太明显、表面上难以解释的死锁的形成原因之一。（为使 MyCriticalSection 能够正确标记 LdrpLoaderLock 实例，需要用于 NTDLL 的 PDB 文件可供使用。）</p> 
+    <p>/e 开关使程序仅显示当前被占用的临界区。未使用 /a 开关时，只显示代码中被占用的临界区（如备用字段中的签名所指示）。采用 /a 开关时，将显示进程中的全部被占用临界区，而不考虑其来源。</p> 
+    <p>那么，希望什么时候运行 MyCriticalSections 呢？一个很明确的时间是在程序被死锁时。检查被占用的临界区，以查看是否有什么使您惊讶的事情。即使被死锁的程序正运行于调试器的控制之下，也可以使用 MyCriticalSections。</p> 
+    <p>另一种使用 MyCriticalSections 的时机是在对有大量多线程的程序进行性能调整时。在阻塞于调试器中的一个使用频繁、非重入函数时，运行 MyCriticalSections，查看在该时刻占用了哪些临界区。如果有很多线程都执行相同任务，就非常容易导致一种情形：一个线程的大部分时间被消耗在等待获得一个使用频繁的临界区上。如果有多个使用频繁的临界区，这造成的后果就像花园的浇水软管打了结一样。解决一个争用问题只是将问题转移到下一个容易造成阻塞的临界区。</p> 
+    <p>一个查看哪些临界区最容易导致争用的好方法是在接近程序结尾处设置一个断点。在遇到断点时，运行 MyCriticalSections 并查找具有最大 Entry Count 值的临界区。正是这些临界区导致了大多数阻塞和线程转换。</p> 
+    <p>尽管 MyCriticalSections 运行于 Windows 2000 及更新版本，但您仍需要一个比较新的 DbgHelp.DLL 版本 － 5.1 版或更新版本。Windows XP 中提供这一版本。也可以由其他使用 DbgHelp 的工具中获得该版本。例如，<a href="http://www.msdn.microsoft.com/isapi/gomscom.asp?TARGET=/whdc/ddk/debugging/installx86.mspx" rel="nofollow">Debugging Tools For Windows</a> 下载中通常拥有最新的 DbgHelp.DLL。</p> 
+    <p>深入研究重要的临界区例程</p> 
+    <p>此最后一节是为那些希望理解临界区实现内幕的勇敢读者提供的。对 NTDLL 进行仔细研究后可以为这些例程及其支持子例程创建伪码（见下载中的 NTDLL(CriticalSections).cpp）。以下 KERNEL32 API 组成临界区的公共接口： </p> 
+    <pre class="codeSample">InitializeCriticalSection
+InitializeCriticalSectionAndSpinCount
+DeleteCriticalSection
+TryEnterCriticalSection
+EnterCriticalSection
+LeaveCriticalSection
+</pre> 
+    <p>前两个 API 只是分别围绕 NTDLL API RtlInitializeCriticalSection 和 RtlInitializeCriticalSectionAndSpinCount 的瘦包装。所有剩余例程都被提交给 NTDLL 中的函数。另外，对 RtlInitializeCriticalSection 的调用是另一个围绕 RtlInitializeCriticalSectionAndSpinCount 调用的瘦包装，其旋转数的值为 0。使用临界区的时候实际上是在幕后使用以下 NTDLL API： </p> 
+    <pre class="codeSample">RtlInitializeCriticalSectionAndSpinCount
+RtlEnterCriticalSection
+RtlTryEnterCriticalSection
+RtlLeaveCriticalSection
+RtlDeleteCriticalSection
+</pre> 
+    <p>在这一讨论中，我们采用 Kernel32 名称，因为大多数 Win32 程序员对它们更为熟悉。 </p> 
+    <p>InitializeCriticalSectionAndSpinCount 对临界区的初始化非常简单。RTL_CRITICAL_SECTION 结构中的字段被赋予其起始值。与此类似，分配 RTL_CRITICAL_SECTION_DEBUG 结构并对其进行初始化，将 RtlLogStackBackTraces 调用中的返回值赋予 CreatorBackTraceIndex，并建立到前面临界区的链接。</p> 
+    <p>顺便说一声，CreatorBackTraceIndex 一般接收到的值为 0。但是，如果有 Gflags 和 Umdh 实用工具，可以输入以下命令： </p> 
+    <pre class="codeSample">Gflags /i MyProgram.exe +ust
+Gflags /i MyProgram.exe /tracedb 24
+</pre> 
+    <p>这些命令使得 MyProgram 的“Image File Execution Options”下添加了注册表项。在下一次执行 MyProgram 时会看到此字段接收到一个非 0 数值。有关更多信息，参阅知识库文章 Q268343“<a href="http://www.msdn.microsoft.com/isapi/gosupport.asp?TARGET=/?kbid=268343" rel="nofollow">Umdhtools.exe:How to Use Umdh.exe to Find Memory Leaks</a>”。临界区初始化中另一个需要注意的问题是：前 64 个 RTL_CRITICAL_SECTION_DEBUG 结构不是由进程堆中分配，而是来自位于 NTDLL 内的 .data 节的一个数组。 </p> 
+    <p>在完成临界区的使用之后，对 DeleteCriticalSection（其命名不当，因为它只删除 RTL_CRITICAL_SECTION_ DEBUG）的调用遍历一个同样可理解的路径。如果由于线程在尝试获得临界区时被阻止而创建了一个事件，将通过调用 ZwClose 来销毁该事件。接下来，在通过 RtlCriticalSectionLock 获得保护之后（NTDLL 以一个临界区保护它自己的内部临界区列表 — 您猜对了），将调试信息从链中清除，对该临界区链表进行更新，以反映对该信息的清除操作。该内存由空值填充，并且如果其存储区是由进程堆中获得，则调用 RtlFreeHeap 将使得其内存被释放。最后，以零填充 RTL_CRITICAL_SECTION。</p> 
+    <p>有两个 API 要获得受临界区保护的资源 — TryEnterCriticalSection 和 EnterCriticalSection。如果一个线程需要进入一个临界区，但在等待被阻止资源变为可用的同时，可执行有用的工作，那么 TryEnterCriticalSection 正是您需要的 API。此例程测试此临界区是否可用；如果该临界区被占用，该代码将返回值 FALSE，为该线程提供继续执行另一任务的机会。否则，其作用只是相当于 EnterCriticalSection。</p> 
+    <p>如果该线程在继续进行之前确实需要拥有该资源，则使用 EnterCriticalSection。此时，取消用于多处理器计算机的 SpinCount 测试。这一例程与 TryEnterCriticalSection 类似，无论该临界区是空闲的或已经被该线程所拥有，都调整对该临界区的簿记。注意，最重要的 LockCount 递增是由 x86“lock”前缀完成的，这一点非常重要。这确保了在某一时间内只有一个 CPU 可以修改该 LockCount 字段。（事实上，Win32 InterlockedIncrement API 只是一个具有相同锁定前缀的 ADD 指令。）</p> 
+    <p>如果调用线程无法立即获得该临界区，则调用 RtlpWaitForCriticalSection 将该线程置于等待状态。在多处理器系统中，EnterCriticalSection 旋转 SpinCount 所指定的次数，并在每次循环访问中测试该临界区的可用性。如果此临界区在循环期间变为空闲，该线程获得该临界区，并继续执行。</p> 
+    <p>RtlpWaitForCriticalSection 可能是这里所给的所有过程中最为复杂、最为重要的一个。这并不值得大惊小怪，因为如果存在一个死锁并涉及临界区，则利用调试器进入该进程就可能显示出 RtlpWaitForCriticalSection 内 ZwWaitForSingleObject 调用中的至少一个线程。</p> 
+    <p>如伪码中所显示，在 RtlpWaitForCriticalSection 中有一点簿记工作，如递增 EntryCount 和 ContentionCount 字段。但更重要的是：发出对 LockSemaphore 的等待，以及对等待结果的处理。默认情况是将一个空指针作为第三个参数传递给 ZwWaitForSingleObject 调用，请求该等待永远不要超时。如果允许超时，将生成调试消息字符串，并再次开始等待。如果不能从等待中成功返回，就会产生中止该进程的错误。最后，在从 ZwWaitForSingleObject 调用中成功返回时，则执行从 RtlpWaitForCriticalSection 返回，该线程现在拥有该临界区。</p> 
+    <p>RtlpWaitForCriticalSection 必须认识到的一个临界条件是该进程正在被关闭，并且正在等待加载程序锁定 (LdrpLoaderLock) 临界区。RtlpWaitForCriticalSection 一定<em>不能</em> 允许该线程被阻止，但是必须跳过该等待，并允许继续进行关闭操作。</p> 
+    <p>LeaveCriticalSection 不像 EnterCriticalSection 那样复杂。如果在递减 RecursionCount 之后，结果不为 0（意味着该线程仍然拥有该临界区），则该例程将以 ERROR_SUCCESS 状态返回。这就是为什么需要用适当数目的 Leave 调用来平衡 Enter 调用。如果该计数为 0，则 OwningThread 字段被清零，LockCount 被递减。如果还有其他线程在等待，例如 LockCount 大于或等于 0，则调用 RtlpUnWaitCriticalSection。此帮助器例程创建 LockSemaphore（如果其尚未存在），并发出该信号提醒操作系统：该线程已经释放该临界区。作为通知的一部分，等待线程之一退出等待状态，为运行做好准备。</p> 
+    <p>最后要说明的一点是，MyCriticalSections 程序如何确定临界区链的起始呢？如果有权访问 NTDLL 的正确调试符号，则对该列表的查找和遍历非常简单。首先，定位符号 RtlCriticalSectionList，清空其内容（它指向第一个 RTL_CRITICAL_SECTION_DEBUG 结构），并开始遍历。但是，并不是所有的系统都有调试符号，RtlCriticalSectionList 变量的地址会随 Windows 的各个版本而发生变化。为了提供一种对所有版本都能正常工作的解决方案，我们设计了以下试探性方案。观察启动一个进程时所采取的步骤，会看到是以以下顺序对 NTDLL 中的临界区进行初始化的（这些名称取自 NTDLL 的调试符号）： </p> 
+    <pre class="codeSample">RtlCriticalSectionLock
+DeferedCriticalSection (this is the actual spelling!)
+LoaderLock
+FastPebLock
+RtlpCalloutEntryLock
+PMCritSect
+UMLogCritSect
+RtlpProcessHeapsListLock
+</pre> 
+    <p>因为检查进程环境块 (PEB) 中偏移量 0xA0 处的地址就可以找到加载程序锁，所以对该链起始位置的定位就变得比较简单。我们读取有关加载程序锁的调试信息，然后沿着链向后遍历两个链接，使我们定位于 RtlCriticalSectionLock 项，在该点得到该链的第一个临界区。有关其方法的说明，请参见<strong>图 4</strong>。</p> 
+    <div style="width:325px;"> 
+     <img width="325" height="284" alt="fig04" src="http://www.microsoft.com/china/MSDN/library/enterprisedevelopment/softwaredev/art/Deadlockfig04.gif">
+     <br>
+     <p><strong>图 4 初始化顺序</strong></p> 
+     <div class="figureRule"></div> 
+    </div> 
+    <p>小结</p> 
+    <p>几乎所有的多线程程序均使用临界区。您迟早都会遇到一个使代码死锁的临界区，并且会难以确定是如何进入当前状态的。如果能够更深入地了解临界区的工作原理，则这一情形的出现就不会像首次出现时那样的令人沮丧。您可以研究一个看来非常含糊的临界区，并确定是谁拥有它，以及其他有用细节。如果您愿意将我们的库加入您的链接器行，则可以容易地获得有关您程序临界区使用的大量信息。通过利用临界区结构中的一些未用字段，我们的代码可以仅隔离并命名您的模块所用的临界区，并告知其准确状态。</p> 
+    <p>有魄力的读者可以很容易地对我们的代码进行扩展，以完成更为异乎寻常的工作。例如，采用与 InitializeCriticalSection 挂钩相类似的方式截获 EnterCriticalSection 和 LeaveCriticalSection，可以存储最后一次成功获得和释放该临界区的位置。与此类似，CritSect DLL 拥有一个易于调用的 API，用于枚举您自己的代码中的临界区。利用 .NET Framework 中的 Windows 窗体，可以相对容易地创建一个 GUI 版本的 MyCriticalSections。对我们代码进行扩展的可能性非常大，我们非常乐意看到其他人员所发现和创造的创新性办法。</p> 
+    <p><strong>有关文章，请参阅：</strong><br><a href="http://www.msdn.microsoft.com/library/en-us/ddtools/hh/ddtools/gflags_7u5v.asp" rel="nofollow">Global Flag Reference:Create kernel mode stack trace database</a><br><a href="http://www.msdn.microsoft.com/library/en-us/ddtools/hh/ddtools/gflags_4n77.asp" rel="nofollow">GFlags Examples:Enlarging the User-Mode Stack Trace Database</a><br><a href="http://www.msdn.microsoft.com/msdnmag/issues/01/01/hood/" rel="nofollow">Under the Hood:Reduce EXE and DLL Size with LIBCTINY.LIB</a></p> 
+    <p><strong>Matt Pietrek</strong> 是一位软件架构师和作者。他就职于 Compuware/NuMega 实验室，身份为 BoundsChecker 和“分布式分析器”产品的首席架构师。他已经创作了三本有关 Windows 系统编程的书籍，并是 <em>MSDN Magazine</em> 的特约编辑。他的 Web 站点 (<a href="http://www.wheaty.net/" rel="nofollow">http://www.wheaty.net</a>) 有关于以前文章和专栏的 FAQ 和信息。</p> 
+    <p><strong>Jay Hilyard</strong> 是 Compuware/NuMega 实验室的 BoundsChecker 小组的软件工程师。他、他的妻子和他们的猫是新罕布什尔州的新居民。他的联系方式为 <a>RussOsterlund@adelphia.net</a> 或 Web 站点 <a href="http://www.smidgeonsoft.com/" rel="nofollow">http://www.smidgeonsoft.com</a>。</p> 
+    <p><a href="http://www.msdn.microsoft.com/msdnmag/issues/03/12/CriticalSections/default.aspx" rel="nofollow">转到原英文页面</a></p> 
+   </div> 
+   <div>
+    专注于企业信息化，最近对股票数据分析较为感兴趣，可免费分享股票个股主力资金实时变化趋势分析工具，股票交流QQ群：457394862
+   </div> 
+   <div>
+    <br>
+   </div> 
+   <div>
+    本文转自沧海-重庆博客园博客，原文链接：http://www.cnblogs.com/omygod/archive/2006/11/08/554534.html，如需转载请自行联系原作者
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

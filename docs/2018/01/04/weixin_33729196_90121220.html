@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux线程编程之生产者消费者问题【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/clover-toeic/p/4029269.html    前言    &nbsp; &nbsp; &nbsp;本文基于顺序循环队列，给出Linux生产者/消费者问题的多线程示例，并讨论编程时需要注意的事项。文中涉及的代码运行环境如下...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/04/weixin_33729196_90121220.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux线程编程之生产者消费者问题【转】</h1>
+    <p class="post-meta">Jan 4, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.cnblogs.com/clover-toeic/p/4029269.html" rel="nofollow">http://www.cnblogs.com/clover-toeic/p/4029269.html</a></p> 
+   <h1><span style="font-size:16px;">前言</span></h1> 
+   <p align="left">&nbsp; &nbsp; &nbsp;本文基于顺序循环队列，给出Linux生产者/消费者问题的多线程示例，并讨论编程时需要注意的事项。文中涉及的代码运行环境如下：</p> 
+   <p style="text-align:center;" align="left"><img src="https://yqfile.alicdn.com/img_5ff9e6834ee54efa06cfc8e89625ae0c.jpg" alt="" width="875" height="153"></p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;本文假定读者已具备线程同步的基础知识。</p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">&nbsp;</p> 
+   <h1><span style="font-size:16px;">一 &nbsp;顺序表循环队列</span></h1> 
+   <h2><span style="font-size:15px;">1.1 顺序循环队列定义</span></h2> 
+   <p align="left">&nbsp; &nbsp; &nbsp;队列是一种运算受限的先进先出线性表，仅允许在队尾插入(入队)，在队首删除(出队)。新元素入队后成为新的队尾元素，元素出队后其后继元素就成为队首元素。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;队列的顺序存储结构使用一个数组和两个整型变量实现，其结构如下：</p> 
+   <div class="cnblogs_code"> 
+    <pre><span style="color:#008080;">1 <span style="color:#0000ff;">struct<span style="color:#000000;"> Queue{ <span style="color:#008080;">2 <span style="color:#000000;"> ElemType elem[MaxSize]; <span style="color:#008080;">3 <span style="color:#0000ff;">int<span style="color:#000000;"> head, tail; <span style="color:#008080;">4 };</span></span></span></span></span></span></span></span></span></pre> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">即利用数组elem顺序存储队列中的所有元素，利用整型变量head和tail分别存储队首元素和队尾(或队尾下一个)元素的下标位置，分别称为队首指针和队尾指针。MaxSize指定顺序存储队列的最大长度，即队列中最多能够存储的元素个数。当队列的顺序存储空间静态分配时，MaxSize通常为宏定义；若动态分配时，还可为全局或局部变量。</span></span></p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;单向顺序队列存在“假溢出”问题，即多次入队和出队操作后，队首空余许多位置而队尾指针指向队列中最后一个元素位置，从而无法使新的数据元素入队。假溢出本质在于队首和队尾指针值不能由所定义数组下界值自动转为数组上界值，解决办法是将顺序队列构造成一个逻辑上首尾相连的循环表。当队列的第MaxSize-1个位置被占用后，只要队首还有可用空间，则把新的数据元素插入队列第0号位置。因此，顺序队列通常都采用顺序循环队列结构。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;下图所示为MaxSize=4的循环队列三种状态图：</p> 
+   <p align="center"><img src="https://yqfile.alicdn.com/img_c5d5932fac3f9bfc0aec006f23746209.jpg" alt="" width="465" height="175">&nbsp;</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;其中，为区分队空与队满，在入队时少用一个数据(图中下标为3的位置)。本文约定队首指针head指向队首元素，队尾指针tail指向队尾元素的下一个元素，以队尾指针加1等于队首指针判断队满，即：</p> 
+   <ul>
+    <li>初始化：head = tail = 0；</li> 
+    <li>队列空：head == tail；</li> 
+    <li>队列满：(tail + 1) % MaxSize == head；</li> 
+    <li>元素数：num = (tail - head + MaxSize) % MaxSize</li> 
+   </ul>
+   <p align="left">&nbsp; &nbsp; &nbsp;%为取模运算符，循环队列利用数学上的取模运算将首尾巧妙相连。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;当约定head指向队首前一个元素，tail指向队尾元素时，元素数目仍满足上面的公式。当约定head指向队首元素，tail指向队尾元素时，元素数目为(tail - head + 1 + MaxSize) % MaxSize。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;此外，也可另设一个标志以区别队空和队满。该标志可为布尔型空满标志位，也可为队列中元素个数。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;通过队首元素位置和队列中元素个数，可计算出队尾元素所在位置。亦即，可用队列中元素个数代替队尾指针(或队首指针)。此时，队列满足：</p> 
+   <ul>
+    <li>队列空：num == 0；</li> 
+    <li>队列满：num == MaxSize；</li> 
+    <li>队尾位置：tail = (head + num + MaxSize) % MaxSize</li> 
+   </ul>
+   <h2><span style="font-size:15px;">1.2 顺序循环队列实现</span></h2> 
+   <p align="left">&nbsp; &nbsp; &nbsp;本节将采用C语言实现一个简单但却标准的顺序循环队列函数集。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;首先定义循环队列结构如下：</p> 
+   <div class="cnblogs_code"> 
+    <pre><span style="color:#008080;">1 <span style="color:#0000ff;">#define QUEUE_SIZE 5 <span style="color:#008000;">//<span style="color:#008000;">队列最大容纳QUEUE_SIZE-1个元素 <span style="color:#008080;">2 typedef <span style="color:#0000ff;">struct<span style="color:#000000;">{ <span style="color:#008080;">3 <span style="color:#0000ff;">int aData[QUEUE_SIZE]; <span style="color:#008000;">//<span style="color:#008000;">队列元素 <span style="color:#008080;">4 <span style="color:#0000ff;">int dwHead; <span style="color:#008000;">//<span style="color:#008000;">指向队首元素 <span style="color:#008080;">5 <span style="color:#0000ff;">int dwTail; <span style="color:#008000;">//<span style="color:#800080;">指向队尾元素的下一个元素 <span style="color:#008080;">6 }T_QUEUE, *PT_QUEUE;</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">为求简单性，元素类型假定为整型。&nbsp;</span></span></p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;基于上述结构，定义初始化、入队出队和显示函数：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 <span style="color:#008000;">//<span style="color:#008000;">初始化循环队列 <span style="color:#008080;"> 2 <span style="color:#0000ff;">void<span style="color:#000000;"> InitQue(PT_QUEUE ptQue) <span style="color:#008080;"> 3 <span style="color:#000000;">{ <span style="color:#008080;"> 4 memset(ptQue, <span style="color:#800080;">0, <span style="color:#0000ff;">sizeof(*<span style="color:#000000;">ptQue)); <span style="color:#008080;"> 5 <span style="color:#000000;">} <span style="color:#008080;"> 6 <span style="color:#008080;"> 7 <span style="color:#008000;">//<span style="color:#008000;">向循环队列中插入元素 <span style="color:#008080;"> 8 <span style="color:#0000ff;">void EnterQue(PT_QUEUE ptQue, <span style="color:#0000ff;">int<span style="color:#000000;"> dwElem) <span style="color:#008080;"> 9 <span style="color:#000000;">{ <span style="color:#008080;">10 <span style="color:#0000ff;">if<span style="color:#000000;">(IsQueFull(ptQue)) <span style="color:#008080;">11 <span style="color:#000000;"> { <span style="color:#008080;">12 printf(<span style="color:#800000;">"<span style="color:#800000;">Elem %d cannot enter Queue %p(Full)!\n<span style="color:#800000;">"<span style="color:#000000;">, dwElem, ptQue); <span style="color:#008080;">13 <span style="color:#0000ff;">return<span style="color:#000000;">; <span style="color:#008080;">14 <span style="color:#000000;"> } <span style="color:#008080;">15 ptQue-&gt;aData[ptQue-&gt;dwTail]=<span style="color:#000000;"> dwElem; <span style="color:#008080;">16 ptQue-&gt;dwTail = (ptQue-&gt;dwTail + <span style="color:#800080;">1) %<span style="color:#000000;"> QUEUE_SIZE; <span style="color:#008080;">17 <span style="color:#000000;">} <span style="color:#008080;">18 <span style="color:#008080;">19 <span style="color:#008000;">//<span style="color:#008000;">从循环队列中取出元素 <span style="color:#008080;">20 <span style="color:#0000ff;">int<span style="color:#000000;"> LeaveQue(PT_QUEUE ptQue) <span style="color:#008080;">21 <span style="color:#000000;">{ <span style="color:#008080;">22 <span style="color:#0000ff;">if<span style="color:#000000;">(IsQueEmpty(ptQue)) <span style="color:#008080;">23 <span style="color:#000000;"> { <span style="color:#008080;">24 printf(<span style="color:#800000;">"<span style="color:#800000;">Queue %p is Empty!\n<span style="color:#800000;">"<span style="color:#000000;">, ptQue); <span style="color:#008080;">25 <span style="color:#0000ff;">return -<span style="color:#800080;">1<span style="color:#000000;">; <span style="color:#008080;">26 <span style="color:#000000;"> } <span style="color:#008080;">27 <span style="color:#0000ff;">int dwElem = ptQue-&gt;aData[ptQue-&gt;<span style="color:#000000;">dwHead]; <span style="color:#008080;">28 ptQue-&gt;dwHead = (ptQue-&gt;dwHead + <span style="color:#800080;">1) %<span style="color:#000000;"> QUEUE_SIZE; <span style="color:#008080;">29 <span style="color:#0000ff;">return<span style="color:#000000;"> dwElem; <span style="color:#008080;">30 <span style="color:#000000;">} <span style="color:#008080;">31 <span style="color:#008080;">32 <span style="color:#008000;">//<span style="color:#008000;">从队首至队尾依次显示队中元素值 <span style="color:#008080;">33 <span style="color:#0000ff;">void<span style="color:#000000;"> DisplayQue(PT_QUEUE ptQue) <span style="color:#008080;">34 <span style="color:#000000;">{ <span style="color:#008080;">35 <span style="color:#0000ff;">if<span style="color:#000000;">(IsQueEmpty(ptQue)) <span style="color:#008080;">36 <span style="color:#000000;"> { <span style="color:#008080;">37 printf(<span style="color:#800000;">"<span style="color:#800000;">Queue %p is Empty!\n<span style="color:#800000;">"<span style="color:#000000;">, ptQue); <span style="color:#008080;">38 <span style="color:#0000ff;">return<span style="color:#000000;">; <span style="color:#008080;">39 <span style="color:#000000;"> } <span style="color:#008080;">40 <span style="color:#008080;">41 printf(<span style="color:#800000;">"<span style="color:#800000;">Queue Element: <span style="color:#800000;">"<span style="color:#000000;">); <span style="color:#008080;">42 <span style="color:#0000ff;">int dwIdx = ptQue-&gt;<span style="color:#000000;">dwHead; <span style="color:#008080;">43 <span style="color:#0000ff;">while((dwIdx % QUEUE_SIZE) != ptQue-&gt;<span style="color:#000000;">dwTail) <span style="color:#008080;">44 printf(<span style="color:#800000;">"<span style="color:#800000;">%d <span style="color:#800000;">", ptQue-&gt;aData[(dwIdx++) %<span style="color:#000000;"> QUEUE_SIZE]); <span style="color:#008080;">45 <span style="color:#008080;">46 printf(<span style="color:#800000;">"<span style="color:#800000;">\n<span style="color:#800000;">"<span style="color:#000000;">); <span style="color:#008080;">47 }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">然后提供判空、判满、查询等辅助函数：</span></span></p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 <span style="color:#008000;">//<span style="color:#008000;">判断循环队列是否为空 <span style="color:#008080;"> 2 <span style="color:#0000ff;">int<span style="color:#000000;"> IsQueEmpty(PT_QUEUE ptQue) <span style="color:#008080;"> 3 <span style="color:#000000;">{ <span style="color:#008080;"> 4 <span style="color:#0000ff;">return ptQue-&gt;dwHead == ptQue-&gt;<span style="color:#000000;">dwTail; <span style="color:#008080;"> 5 <span style="color:#000000;">} <span style="color:#008080;"> 6 <span style="color:#008080;"> 7 <span style="color:#008000;">//<span style="color:#008000;">判断循环队列是否为满 <span style="color:#008080;"> 8 <span style="color:#0000ff;">int<span style="color:#000000;"> IsQueFull(PT_QUEUE ptQue) <span style="color:#008080;"> 9 <span style="color:#000000;">{ <span style="color:#008080;">10 <span style="color:#0000ff;">return (ptQue-&gt;dwTail + <span style="color:#800080;">1) % QUEUE_SIZE == ptQue-&gt;<span style="color:#000000;">dwHead; <span style="color:#008080;">11 <span style="color:#000000;">} <span style="color:#008080;">12 <span style="color:#008080;">13 <span style="color:#008000;">//<span style="color:#008000;">获取循环队列元素数目 <span style="color:#008080;">14 <span style="color:#0000ff;">int<span style="color:#000000;"> QueDataNum(PT_QUEUE ptQue) <span style="color:#008080;">15 <span style="color:#000000;">{ <span style="color:#008080;">16 <span style="color:#0000ff;">return (ptQue-&gt;dwTail - ptQue-&gt;dwHead + QUEUE_SIZE) %<span style="color:#000000;"> QUEUE_SIZE; <span style="color:#008080;">17 <span style="color:#000000;">} <span style="color:#008080;">18 <span style="color:#008080;">19 <span style="color:#008000;">//<span style="color:#008000;">获取循环队列队首位置 <span style="color:#008080;">20 <span style="color:#0000ff;">int<span style="color:#000000;"> GetQueHead(PT_QUEUE ptQue) <span style="color:#008080;">21 <span style="color:#000000;">{ <span style="color:#008080;">22 <span style="color:#0000ff;">return ptQue-&gt;<span style="color:#000000;">dwHead; <span style="color:#008080;">23 <span style="color:#000000;">} <span style="color:#008080;">24 <span style="color:#008000;">//<span style="color:#008000;">获取循环队列队首元素 <span style="color:#008080;">25 <span style="color:#0000ff;">int<span style="color:#000000;"> GetQueHeadData(PT_QUEUE ptQue) <span style="color:#008080;">26 <span style="color:#000000;">{ <span style="color:#008080;">27 <span style="color:#0000ff;">return ptQue-&gt;aData[ptQue-&gt;<span style="color:#000000;">dwHead]; <span style="color:#008080;">28 <span style="color:#000000;">} <span style="color:#008080;">29 <span style="color:#008000;">//<span style="color:#008000;">获取循环队列队尾位置 <span style="color:#008080;">30 <span style="color:#0000ff;">int<span style="color:#000000;"> GetQueTail(PT_QUEUE ptQue) <span style="color:#008080;">31 <span style="color:#000000;">{ <span style="color:#008080;">32 <span style="color:#0000ff;">return ptQue-&gt;<span style="color:#000000;">dwTail; <span style="color:#008080;">33 }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">最后，通过QueueTest()函数来测试队列函数集：</span></span></p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 <span style="color:#0000ff;">static<span style="color:#000000;"> T_QUEUE gtQueue; <span style="color:#008080;"> 2 <span style="color:#0000ff;">void QueueTest(<span style="color:#0000ff;">void<span style="color:#000000;">) <span style="color:#008080;"> 3 <span style="color:#000000;">{ <span style="color:#008080;"> 4 InitQue(&amp;<span style="color:#000000;">gtQueue); <span style="color:#008080;"> 5 printf(<span style="color:#800000;">"<span style="color:#800000;">Enter Queue 1,2,3,4,5...\n<span style="color:#800000;">"<span style="color:#000000;">); <span style="color:#008080;"> 6 EnterQue(&amp;gtQueue, <span style="color:#800080;">1<span style="color:#000000;">); <span style="color:#008080;"> 7 EnterQue(&amp;gtQueue, <span style="color:#800080;">2<span style="color:#000000;">); <span style="color:#008080;"> 8 EnterQue(&amp;gtQueue, <span style="color:#800080;">3<span style="color:#000000;">); <span style="color:#008080;"> 9 EnterQue(&amp;gtQueue, <span style="color:#800080;">4<span style="color:#000000;">); <span style="color:#008080;">10 EnterQue(&amp;gtQueue, <span style="color:#800080;">5<span style="color:#000000;">); <span style="color:#008080;">11 printf(<span style="color:#800000;">"<span style="color:#800000;">Queue Status: Empty(%d), Full(%d)\n<span style="color:#800000;">", IsQueEmpty(&amp;gtQueue), IsQueFull(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">12 printf(<span style="color:#800000;">"<span style="color:#800000;">Queue Elem Num: %u\n<span style="color:#800000;">", QueDataNum(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">13 printf(<span style="color:#800000;">"<span style="color:#800000;">Head: %u(%d)\n<span style="color:#800000;">", GetQueHead(&amp;gtQueue), GetQueHeadData(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">14 printf(<span style="color:#800000;">"<span style="color:#800000;">Tail: %u\n<span style="color:#800000;">", GetQueTail(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">15 DisplayQue(&amp;<span style="color:#000000;">gtQueue); <span style="color:#008080;">16 <span style="color:#008080;">17 printf(<span style="color:#800000;">"<span style="color:#800000;">\nLeave Queue...\n<span style="color:#800000;">"<span style="color:#000000;">); <span style="color:#008080;">18 printf(<span style="color:#800000;">"<span style="color:#800000;">Leave %d\n<span style="color:#800000;">", LeaveQue(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">19 printf(<span style="color:#800000;">"<span style="color:#800000;">Leave %d\n<span style="color:#800000;">", LeaveQue(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">20 printf(<span style="color:#800000;">"<span style="color:#800000;">Leave %d\n<span style="color:#800000;">", LeaveQue(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">21 DisplayQue(&amp;<span style="color:#000000;">gtQueue); <span style="color:#008080;">22 <span style="color:#008080;">23 printf(<span style="color:#800000;">"<span style="color:#800000;">\nEnter Queue 6,7...\n<span style="color:#800000;">"<span style="color:#000000;">); <span style="color:#008080;">24 EnterQue(&amp;gtQueue, <span style="color:#800080;">6<span style="color:#000000;">); <span style="color:#008080;">25 EnterQue(&amp;gtQueue, <span style="color:#800080;">7<span style="color:#000000;">); <span style="color:#008080;">26 DisplayQue(&amp;<span style="color:#000000;">gtQueue); <span style="color:#008080;">27 <span style="color:#008080;">28 printf(<span style="color:#800000;">"<span style="color:#800000;">\nLeave Queue...\n<span style="color:#800000;">"<span style="color:#000000;">); <span style="color:#008080;">29 printf(<span style="color:#800000;">"<span style="color:#800000;">Leave %d\n<span style="color:#800000;">", LeaveQue(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">30 printf(<span style="color:#800000;">"<span style="color:#800000;">Leave %d\n<span style="color:#800000;">", LeaveQue(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">31 printf(<span style="color:#800000;">"<span style="color:#800000;">Leave %d\n<span style="color:#800000;">", LeaveQue(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">32 DisplayQue(&amp;<span style="color:#000000;">gtQueue); <span style="color:#008080;">33 }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">编译链接后，运行结果如下：</span></span></p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 Enter Queue 1,2,3,4,5<span style="color:#000000;">... <span style="color:#008080;"> 2 Elem 5<span style="color:#000000;"> cannot enter Queue 0x8053f9c(Full)! <span style="color:#008080;"> 3 Queue Status: Empty(0), Full(1<span style="color:#000000;">) <span style="color:#008080;"> 4 Queue Elem Num: 4 <span style="color:#008080;"> 5 Head: 0(1<span style="color:#000000;">) <span style="color:#008080;"> 6 Tail: 4 <span style="color:#008080;"> 7 <span style="color:#800080;">Queue Element: 1 2 3 4 <span style="color:#008080;"> 8 <span style="color:#008080;"> 9 <span style="color:#000000;">Leave Queue... <span style="color:#008080;">10 Leave 1 <span style="color:#008080;">11 Leave 2 <span style="color:#008080;">12 Leave 3 <span style="color:#008080;">13 <span style="color:#800080;">Queue Element: 4 <span style="color:#008080;">14 <span style="color:#008080;">15 Enter Queue 6,7<span style="color:#000000;">... <span style="color:#008080;">16 <span style="color:#800080;">Queue Element: 4 6 7 <span style="color:#008080;">17 <span style="color:#008080;">18 <span style="color:#000000;">Leave Queue... <span style="color:#008080;">19 Leave 4 <span style="color:#008080;">20 Leave 6 <span style="color:#008080;">21 Leave 7 <span style="color:#008080;">22 Queue 0x8053f9c is Empty!</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">可见，队列行为完全符合期望。</span></span></p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">&nbsp;</p> 
+   <h1><span style="font-size:16px;">二 &nbsp;生产者消费者问题</span></h1> 
+   <h2><span style="font-size:15px;">2.1 问题概述</span></h2> 
+   <p align="left">&nbsp; &nbsp; &nbsp;本节将讨论Linux并发编程中经典的生产者/消费者(producer-consumer)问题。该问题涉及一个大小限定的有界缓冲区(bounded buffer)和两类线程或进程(生产者和消费者)。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;在缓冲区中有可用空间时，一个或一组生产者(线程或进程)将创建的产品(数据条目)放入缓冲区，然后由一个或一组消费者(线程或进程)提取这些产品。产品在生产者和消费者之间通过某种类型的IPC传递。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;在多个进程间共享一个公共数据缓冲区需要某种形式的共享内存区(如存储映射或共享内存)，而多线程天然地共享存储空间。为简便起见，本节的讨论仅限于多线程。</p> 
+   <p align="left">多个生产者和消费者线程的场景如下图所示：</p> 
+   <p align="center"><img src="https://yqfile.alicdn.com/img_227d9b7a0b34989db4554654f3cc38a5.jpg" alt="" width="509" height="177">&nbsp;</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;在生产者/消费者问题中，生产者线程必须在缓冲区中有可用空间后才能向其中放置内容，否则将阻塞(进入休眠状态)直到出现下一个可用的空位置。生产者线程可使用互斥量原子性地检查缓冲区，而不受其他线程干扰。当发现缓冲区已满后，生产者阻塞自己并在缓冲区变为非满时被唤醒，这可由条件变量实现。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;消费者线程必须在生产者向缓冲区中写入之后才能从中提取内容。同理，可用互斥量和条件变量以无竞争的方式等待缓冲区由空变为非空。</p> 
+   <h2><span style="font-size:15px;">2.2 多线程实现</span></h2> 
+   <p align="left">&nbsp; &nbsp; &nbsp;本节将采用队列模拟任务，给出生产者/消费者问题的多线程示例。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;为简单起见，生产者将队列元素下标作为元素值入队，消费者使元素出队并验证元素值正确性。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;首先定义一组全局数据：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 <span style="color:#0000ff;">#define PRODUCER_NUM 5 <span style="color:#008000;">//<span style="color:#008000;">生产者数 <span style="color:#008080;"> 2 <span style="color:#0000ff;">#define CONSUMER_NUM 3 <span style="color:#008000;">//<span style="color:#008000;">消费者数 <span style="color:#008080;"> 3 <span style="color:#0000ff;">#define PRD_NUM 20 <span style="color:#008000;">//<span style="color:#008000;">最多生产的产品数 <span style="color:#008080;"> 4 <span style="color:#0000ff;">#define DELAY_TIME 3 <span style="color:#008000;">//<span style="color:#008000;">生产(或消费)任务之间的最大时间间隔 <span style="color:#008080;"> 5 <span style="color:#008080;"> 6 <span style="color:#0000ff;">#define QUEUE_SIZE (PRD_NUM+1) <span style="color:#008000;">//<span style="color:#008000;">队列最大容纳QUEUE_SIZE-1个元素 <span style="color:#008080;"> 7 <span style="color:#008080;"> 8 <span style="color:#000000;">T_QUEUE gtQueue; <span style="color:#008080;"> 9 pthread_mutex_t gtQueLock =<span style="color:#000000;"> PTHREAD_MUTEX_INITIALIZER; <span style="color:#008080;">10 pthread_cond_t gtPrdCond = PTHREAD_COND_INITIALIZER; <span style="color:#008000;">//<span style="color:#008000;">Full-&gt;Not Full <span style="color:#008080;">11 pthread_cond_t gtCsmCond = PTHREAD_COND_INITIALIZER; <span style="color:#008000;">//<span style="color:#008000;">Empty-&gt;Not Empty</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">此处，QUEUE_SIZE按照产品数重新定义。互斥量gtQueLock用于保护全局队列gtQueue和两个条件变量。条件变量gtPrdCond用于队列由满变为非满时通知(唤醒)生产者线程，而gtCsmCond用于队列由空变为非空时通知消费者线程。</span></span></p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;若首先创建并启动生产者线程，再立即或稍候创建消费者线程，则不需要条件变量gtCsmCond(队列中始终有产品)。本节为全面展现线程间的同步，约定消费者线程创建和启动完毕之后，再创建生产者线程。这样，所有消费者线程将会阻塞，在条件变量gtCsmCond的线程列表里等待条件状态的改变。生产者线程启动并开始“产出”后，广播通知所有消费者线程。反之，因为消费者线程不会全部阻塞，可单播唤醒某个消费者。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;初始化队列和创建线程的主函数如下：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 <span style="color:#0000ff;">int main(<span style="color:#0000ff;">void<span style="color:#000000;">) <span style="color:#008080;"> 2 <span style="color:#000000;">{ <span style="color:#008080;"> 3 InitQue(&amp;<span style="color:#000000;">gtQueue); <span style="color:#008080;"> 4 srand(getpid()); <span style="color:#008000;">//<span style="color:#008000;">初始化随机函数发生器 <span style="color:#008080;"> 5 <span style="color:#008080;"> 6 pthread_t aThrd[CONSUMER_NUM+<span style="color:#000000;">PRODUCER_NUM]; <span style="color:#008080;"> 7 <span style="color:#0000ff;">int<span style="color:#000000;"> dwThrdIdx; <span style="color:#008080;"> 8 <span style="color:#0000ff;">for(dwThrdIdx = <span style="color:#800080;">0; dwThrdIdx &lt; CONSUMER_NUM; dwThrdIdx++<span style="color:#000000;">) <span style="color:#008080;"> 9 { <span style="color:#008000;">//<span style="color:#008000;">创建CONSUMER_NUM个消费者线程，传入(void*)dwThrdIdx作为ConsumerThread的参数 <span style="color:#008080;">10 pthread_create(&amp;aThrd[dwThrdIdx], NULL, ConsumerThread, (<span style="color:#0000ff;">void*<span style="color:#000000;">)dwThrdIdx); <span style="color:#008080;">11 <span style="color:#000000;"> } <span style="color:#008080;">12 sleep(<span style="color:#800080;">2<span style="color:#000000;">); <span style="color:#008080;">13 <span style="color:#0000ff;">for(dwThrdIdx = <span style="color:#800080;">0; dwThrdIdx &lt; PRODUCER_NUM; dwThrdIdx++<span style="color:#000000;">) <span style="color:#008080;">14 <span style="color:#000000;"> { <span style="color:#008080;">15 pthread_create(&amp;aThrd[dwThrdIdx+CONSUMER_NUM], NULL, ProducerThread, (<span style="color:#0000ff;">void*<span style="color:#000000;">)dwThrdIdx); <span style="color:#008080;">16 <span style="color:#000000;"> } <span style="color:#008080;">17 <span style="color:#0000ff;">while(<span style="color:#800080;">1<span style="color:#000000;">); <span style="color:#008080;">18 <span style="color:#0000ff;">return <span style="color:#800080;">0<span style="color:#000000;"> ; <span style="color:#008080;">19 }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">生产者线程启动例程ProducerThread()实现如下：</span></span></p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 <span style="color:#0000ff;">void *ProducerThread(<span style="color:#0000ff;">void *<span style="color:#000000;">pvArg) <span style="color:#008080;"> 2 <span style="color:#000000;">{ <span style="color:#008080;"> 3 <span style="color:#000000;"> pthread_detach(pthread_self()); <span style="color:#008080;"> 4 <span style="color:#0000ff;">int dwThrdNo = (<span style="color:#0000ff;">int<span style="color:#000000;">)pvArg; <span style="color:#008080;"> 5 <span style="color:#0000ff;">while(<span style="color:#800080;">1<span style="color:#000000;">) <span style="color:#008080;"> 6 <span style="color:#000000;"> { <span style="color:#008080;"> 7 pthread_mutex_lock(&amp;<span style="color:#000000;">gtQueLock); <span style="color:#008080;"> 8 <span style="color:#0000ff;">while(IsQueFull(&amp;gtQueue)) <span style="color:#008000;">//<span style="color:#008000;">队列由满变为非满时，生产者线程被唤醒 <span style="color:#008080;"> 9 pthread_cond_wait(&amp;gtPrdCond, &amp;<span style="color:#000000;">gtQueLock); <span style="color:#008080;">10 <span style="color:#008080;">11 EnterQue(&amp;gtQueue, GetQueTail(&amp;gtQueue)); <span style="color:#008000;">//<span style="color:#008000;">将队列元素下标作为元素值入队 <span style="color:#008080;">12 <span style="color:#0000ff;">if(QueDataNum(&amp;gtQueue) == <span style="color:#800080;">1) <span style="color:#008000;">//<span style="color:#008000;">当生产者开始产出后，通知(唤醒)消费者线程 <span style="color:#008080;">13 pthread_cond_broadcast(&amp;<span style="color:#000000;">gtCsmCond); <span style="color:#008080;">14 printf(<span style="color:#800000;">"<span style="color:#800000;">[Producer %2u]Current Product Num: %u\n<span style="color:#800000;">", dwThrdNo, QueDataNum(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">15 <span style="color:#008080;">16 pthread_mutex_unlock(&amp;<span style="color:#000000;">gtQueLock); <span style="color:#008080;">17 sleep(rand()%DELAY_TIME + <span style="color:#800080;">1<span style="color:#000000;">); <span style="color:#008080;">18 <span style="color:#000000;"> } <span style="color:#008080;">19 }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">队列变满时，生产者线程进入休眠状态。消费者线程取出产品，将队列由满变为非满时，生产者线程再次被唤醒。</span></span></p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;消费者线程启动例程ConsumerThread()实现如下：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 <span style="color:#0000ff;">void *ConsumerThread(<span style="color:#0000ff;">void *<span style="color:#000000;">pvArg) <span style="color:#008080;"> 2 <span style="color:#000000;">{ <span style="color:#008080;"> 3 <span style="color:#000000;"> pthread_detach(pthread_self()); <span style="color:#008080;"> 4 <span style="color:#0000ff;">int dwThrdNo = (<span style="color:#0000ff;">int<span style="color:#000000;">)pvArg; <span style="color:#008080;"> 5 <span style="color:#0000ff;">while(<span style="color:#800080;">1<span style="color:#000000;">) <span style="color:#008080;"> 6 <span style="color:#000000;"> { <span style="color:#008080;"> 7 pthread_mutex_lock(&amp;<span style="color:#000000;">gtQueLock); <span style="color:#008080;"> 8 <span style="color:#0000ff;">while(IsQueEmpty(&amp;gtQueue)) <span style="color:#008000;">//<span style="color:#008000;">队列由空变为非空时，消费者线程将被唤醒 <span style="color:#008080;"> 9 pthread_cond_wait(&amp;gtCsmCond, &amp;<span style="color:#000000;">gtQueLock); <span style="color:#008080;">10 <span style="color:#008080;">11 <span style="color:#0000ff;">if(GetQueHead(&amp;gtQueue) != GetQueHeadData(&amp;<span style="color:#000000;">gtQueue)) <span style="color:#008080;">12 <span style="color:#000000;"> { <span style="color:#008080;">13 printf(<span style="color:#800000;">"<span style="color:#800000;">[Consumer %2u]Product: %d, Expect: %d\n<span style="color:#800000;">"<span style="color:#000000;">, dwThrdNo, <span style="color:#008080;">14 GetQueHead(&amp;gtQueue), GetQueHeadData(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">15 exit(<span style="color:#800080;">0<span style="color:#000000;">); <span style="color:#008080;">16 <span style="color:#000000;"> } <span style="color:#008080;">17 LeaveQue(&amp;<span style="color:#000000;">gtQueue); <span style="color:#008080;">18 <span style="color:#0000ff;">if(QueDataNum(&amp;gtQueue) == (PRD_NUM-<span style="color:#800080;">1)) <span style="color:#008000;">//<span style="color:#008000;">当队列由满变为非满时，通知(唤醒)生产者线程 <span style="color:#008080;">19 pthread_cond_broadcast(&amp;<span style="color:#000000;">gtPrdCond); <span style="color:#008080;">20 printf(<span style="color:#800000;">"<span style="color:#800000;">[Consumer %2u]Current Product Num: %u\n<span style="color:#800000;">", dwThrdNo, QueDataNum(&amp;<span style="color:#000000;">gtQueue)); <span style="color:#008080;">21 <span style="color:#008080;">22 pthread_mutex_unlock(&amp;<span style="color:#000000;">gtQueLock); <span style="color:#008080;">23 sleep(rand()%DELAY_TIME + <span style="color:#800080;">1<span style="color:#000000;">); <span style="color:#008080;">24 <span style="color:#000000;"> } <span style="color:#008080;">25 }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;<span style="line-height:1.5;">当队列元素值不符合期望时，打印出错提示并调用exit()终止进程。</span></span></p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;编译链接后，截取部分运行结果如下(因每次执行时线程延时随机值，故执行顺序可能不同)：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">wangxiaoyuan_@localhost Thread<span style="color:#800000;font-weight:bold;">]<span style="color:#000000;">$ gcc -Wall -o procon procon.c -pthread <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">wangxiaoyuan_@localhost Thread<span style="color:#800000;font-weight:bold;">]<span style="color:#000000;">$ ./procon <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 4<span style="color:#800000;font-weight:bold;">]Current Product Num: 1 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Consumer 1<span style="color:#800000;font-weight:bold;">]Current Product Num: 0 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 3<span style="color:#800000;font-weight:bold;">]Current Product Num: 1 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Consumer 0<span style="color:#800000;font-weight:bold;">]Current Product Num: 0 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 2<span style="color:#800000;font-weight:bold;">]Current Product Num: 1 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Consumer 2<span style="color:#800000;font-weight:bold;">]Current Product Num: 0 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 1<span style="color:#800000;font-weight:bold;">]Current Product Num: 1 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 0<span style="color:#800000;font-weight:bold;">]Current Product Num: 2<span style="color:#000000;"> //... ... <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Consumer 0<span style="color:#800000;font-weight:bold;">]Current Product Num: 17 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 3<span style="color:#800000;font-weight:bold;">]Current Product Num: 18 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 1<span style="color:#800000;font-weight:bold;">]Current Product Num: 19 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Consumer 2<span style="color:#800000;font-weight:bold;">]Current Product Num: 18 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 4<span style="color:#800000;font-weight:bold;">]Current Product Num: 19 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 2<span style="color:#800000;font-weight:bold;">]Current Product Num: 20 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Consumer 1<span style="color:#800000;font-weight:bold;">]Current Product Num: 19 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Consumer 2<span style="color:#800000;font-weight:bold;">]Current Product Num: 18 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 0<span style="color:#800000;font-weight:bold;">]Current Product Num: 19 <span style="color:#800000;font-weight:bold;">[<span style="color:#800000;">Producer 4<span style="color:#800000;font-weight:bold;">]Current Product Num: 20<span style="color:#000000;"> //Ctrl + C</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="font-size:15px;line-height:1.5;">&nbsp; &nbsp; <span style="font-size:14px;">&nbsp;<span style="font-size:13px;">此处，编译链接时使用-pthread选项，该选项编译时会在传统-lpthread选项基础上附加一个宏定义-D_REENTRANT。具体细节可通过verbose模式(-v选项)对比。</span></span></span></p> 
+   <h2><span style="font-size:15px;line-height:1.5;">2.3 注意事项</span></h2> 
+   <p>&nbsp; &nbsp; &nbsp;本节基于生产者/消费者问题的多线程实现，讨论一些编程注意事项。为简化书写，省略线程相关函数名的前缀"pthread_"。</p> 
+   <p>&nbsp; &nbsp; &nbsp;1. 互斥量实际上保护的是临界区中被多个线程或进程共享的数据(shared data)。此外，互斥量是协作性(cooperative)锁，无法禁止绕过这种机制的访问。例如，若共享数据为一个链表，则操作该链表的所有线程都应该在实际操作前获取该互斥量(但无法防止某个线程不首先获取该互斥量就操作链表)。</p> 
+   <p>&nbsp; &nbsp; &nbsp;对本文实现而言，互斥量gtQueLock保护全局队列gtQueue。但因为各生产者(或消费者)线程启动例程相同，内部对该队列的操作逻辑和顺序相同，故gtQueLock看起来在对队列函数加锁。进而，在生产者与消费者线程之间，均在加锁期间操作队列，因此对队列函数加锁近似等效于对队列数据加锁。但仍需认识到，这种协作对于频繁调用的基础性函数(如库函数)而言并不现实。当某些调用未经加锁直接操作时，对于其他使用互斥量的调用而言，互斥保护就失去意义。本文也可考虑在队列函数集内加锁(互斥量或读写锁)，但因为互斥量gtQueLock同时还保护条件变量，队列内再加锁就稍显复杂，而且线程内互斥量同名时容易产生死锁。</p> 
+   <p>&nbsp; &nbsp; &nbsp;因此，设计时最好约定所有线程遵守相同的数据访问规则。</p> 
+   <p>&nbsp; &nbsp; &nbsp;2. 应尽量减少由一个互斥量锁住的代码量，以增强并发性。</p> 
+   <p>&nbsp; &nbsp; &nbsp;例如，生产者线程启动例程ProducerThread()中，对pvArg进行赋值操作时并不需要互斥量保护(不属于临界区)。再者，若各生产者线程之间与生产者/消费者线程之间共享不同的数据，则可使用两个互斥量，但复杂度也随之上升。</p> 
+   <p>&nbsp; &nbsp; &nbsp;多线程软件设计经常要考虑加锁粒度的折中。若使用粗粒度锁定(coarse-grained locking)，即长期持有锁定以便尽可能降低获取和释放锁的开销，则可能有很多线程阻塞等待相同的锁，从而降低并发性；若使用细粒度锁定(fine-grained locking)，即仅在必要时锁定并在不必要时尽快解锁以便尽可能提高并发性，则较多的锁开销可能会降低系统性能，而且代码变得相当复杂。因此，设计时应划分适当数目的锁来保护数据，以在代码复杂性和性能优化之间找好平衡点。</p> 
+   <p>&nbsp; &nbsp; &nbsp;3. 条件本身是由互斥量保护的。当线程调用cond_wait()函数基于条件变量阻塞之前，应先锁定互斥量以避免线程间的竞争和饥饿情况(否则将导致未定义的行为)。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;调用cond_wait()时，线程将锁定的互斥量传递给该函数，对条件进行保护。该函数将调用线程放到等待条件的线程列表上，然后对互斥量解锁。这两个操作是原子性的，即关闭了条件检查和线程进入休眠状态等待条件改变这两个操作之间的时间通道，这样线程就不会错过条件的任何变化。该函数对互斥量解锁后，其它线程可以获得加锁的权利，并访问和修改临界资源(条件状态)。一旦其它某个线程改变了条件使其为真，该线程将通知相应的条件变量唤醒一个或多个正被该条件变量阻塞的线程。cond_wait()返回时，互斥量再次被锁定并被调用线程拥有，即使返回错误时也是如此。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;可见，cond_wait()函数解锁和阻塞调用线程的“原子性”针对其他线程访问互斥量和条件变量而言。若线程B在即将阻塞的线程A解锁之后获得互斥量，则线程B随后调用cond_ signal/broadcast()函数通告条件状态变化时，该信号必然在线程A阻塞之后发出(否则将遗漏该信号)。</p> 
+   <p>&nbsp; &nbsp; &nbsp;使用多个互斥量保护基于相同条件变量的cond_wait()调用时，其效果未定义。当线程基于条件变量阻塞时，该条件变量绑定到唯一的互斥量上，且这种(动态)绑定将在cond_wait()调用返回时结束。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;4. 函数cond_signal()唤醒被阻塞在条件变量上的至少一个线程。在多处理器上，该函数在不同处理器上同时单播信号时可能唤醒多个线程。当多个线程阻塞在条件变量上时，哪个或哪些线程被唤醒由线程的调度策略(scheduling policy)所决定。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;cond_broadcast()会唤醒阻塞在条件变量上的所有线程。这些线程被唤醒后将再次竞争相应的互斥量。唤醒多个线程的典型场景是读出者与写入者问题。当一个写入者完成访问并释放相应的锁后，它希望唤醒所有正在排队的读出者，因为同时允许多个读出者访问。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;若已确定只有一个等待者需要唤醒，且唤醒哪个等待者无关紧要，则可使用单播发送；所有其他情况下都应使用广播发送(更为安全)。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;若当前没有任何线程基于条件变量阻塞，则调用cond_signal/broadcast()不起作用。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;5. 虚假唤醒(spurious wakeup)指没有线程明确调用cond_signal/broadcast()时，cond_wait()偶尔也会返回；或者条件状态尚不满足时就调用cond_signal/broadcast()。此时，线程虽被唤醒但条件并不成立，若不再次检查条件而往下执行，很可能导致后续的处理出现错误。因此，当从cond_wait()返回时，线程应重新测试条件成立与否。该过程一般用while循环实现，即：</p> 
+   <div class="cnblogs_code"> 
+    <pre><span style="color:#008080;">1 <span style="color:#000000;">pthread_mutex_lock(); <span style="color:#008080;">2 <strong><span style="color:#0000ff;">while</span></strong><span style="color:#000000;">(IsConditionFalse) <span style="color:#008080;">3 <span style="color:#000000;">pthread_cond_wait(); <span style="color:#008080;">4 <span style="color:#008000;">//<span style="color:#008000;">Do something <span style="color:#008080;">5 pthread_mutex_unlock();</span></span></span></span></span></span></span></span></span></span></pre> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;使用while循环不仅能避免虚假唤醒造成的错误，还能避免唤醒线程间竞争导致的“惊群效应”。</span></p> 
+   <p>&nbsp; &nbsp; &nbsp;例如，ProducerThread()内，调用cond_wait()对互斥量自动解锁后，在允许消费者线程修改条件的同时，也允许其他生产者线程调用该函数依次阻塞。当这些线程被唤醒时(如队列由满变为非满)，会再次竞争相应的互斥量。获得互斥量的那个线程进入临界区处理，这可能改变测试条件(如产出一件使得队列再次变满)。该线程释放互斥量后，其他某个处于等待状态的线程获得该互斥量时，虽然cond_wait()成功返回但很可能条件已不成立。因此，调用cond_wait()成功返回时，线程需要重新测试条件是否满足。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;调用cond_timedwait()的情况与之类似。由于等待超时与条件改变之间存在无法避免的竞争，当该函数返回超时错误时条件仍可能成立。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;6. 若线程未持有与条件相关联的互斥量，则调用cond_signal/broadcast()可能会产生唤醒丢失问题。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;当满足以下所有条件时，即会出现唤醒丢失问题：</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;1) 一个线程调用cond_signal/broadcast()函数；</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;2) 另一个线程已测试该条件，但尚未调用cond_wait()函数；</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;3) 没有正处于阻塞等待状态的线程。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;只要仅在持有关联互斥量的同时修改所测试的条件，即可调用cond_signal/broadcast()，而无论这些函数是否持有关联的互斥量。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;可见，调用cond_signal/broadcast()时若无线程等待条件变量，则该信号将被丢失。因此，发送信号前最好检查下是否有正在等待的线程。例如，可维护一个等待线程计数器，在触发条件变量前检查该计数器。本文线程代码内对队列元素数目的检查与之类似。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;对于等待条件的线程而言，若错失信号(如启动过迟)，则会一直阻塞到其它线程再次发送信号到该条件变量。</p> 
+   <p>&nbsp; &nbsp; &nbsp;7. ProducerThread()中，cond_broadcast()函数由当前锁住互斥量的生产者线程调用，本函数将发送信号给该互斥量所关联的条件变量。当该条件变量被发送信号后，系统立即调度等待在其上的消费者线程；该线程开始运行后试图获取互斥量，但该互斥量仍由生产者线程所持有。因此被唤醒的消费者线程被迫进入休眠状态，直至生产者线程释放互斥量后再次被唤醒。这种不必要的上下文切换可能会严重影响性能。</p> 
+   <p>&nbsp; &nbsp; &nbsp;为避免这种加锁冲突(以提高效率)，可将判断队列元素数目的语句值赋给一个局部变量bHasOnePrd，直到释放互斥量gtQueLock后才判断bHasOnePrd并向与之关联的条件变量gtCsmCond发送信号。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;Posix标准规定，调用cond_signal/broadcast()的线程不必是与之关联的互斥量的当前拥有者，即允许在释放互斥量后才给与之关联的条件变量发送信号。若程序不关心线程可预知的调度行为，最好在锁定区域以外调用cond_signal/broadcast()。</p> 
+   <p align="left">&nbsp; &nbsp; &nbsp;当然，本文所示的生产者和消费者线程中，即使不判断队列元素数目而直接发送信号也可以(通过修改队列指针间接地改变条件状态，虽然会发送一些无效信号)。</p> 
+   <p>&nbsp; &nbsp; &nbsp;8. 当只有一个生产者和一个消费者时，通过谨慎操作队列可避免线程间的原子性同步。例如，生产者线程仅更新队尾指针，消费者线程仅更新队首指针。简化的示例如下：</p> 
+   <div class="cnblogs_code"> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+    <pre><span style="color:#008080;"> 1 <span style="color:#0000ff;">#define QUEUE_SIZE 20 <span style="color:#008080;"> 2 <span style="color:#0000ff;">volatile unsigned <span style="color:#0000ff;">int gdwPrdNum = <span style="color:#800080;">0, gdwCsmNum = <span style="color:#800080;">0<span style="color:#000000;">; <span style="color:#008080;"> 3 <span style="color:#0000ff;">int gQueue[QUEUE_SIZE] = {<span style="color:#800080;">0<span style="color:#000000;">}; <span style="color:#008080;"> 4 <span style="color:#008080;"> 5 <span style="color:#0000ff;">void *Producer(<span style="color:#0000ff;">void *<span style="color:#000000;">pvArg) { <span style="color:#008080;"> 6 <span style="color:#0000ff;">while(<span style="color:#800080;">1<span style="color:#000000;">) { <span style="color:#008080;"> 7 <span style="color:#0000ff;">while(gdwPrdNum - gdwCsmNum ==<span style="color:#000000;"> QUEUE_SIZE) <span style="color:#008080;"> 8 ; <span style="color:#008000;">//<span style="color:#008000;">Full <span style="color:#008080;"> 9 <span style="color:#008080;">10 gQueue[gdwPrdNum % QUEUE_SIZE]++<span style="color:#000000;">; <span style="color:#008080;">11 gdwPrdNum++<span style="color:#000000;">; <span style="color:#008080;">12 <span style="color:#000000;"> } <span style="color:#008080;">13 pthread_exit(<span style="color:#800080;">0<span style="color:#000000;">); <span style="color:#008080;">14 <span style="color:#000000;">} <span style="color:#008080;">15 <span style="color:#008080;">16 <span style="color:#0000ff;">void *Consumer(<span style="color:#0000ff;">void *<span style="color:#000000;">pvArg) { <span style="color:#008080;">17 <span style="color:#0000ff;">while(<span style="color:#800080;">1<span style="color:#000000;">) { <span style="color:#008080;">18 <span style="color:#0000ff;">while(gdwPrdNum - gdwCsmNum == <span style="color:#800080;">0<span style="color:#000000;">) <span style="color:#008080;">19 ; <span style="color:#008000;">//<span style="color:#008000;">Empty <span style="color:#008080;">20 <span style="color:#008080;">21 gQueue[gdwCsmNum % QUEUE_SIZE]--<span style="color:#000000;">; <span style="color:#008080;">22 gdwCsmNum++<span style="color:#000000;">; <span style="color:#008080;">23 <span style="color:#000000;"> } <span style="color:#008080;">24 pthread_exit(<span style="color:#800080;">0<span style="color:#000000;">); <span style="color:#008080;">25 }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></pre> 
+    <div class="cnblogs_code_toolbar">
+     <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+    </div> 
+   </div> 
+   <p><span style="line-height:1.5;">&nbsp; &nbsp; &nbsp;该例中使用轮询(polling)方式，可在不依赖互斥量和条件变量的情况下高效地共享数据。判空和判满的循环保证两个线程不可能同时操作同一个队列元素。当线程被取消时，可观察到队列中元素值为全零(若无循环则为随机值)。虽然轮询方式通常比较低效，但在多处理器环境中线程休眠和唤醒的频率较小，故绕开数据原子性操作是有利的。</span></p> 
+   <p>&nbsp; &nbsp; &nbsp;另一则实例则可参考《<a href="http://www.cnblogs.com/clover-toeic/p/3894180.html" rel="nofollow">守护进程接收终端输入的一种变通性方法</a>》一文。</p> 
+   <p>&nbsp; &nbsp; &nbsp;9. 使用Posix信号量可模拟互斥量和条件变量，而且通常更有优势。</p> 
+   <p>&nbsp; &nbsp; &nbsp;当函数sem_wait()和sem_post()用于线程内时，两个调用间的区域就是所要保护的临界区代码；当用于线程间时，则与条件变量等效。</p> 
+   <p>&nbsp; &nbsp; &nbsp;此外，信号量还可用作资源计数器，即初始化信号量的值作为某个资源当前可用的数量，使用时递减释放时递增。这样，原先一些保存队列状态的变量都不再需要。</p> 
+   <p>&nbsp; &nbsp; &nbsp;最后，内核会记录信号的存在，不会将信号丢失；而唤醒条件变量时若没有线程在等待该条件变量，信号将被丢失。</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

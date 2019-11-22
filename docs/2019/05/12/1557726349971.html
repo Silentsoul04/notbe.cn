@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>ptrace系统调用的实现 « NotBeCN</title>
+  <meta name="description" content="                   最近遇到这样一个问题，机器跑着跑着画面冻结了，打开top看到Xorg的cpu占用率100%。想用gdb挂上去看一下，结果gdb一直卡着挂不上去。后来又换用perf分析，结果发现进程99%的时间花在了一个ioctl调用。这个ioctl操作的是nvidia显卡，进程实际上是卡在了...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/1557726349971.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">ptrace系统调用的实现</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>最近遇到这样一个问题，机器跑着跑着画面冻结了，打开<code>top</code>看到<code>Xorg</code>的cpu占用率100%。想用<code>gdb</code>挂上去看一下，结果<code>gdb</code>一直卡着挂不上去。后来又换用<code>perf</code>分析，结果发现进程99%的时间花在了一个<code>ioctl</code>调用。这个<code>ioctl</code>操作的是nvidia显卡，进程实际上是卡在了nvidia的驱动中。</p> 
+  <p>我对<code>gdb</code>挂不上去这件事感到很好奇，之前除了因为进程已经被另一个gdb调试而导致gdb挂不上去之外，还没有遇到过这种情况，所以看了内核源码分析了一下。</p> 
+  <p>先说结论，为什么此时<code>gdb</code>挂不上去呢？简单的来说就是：调试器（tracer）是基于<code>ptrace</code>实现的，使用<code>ptrace</code>连接（attach）被调试进程（tracee）时，会向tracee发送一个<code>SIGSTOP</code>信号，让tracee停下来，后续的调试工作要等tracee停下来才能继续进行。而tracee能够停下来又要依赖对信号的响应，但是进程只有在从内核空间返回用户空间时，才会检查是否有待处理的信号，并进行响应。而如果进程一直卡在内核空间的话，就无法返回用户空间，所以就无法响应信号，导致进程无法停止。这样的话，tracer就只能一直等着tracee，无法进行调试。</p> 
+  <p>上面是概要的结论，下面对<code>ptrace</code>系统调用的基本流程分析一下，由于<code>ptrace</code>的实现细节非常多，所以此处只是其大致框架。我使用的内核版本是4.16，系统架构为64位x86。为了与文档和代码中的术语保持一致，不再使用“调试”这个词，而是使用“跟踪”（trace）。（“跟踪”实际上是手段，“调试”是目的）</p> 
+  <h1><a id="ptrace_8"></a>ptrace操作的环境</h1> 
+  <p>除了<code>PTRACE_TRACEME</code>、<code>PTRACE_ATTACH</code>和<code>PTRACE_SEIZE</code>这些用于本身就用于建立<code>ptrace</code>操作环境的请求之外，其他请求在执行之前都会检查<code>ptrace</code>环境是否已经建立。</p> 
+  <pre><code class="prism language-c"><span class="token function">SYSCALL_DEFINE4</span><span class="token punctuation">(</span>ptrace<span class="token punctuation">,</span> <span class="token keyword">long</span><span class="token punctuation">,</span> request<span class="token punctuation">,</span> <span class="token keyword">long</span><span class="token punctuation">,</span> pid<span class="token punctuation">,</span> <span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">,</span> addr<span class="token punctuation">,</span>
+		<span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">,</span> data<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	ret <span class="token operator">=</span> <span class="token function">ptrace_check_attach</span><span class="token punctuation">(</span>child<span class="token punctuation">,</span> request <span class="token operator">==</span> PTRACE_KILL <span class="token operator">||</span>
+				  request <span class="token operator">==</span> PTRACE_INTERRUPT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+		<span class="token keyword">goto</span> out_put_task_struct<span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p><code>ptrace_check_attach</code>函数就是用来检查<code>ptrace</code>环境的。<code>ptrace</code>环境有两部分：一部分是要求tracer和tracee有跟踪关系，另一部分是要求tracee处于被跟踪的停止状态。后一部分在请求为<code>PTRACE_KILL</code>或者<code>PTRACE_INTERRUPT</code>时不需要保证。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ptrace_check_attach</span><span class="token punctuation">(</span><span class="token keyword">struct</span> task_struct <span class="token operator">*</span>child<span class="token punctuation">,</span> bool ignore_state<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">int</span> ret <span class="token operator">=</span> <span class="token operator">-</span>ESRCH<span class="token punctuation">;</span>
+
+	<span class="token comment">/* * We take the read lock around doing both checks to close a * possible race where someone else was tracing our child and * detached between these two checks. After this locked check, * we are sure that this is our traced child and that can only * be changed by us so it's not changing right after this. */</span>
+	<span class="token function">read_lock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>tasklist_lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>child<span class="token operator">-&gt;</span>ptrace <span class="token operator">&amp;&amp;</span> child<span class="token operator">-&gt;</span>parent <span class="token operator">==</span> current<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token function">WARN_ON</span><span class="token punctuation">(</span>child<span class="token operator">-&gt;</span>state <span class="token operator">==</span> __TASK_TRACED<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">/* * child-&gt;sighand can't be NULL, release_task() * does ptrace_unlink() before __exit_signal(). */</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>ignore_state <span class="token operator">||</span> <span class="token function">ptrace_freeze_traced</span><span class="token punctuation">(</span>child<span class="token punctuation">)</span><span class="token punctuation">)</span>
+			ret <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">read_unlock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>tasklist_lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>ret <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>ignore_state<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">wait_task_inactive</span><span class="token punctuation">(</span>child<span class="token punctuation">,</span> __TASK_TRACED<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+			<span class="token comment">/* * This can only happen if may_ptrace_stop() fails and * ptrace_stop() changes -&gt;state back to TASK_RUNNING, * so we should not worry about leaking __TASK_TRACED. */</span>
+			<span class="token function">WARN_ON</span><span class="token punctuation">(</span>child<span class="token operator">-&gt;</span>state <span class="token operator">==</span> __TASK_TRACED<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			ret <span class="token operator">=</span> <span class="token operator">-</span>ESRCH<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>上面的<code>child-&gt;ptrace &amp;&amp; child-&gt;parent == current</code>用来保证tracer和tracee的跟踪关系，而<code>ptrace_freeze_traced</code>函数用来测试tracee是否处于期望的状态，即tracee的状态有<code>__TASK_TRACED</code>标志位，且当前没有未处理的<code>SIGKILL</code>信号。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> bool <span class="token function">ptrace_freeze_traced</span><span class="token punctuation">(</span><span class="token keyword">struct</span> task_struct <span class="token operator">*</span>task<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	bool ret <span class="token operator">=</span> false<span class="token punctuation">;</span>
+
+	<span class="token comment">/* Lockless, nobody but us can set this flag */</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>task<span class="token operator">-&gt;</span>jobctl <span class="token operator">&amp;</span> JOBCTL_LISTENING<span class="token punctuation">)</span>
+		<span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+
+	<span class="token function">spin_lock_irq</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>task<span class="token operator">-&gt;</span>sighand<span class="token operator">-&gt;</span>siglock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">task_is_traced</span><span class="token punctuation">(</span>task<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token function">__fatal_signal_pending</span><span class="token punctuation">(</span>task<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		task<span class="token operator">-&gt;</span>state <span class="token operator">=</span> __TASK_TRACED<span class="token punctuation">;</span>
+		ret <span class="token operator">=</span> true<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">spin_unlock_irq</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>task<span class="token operator">-&gt;</span>sighand<span class="token operator">-&gt;</span>siglock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>下面来分析如何建立ptrace环境。</p> 
+  <h1><a id="tracertracee_91"></a>tracer和tracee的跟踪状态</h1> 
+  <p>进程tracer首先要成为进程tracee的跟踪进程，即要满足：<code>tracee-&gt;ptrace &amp;&amp; tracee-&gt;parent == tracer</code>。如何做到呢？有两种方式：一种情况是tracer是tracee的父进程，进程tracee主动调用<code>ptrace(PTRACE_TRACEME, 0, 0, 0)</code>，另外一种是进程tracer调用<code>ptrace(PTRACE_ATTACH, tracee-&gt;pid, 0, 0)</code>。我们来看一下这两种方式的流程。</p> 
+  <h2><a id="ptracePTRACE_TRACEME_0_0_0_95"></a>ptrace(PTRACE_TRACEME, 0, 0, 0)</h2> 
+  <p>在<code>ptrace</code>系统调用中，当请求为<code>PTRACE_TRACEME</code>时，会直接调用<code>ptrace_traceme</code>。</p> 
+  <pre><code class="prism language-c"><span class="token function">SYSCALL_DEFINE4</span><span class="token punctuation">(</span>ptrace<span class="token punctuation">,</span> <span class="token keyword">long</span><span class="token punctuation">,</span> request<span class="token punctuation">,</span> <span class="token keyword">long</span><span class="token punctuation">,</span> pid<span class="token punctuation">,</span> <span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">,</span> addr<span class="token punctuation">,</span>
+		<span class="token keyword">unsigned</span> <span class="token keyword">long</span><span class="token punctuation">,</span> data<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>request <span class="token operator">==</span> PTRACE_TRACEME<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		ret <span class="token operator">=</span> <span class="token function">ptrace_traceme</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>在<code>ptrace_traceme</code>函数中，首先要检查现在没有其他进程跟踪当前进程，然后进行权限检查。都没有问题的话，将当前进程<code>ptrace</code>字段置为<code>PT_PTRACED</code>，然后调用<code>ptrace_link</code>，而<code>ptrace_link</code>最终调用了<code>__ptrace_link</code>，最终将父进程设为了跟踪进程。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ptrace_traceme</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">int</span> ret <span class="token operator">=</span> <span class="token operator">-</span>EPERM<span class="token punctuation">;</span>
+
+	<span class="token function">write_lock_irq</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>tasklist_lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">/* Are we already being traced? */</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>current<span class="token operator">-&gt;</span>ptrace<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		ret <span class="token operator">=</span> <span class="token function">security_ptrace_traceme</span><span class="token punctuation">(</span>current<span class="token operator">-&gt;</span>parent<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">/* * Check PF_EXITING to ensure -&gt;real_parent has not passed * exit_ptrace(). Otherwise we don't report the error but * pretend -&gt;real_parent untraces us right after return. */</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>ret <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token punctuation">(</span>current<span class="token operator">-&gt;</span>real_parent<span class="token operator">-&gt;</span>flags <span class="token operator">&amp;</span> PF_EXITING<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+			current<span class="token operator">-&gt;</span>ptrace <span class="token operator">=</span> PT_PTRACED<span class="token punctuation">;</span>
+			<span class="token function">ptrace_link</span><span class="token punctuation">(</span>current<span class="token punctuation">,</span> current<span class="token operator">-&gt;</span>real_parent<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">write_unlock_irq</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>tasklist_lock<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p><code>__ptrace_link</code>首先将tracee放到tracer的<code>ptraced</code>列表中，然后将tracee的<code>parent</code>字段置为tracer。（请注意区分<code>parent</code>字段和<code>real_parent</code>字段）。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">__ptrace_link</span><span class="token punctuation">(</span><span class="token keyword">struct</span> task_struct <span class="token operator">*</span>child<span class="token punctuation">,</span> <span class="token keyword">struct</span> task_struct <span class="token operator">*</span>new_parent<span class="token punctuation">,</span>
+		   <span class="token keyword">const</span> <span class="token keyword">struct</span> cred <span class="token operator">*</span>ptracer_cred<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token function">BUG_ON</span><span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">list_empty</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>child<span class="token operator">-&gt;</span>ptrace_entry<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">list_add</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>child<span class="token operator">-&gt;</span>ptrace_entry<span class="token punctuation">,</span> <span class="token operator">&amp;</span>new_parent<span class="token operator">-&gt;</span>ptraced<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	child<span class="token operator">-&gt;</span>parent <span class="token operator">=</span> new_parent<span class="token punctuation">;</span>
+	child<span class="token operator">-&gt;</span>ptracer_cred <span class="token operator">=</span> <span class="token function">get_cred</span><span class="token punctuation">(</span>ptracer_cred<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <h2><a id="ptracePTRACE_ATTACH_traceepid_0_0_152"></a>ptrace(PTRACE_ATTACH, tracee-&gt;pid, 0, 0)</h2> 
+  <p>tracer跟踪tracee的另一种方式是使用<code>PTRACE_ATTACH</code>（或<code>PTRACE_SEIZE</code>）请求。与处理<code>PTRACE_TRACEME</code>请求的<code>ptrace_traceme</code>函数类似，处理<code>PTRACE_ATTACH</code>请求时会调用<code>ptrace_attach</code>函数。<code>ptrace_attach</code>代码行数较<code>ptrace_traceme</code>长不少，因为要做大量的合法性检查：tracer和tracee可能是同一个进程，tracee可能是个内核线程，也可能是其他用户的进程，等等有各种意外情况。但如果没问题的话，最终也是调用了<code>ptrace_link</code>将tracer设置为tracee的跟踪进程，在此不再赘述。有一个不一样的地方是，处理<code>PTRACE_ATTACH</code>请求时会向tracee发送一个<code>SIGSTOP</code>信号。</p> 
+  <p>至此，tracer就成为了tracee的跟踪进程，但此时tracer还不能立即对tracee使用<code>ptrace</code>请求，还有另一个前提条件：tracee已经停止运行，即state字段中<code>__TASK_TRACED</code>被置位。</p> 
+  <h1><a id="tracee_158"></a>使tracee停止运行</h1> 
+  <p>内核何时对tracee的<code>state</code>字段的<code>__TASK_TRACED</code>标志位进行置位呢？是在tracee处理除<code>SIGKILL</code>信号以外的任何信号时做的。</p> 
+  <p>进程在从内核空间返回用户空间时会检查是否有挂起信号，如果有的话，调用<code>do_signal</code>进行处理。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">exit_to_usermode_loop</span><span class="token punctuation">(</span><span class="token keyword">struct</span> pt_regs <span class="token operator">*</span>regs<span class="token punctuation">,</span> u32 cached_flags<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		<span class="token comment">/* deal with pending signal delivery */</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>cached_flags <span class="token operator">&amp;</span> _TIF_SIGPENDING<span class="token punctuation">)</span>
+			<span class="token function">do_signal</span><span class="token punctuation">(</span>regs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p><code>do_signal</code>需要调用<code>get_signal</code>来填充一个ksignal结构体。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">do_signal</span><span class="token punctuation">(</span><span class="token keyword">struct</span> pt_regs <span class="token operator">*</span>regs<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">get_signal</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ksig<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token comment">/* Whee! Actually deliver the signal. */</span>
+		<span class="token function">handle_signal</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>ksig<span class="token punctuation">,</span> regs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>在<code>get_signal</code>过程中，会检查当前进程是否处于被<code>ptrace</code>跟踪的状态，如果是的话，且当前信号不是<code>SIGKILL</code>，则会调用<code>ptrace_signal</code>。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">get_signal</span><span class="token punctuation">(</span><span class="token keyword">struct</span> ksignal <span class="token operator">*</span>ksig<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">unlikely</span><span class="token punctuation">(</span>current<span class="token operator">-&gt;</span>ptrace<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> signr <span class="token operator">!=</span> SIGKILL<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+			signr <span class="token operator">=</span> <span class="token function">ptrace_signal</span><span class="token punctuation">(</span>signr<span class="token punctuation">,</span> <span class="token operator">&amp;</span>ksig<span class="token operator">-&gt;</span>info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>signr<span class="token punctuation">)</span>
+				<span class="token keyword">continue</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p><code>ptrace_signal</code>调用<code>ptrace_stop</code>来使当前进程停下来。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">ptrace_signal</span><span class="token punctuation">(</span><span class="token keyword">int</span> signr<span class="token punctuation">,</span> siginfo_t <span class="token operator">*</span>info<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token function">ptrace_stop</span><span class="token punctuation">(</span>signr<span class="token punctuation">,</span> CLD_TRAPPED<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> info<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p><code>ptrace_stop</code>首先将进程状态设置为<code>TASK_TRACED</code>，这样的话，下次进行进程调度时就不会调度该进程了。设置完进程状态后，会发送<code>SIGCHLD</code>信号通知当前进程的<code>parent</code>和<code>real_parent</code>。最后调用<code>freezable_schedule</code>进行进程调度，将该进程停下来。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">ptrace_stop</span><span class="token punctuation">(</span><span class="token keyword">int</span> exit_code<span class="token punctuation">,</span> <span class="token keyword">int</span> why<span class="token punctuation">,</span> <span class="token keyword">int</span> clear_code<span class="token punctuation">,</span> siginfo_t <span class="token operator">*</span>info<span class="token punctuation">)</span>
+	<span class="token function">__releases</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>current<span class="token operator">-&gt;</span>sighand<span class="token operator">-&gt;</span>siglock<span class="token punctuation">)</span>
+	<span class="token function">__acquires</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>current<span class="token operator">-&gt;</span>sighand<span class="token operator">-&gt;</span>siglock<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token function">set_current_state</span><span class="token punctuation">(</span>TASK_TRACED<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		<span class="token function">do_notify_parent_cldstop</span><span class="token punctuation">(</span>current<span class="token punctuation">,</span> true<span class="token punctuation">,</span> why<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>gstop_done <span class="token operator">&amp;&amp;</span> <span class="token function">ptrace_reparented</span><span class="token punctuation">(</span>current<span class="token punctuation">)</span><span class="token punctuation">)</span>
+			<span class="token function">do_notify_parent_cldstop</span><span class="token punctuation">(</span>current<span class="token punctuation">,</span> false<span class="token punctuation">,</span> why<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		<span class="token function">freezable_schedule</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>为了能让tracee停止运行，信号是必不可少的，无论是<code>PTRACE_ATTACH</code>请求、breakpoint或者是watchpoint，都依赖于给tracee发送一个信号，同时tracee还要有机会去检查当前有哪些挂起的信号。就像文章一开始提到的问题，进程一直卡在内核空间，没有机会在返回用户空间时检查当前挂起的信号，也就无法停止运行了。</p> 
+  <p>至此<code>ptrace</code>请求的前置条件就完全满足了，可以使用其他<code>ptrace</code>请求了。</p> 
+  <p>其他的<code>ptrace</code>请求无非是读写tracee的<code>task_struct</code>、内存和寄存器了，似乎没什么太特别的地方，也就不再分析了。</p> 
+  <h1><a id="_241"></a>结束语</h1> 
+  <p>以上就是ptrace系统调用实现的大致原理。不过有一部分没有提到，就是tracer与tracee如何detach，主要是因为这部分和文章开头提到的问题不相干，所以就没有看这部分的源码，有兴趣的可以自己看一下。</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

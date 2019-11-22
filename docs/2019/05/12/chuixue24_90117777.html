@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Spring 钩子之BeanFactoryPostProcessor和BeanPostProcessor的源码学习 « NotBeCN</title>
+  <meta name="description" content="         BeanFactoryPostProcessor和BeanPostProcessor这两个接口都是初始化bean时对外暴露的入口之一，和Aware类似（PS:关于spring的hook可以看看Spring钩子方法和钩子接口的使用详解讲的蛮详细）本文也主要是学习具体的钩子的细节，以便于实际开发中我...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/chuixue24_90117777.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Spring 钩子之BeanFactoryPostProcessor和BeanPostProcessor的源码学习</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>BeanFactoryPostProcessor和BeanPostProcessor这两个接口都是初始化bean时对外暴露的入口之一，和Aware类似（PS:关于spring的hook可以看看<a href="https://link.jianshu.com?t=http%3A%2F%2Fwww.sohu.com%2Fa%2F166804449_714863" rel="nofollow">Spring钩子方法和钩子接口的使用详解</a>讲的蛮详细）本文也主要是学习具体的钩子的细节，以便于实际开发中我们能有效率，例如如何在scala中如何获取springboot的启动类等等，一些中间件为了监控整个系统的服务，也需要获取到spring容器数据和状态。<br> 接下来具体学习和了解下BeanFactoryPostProcessor和BeanPostProcessor。</p> 
+  <h2>BeanFactoryPostProcessor</h2> 
+  <p>bean工厂的bean属性处理容器，说通俗一些就是可以管理我们的bean工厂内所有的beandefinition（未实例化）数据，可以随心所欲的修改属性。</p> 
+  <h3>使用方法</h3> 
+  <pre class="has">
+<code>public class CustomBeanFactoryPostProcessor implements BeanFactoryPostProcessor {
+
+    /**
+     * 主要是用来自定义修改持有的bean
+     * ConfigurableListableBeanFactory 其实就是DefaultListableBeanDefinition对象
+     * @param beanFactory
+     * @throws BeansException
+     */
+
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) throws BeansException {
+        System.out.println("调用了自定义的BeanFactoryPostProcessor " + beanFactory);
+        Iterator it = beanFactory.getBeanNamesIterator();
+
+        String[] names = beanFactory.getBeanDefinitionNames();
+        // 获取了所有的bean名称列表
+        for(int i=0; i&lt;names.length; i++){
+            String name = names[i];
+
+            BeanDefinition bd = beanFactory.getBeanDefinition(name);
+            System.out.println(name + " bean properties: " + bd.getPropertyValues().toString());
+            // 本内容只是个demo，打印持有的bean的属性情况
+        }
+    }
+}
+</code></pre> 
+  <pre class="has">
+<code>&lt;context:property-placeholder location="pro.properties" /&gt;
+&lt;bean id="student" class="Student" init-method="init" /&gt;
+&lt;bean class="CustomBeanFactoryPostProcessor" id="customBeanFactoryPostProcessor" /&gt;
+</code></pre> 
+  <p><strong>输出结果</strong></p> 
+  <p><img alt="" class="has" src="//upload-images.jianshu.io/upload_images/2064197-489527c2807622f9.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1000/format/webp"></p> 
+  <p>image.png</p> 
+  <p>&nbsp;</p> 
+  <h3>源码分析</h3> 
+  <p>毫无疑问肯定已经解析xml了，继续看refresh函数</p> 
+  <p><strong>AbstractApplicationContext 文件</strong></p> 
+  <pre class="has">
+<code>public void refresh() throws BeansException, IllegalStateException {
+    synchronized (this.startupShutdownMonitor) {
+        // Prepare this context for refreshing.
+        prepareRefresh();
+        // 解析xml完成，存储在一个具体的bean工厂中
+        ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+        // bean工厂的初始化操作
+        prepareBeanFactory(beanFactory);
+        try {
+            // 由子类继承去实现该类，当前该方法为空
+            postProcessBeanFactory(beanFactory);
+            // invoke 其中存在的BeanFactoryPostProcessors,也就是我们现在说的
+            invokeBeanFactoryPostProcessors(beanFactory);
+        ...
+</code></pre> 
+  <p><strong>PostProcessorRegistrationDelegate 文件</strong></p> 
+  <p>invokeBeanFactoryPostProcessors方法的参数为bean工厂ConfigurableListableBeanFactory和当前已知的postprocessor对象，函数分为了好几部分去处理，截取其中我们关心的部分即可（其实还包含了优先级、属性等类似处理过程）</p> 
+  <pre class="has">
+<code>String[] postProcessorNames =
+                beanFactory.getBeanNamesForType(BeanFactoryPostProcessor.class, true, false);
+        // 筛选出bean工程中存在的所有实现BeanFactoryPostProcessor类的类名称
+
+        List&lt;BeanFactoryPostProcessor&gt; priorityOrderedPostProcessors = new ArrayList&lt;BeanFactoryPostProcessor&gt;();
+        List&lt;String&gt; orderedPostProcessorNames = new ArrayList&lt;String&gt;();
+        List&lt;String&gt; nonOrderedPostProcessorNames = new ArrayList&lt;String&gt;();
+        for (String ppName : postProcessorNames) {
+            if (processedBeans.contains(ppName)) {
+                // 已经存在了，不再处理
+            }
+            else if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+                priorityOrderedPostProcessors.add(beanFactory.getBean(ppName, BeanFactoryPostProcessor.class));
+                // 为PriorityOrdered类型
+            }
+            else if (beanFactory.isTypeMatch(ppName, Ordered.class)) {
+                orderedPostProcessorNames.add(ppName);
+                // 为Ordered类型
+            }
+            else {
+                nonOrderedPostProcessorNames.add(ppName);
+                // 这个就是我们当前需要关心的PostProcessors
+            }
+        }
+
+        ...
+        List&lt;BeanFactoryPostProcessor&gt; nonOrderedPostProcessors = new ArrayList&lt;BeanFactoryPostProcessor&gt;();
+        for (String postProcessorName : nonOrderedPostProcessorNames) {
+            nonOrderedPostProcessors.add(beanFactory.getBean(postProcessorName, BeanFactoryPostProcessor.class));
+            // 获取自定义的BeanFactoryPostProcessor
+            // 这里有一点需要注意到！！！！
+        }
+        invokeBeanFactoryPostProcessors(nonOrderedPostProcessors, beanFactory);
+</code></pre> 
+  <p>上述代码中<code>nonOrderedPostProcessors.add(beanFactory.getBean(postProcessorName, BeanFactoryPostProcessor.class));</code>中使用了getBean，起初没注意到以为是生成具体的对象然后修改，其实不是，getBean后面还有一个参数BeanFactoryPostProcessor.class，注意看这个函数，会发现返回的是一个抽象类，结论就是<strong>nonOrderedPostProcessors添加的不是bean实例，而是beandefinition，在实例化前！！！</strong>，这点很重要</p> 
+  <pre class="has">
+<code>private static void invokeBeanFactoryPostProcessors(
+        Collection&lt;? extends BeanFactoryPostProcessor&gt; postProcessors, ConfigurableListableBeanFactory beanFactory) {
+    for (BeanFactoryPostProcessor postProcessor : postProcessors) {
+        postProcessor.postProcessBeanFactory(beanFactory);
+        // 调用每一个自定义的BeanFactoryPostProcessor的方法
+        // 在本文章中就会去调用自定义的CustomBeanFactoryPostProcessor的postProcessBeanFactory方法
+    }
+}
+</code></pre> 
+  <p>再多说一点关于上面的getBeanNamesForType函数，从名字肯定很容易理解了，根据传递的类型获取容器中的beanName。了解下其内部的实现原理</p> 
+  <p><strong>DefaultListableBeanFactory 文件的 getBeanNamesForType函数</strong></p> 
+  <pre class="has">
+<code>// type:类的类型名称
+// includeNonSingletons:返回数据包含了非单例beanName
+// allowEagerInit: 可以提前加载初始化
+public String[] getBeanNamesForType(Class&lt;?&gt; type, boolean includeNonSingletons, boolean allowEagerInit) {
+    if (!isConfigurationFrozen() || type == null || !allowEagerInit) {
+       // 不可用缓存、类型无效、不允许提前加载初始化
+       // 需要获取当前type的原始类型，继续获取数据
+        return doGetBeanNamesForType(ResolvableType.forRawClass(type), includeNonSingletons, allowEagerInit);
+    }
+    Map&lt;Class&lt;?&gt;, String[]&gt; cache =
+            (includeNonSingletons ? this.allBeanNamesByType : this.singletonBeanNamesByType);
+    String[] resolvedBeanNames = cache.get(type);
+    // 如果缓存已经存储了该数据，则无需再计算，直接返回即可
+    if (resolvedBeanNames != null) {
+        return resolvedBeanNames;
+    }
+    resolvedBeanNames = doGetBeanNamesForType(ResolvableType.forRawClass(type), includeNonSingletons, true);
+    // 这一步就是真正的获取数据，遍历beanDefinitionNames的每一个数据，符合要求的就会加入到返回的列表中
+    
+    if (ClassUtils.isCacheSafe(type, getBeanClassLoader())) {
+        cache.put(type, resolvedBeanNames);
+        // 便于下一次获取，加入缓存中
+    }
+    return resolvedBeanNames;
+}
+</code></pre> 
+  <h2>BeanPostProcessor</h2> 
+  <p>从范围上来说，从上面的所有的bean成为了特定的bean，其次BeanFactoryPostProcessor可以在初始化前修改bean的属性等情况，但是BeanPostProcessor只能在初始化后（注意初始化不包括init方法）执行一些操作。<br><strong>网上很多文章都说BeanPostProcessor不能修改bean属性，其实我看来未必，当其实例化之后，完全可以拿到实例化后的对象，对对象进行一些改值操作也完全可以的</strong></p> 
+  <h3>使用方法</h3> 
+  <pre class="has">
+<code>public class Student {
+
+    @Value("${name}")
+    private String className;
+
+    public Student() {
+        System.out.println("constructor loading");
+    }
+
+    public void init(){
+        System.out.println("init loading");
+    }
+}
+</code></pre> 
+  <pre class="has">
+<code>public class CustomBeanPostProcessor implements BeanPostProcessor {
+
+    public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+        if(bean instanceof Student){
+            // 如果当前的bean是Student,则打印日志
+            System.out.println("postProcessBeforeInitialization bean : " + beanName);
+        }
+        return bean;
+    }
+
+    public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+        if(bean instanceof Student){
+            System.out.println("postProcessAfterInitialization bean : " + beanName);
+        }
+        return bean;
+    }
+}
+</code></pre> 
+  <pre class="has">
+<code>&lt;bean id="student" class="Student" init-method="init" /&gt;
+&lt;bean class="CustomBeanPostProcessor" id="customBeanPostProcessor" /&gt;
+</code></pre> 
+  <p><strong>输出结果</strong></p> 
+  <p><img alt="" class="has" src="//upload-images.jianshu.io/upload_images/2064197-91e170bc581e470f.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/696/format/webp"></p> 
+  <p>image.png</p> 
+  <ul>
+   <li>先打印出了构造器内部执行的话，意味着这个时候实例化了Student类，</li> 
+   <li>在init方法前执行了postProcessBeforeInitialization</li> 
+   <li>在init方法后执行了postProcessAfterInitialization</li> 
+  </ul>
+  <h3>源码分析</h3> 
+  <p>入口依旧是refresh函数，在完成初始化之后，进入到<code>finishBeanFactoryInitialization(beanFactory)</code>执行BeanPostProcessor的相关操作，中间的流程过长，包含了getBean操作，genBean操作过于繁琐，后续再介绍。</p> 
+  <p><img alt="" class="has" src="//upload-images.jianshu.io/upload_images/2064197-baab5e79aaad71f2.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1000/format/webp"></p> 
+  <p>image.png</p> 
+  <p><strong>AbstractAutowireCapableBeanFactory 文件</strong></p> 
+  <pre class="has">
+<code>protected Object initializeBean(final String beanName, final Object bean, RootBeanDefinition mbd) {
+    if (System.getSecurityManager() != null) {
+        AccessController.doPrivileged(new PrivilegedAction&lt;Object&gt;() {
+            @Override
+            public Object run() {
+                invokeAwareMethods(beanName, bean);
+                return null;
+            }
+        }, getAccessControlContext());
+    }
+    else {
+        invokeAwareMethods(beanName, bean);
+        // aware同样是对外提供的钩子
+    }
+
+    Object wrappedBean = bean;
+    if (mbd == null || !mbd.isSynthetic()) {
+        wrappedBean = applyBeanPostProcessorsBeforeInitialization(wrappedBean, beanName);
+        // 这一步就是执行自定义的beanpostprocessor的before操作
+    }
+
+    try {
+        invokeInitMethods(beanName, wrappedBean, mbd);
+        // 执行init方法
+    }
+    catch (Throwable ex) {
+        throw new BeanCreationException(
+                (mbd != null ? mbd.getResourceDescription() : null),
+                beanName, "Invocation of init method failed", ex);
+    }
+
+    if (mbd == null || !mbd.isSynthetic()) {
+        wrappedBean = applyBeanPostProcessorsAfterInitialization(wrappedBean, beanName);
+        // 这一步就是执行自定义的beanpostprocessor的after操作
+    }
+    return wrappedBean;
+}
+</code></pre> 
+  <pre class="has">
+<code>public Object applyBeanPostProcessorsBeforeInitialization(
+                    Object existingBean, String beanName)
+        throws BeansException {
+    Object result = existingBean;
+    for (BeanPostProcessor beanProcessor : getBeanPostProcessors()) {
+       // 获取所有的BeanPostProcessor对象，执行postProcessBeforeInitialization方法
+        result = beanProcessor.postProcessBeforeInitialization(result, beanName);
+        if (result == null) {
+            return result;
+        }
+    }
+    return result;
+    // 然后把执行结果返回
+}
+</code></pre> 
+  <pre class="has">
+<code>public Object applyBeanPostProcessorsAfterInitialization(
+                Object existingBean, String beanName)
+        throws BeansException {
+    Object result = existingBean;
+    for (BeanPostProcessor beanProcessor : getBeanPostProcessors()) {
+        result = beanProcessor.postProcessAfterInitialization(result, beanName);
+        if (result == null) {
+            return result;
+        }
+    }
+    return result;
+}
+</code></pre> 
+  <pre class="has">
+<code>protected void invokeInitMethods(String beanName, 
+                    final Object bean, RootBeanDefinition mbd)
+        throws Throwable {
+
+    boolean isInitializingBean = (bean instanceof InitializingBean);
+    if (isInitializingBean &amp;&amp; (mbd == null || !mbd.isExternallyManagedInitMethod("afterPropertiesSet"))) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Invoking afterPropertiesSet() on bean with name '" + beanName + "'");
+        }
+        if (System.getSecurityManager() != null) {
+            try {
+                AccessController.doPrivileged(new PrivilegedExceptionAction&lt;Object&gt;() {
+                    @Override
+                    public Object run() throws Exception {
+                        ((InitializingBean) bean).afterPropertiesSet();
+                        return null;
+                    }
+                }, getAccessControlContext());
+            }
+            catch (PrivilegedActionException pae) {
+                throw pae.getException();
+            }
+        }
+        else {
+            ((InitializingBean) bean).afterPropertiesSet();
+        }
+    }
+
+    if (mbd != null) {
+       // invoke 反射执行init方法
+        String initMethodName = mbd.getInitMethodName();
+        if (initMethodName != null &amp;&amp; !(isInitializingBean &amp;&amp; "afterPropertiesSet".equals(initMethodName)) &amp;&amp;
+                !mbd.isExternallyManagedInitMethod(initMethodName)) {
+            invokeCustomInitMethod(beanName, bean, mbd);
+        }
+    }
+}</code></pre> 
+  <p><br><br> 作者：jwfy<br> 链接：https://www.jianshu.com/p/a90a3e617ba6<br> 来源：简书<br> 简书著作权归作者所有，任何形式的转载都请联系作者获得授权并注明出处。</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

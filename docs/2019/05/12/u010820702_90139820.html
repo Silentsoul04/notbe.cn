@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>记一次高并发、大流量场景下的缓存、限流优化 « NotBeCN</title>
+  <meta name="description" content="          目录   场景描述:   历史优化措施   可行性分析   硬件设备   流量分析   峰值预估【单个服务】   缓存预估   峰值流量处理   可行性方案   源端转发   分布式缓存   本地缓存   可行性实践   案例1   问题分析   基于Guava的本地缓存   基于Guava的...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/u010820702_90139820.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">记一次高并发、大流量场景下的缓存、限流优化</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p id="main-toc"><strong>目录</strong></p> 
+  <p id="%E5%9C%BA%E6%99%AF%E6%8F%8F%E8%BF%B0%3A-toc" style="margin-left:0px;"><a href="#%E5%9C%BA%E6%99%AF%E6%8F%8F%E8%BF%B0%3A" rel="nofollow">场景描述:</a></p> 
+  <p id="%E5%8E%86%E5%8F%B2%E4%BC%98%E5%8C%96%E6%8E%AA%E6%96%BD-toc" style="margin-left:40px;"><a href="#%E5%8E%86%E5%8F%B2%E4%BC%98%E5%8C%96%E6%8E%AA%E6%96%BD" rel="nofollow">历史优化措施</a></p> 
+  <p id="%E5%8F%AF%E8%A1%8C%E6%80%A7%E5%88%86%E6%9E%90-toc" style="margin-left:0px;"><a href="#%E5%8F%AF%E8%A1%8C%E6%80%A7%E5%88%86%E6%9E%90" rel="nofollow">可行性分析</a></p> 
+  <p id="%E7%A1%AC%E4%BB%B6%E8%AE%BE%E5%A4%87-toc" style="margin-left:40px;"><a href="#%E7%A1%AC%E4%BB%B6%E8%AE%BE%E5%A4%87" rel="nofollow">硬件设备</a></p> 
+  <p id="%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90-toc" style="margin-left:40px;"><a href="#%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90" rel="nofollow">流量分析</a></p> 
+  <p id="%E5%B3%B0%E5%80%BC%E9%A2%84%E4%BC%B0%E3%80%90%E5%8D%95%E4%B8%AA%E6%9C%8D%E5%8A%A1%E3%80%91-toc" style="margin-left:40px;"><a href="#%E5%B3%B0%E5%80%BC%E9%A2%84%E4%BC%B0%E3%80%90%E5%8D%95%E4%B8%AA%E6%9C%8D%E5%8A%A1%E3%80%91" rel="nofollow">峰值预估【单个服务】</a></p> 
+  <p id="%E7%BC%93%E5%AD%98%E9%A2%84%E4%BC%B0-toc" style="margin-left:40px;"><a href="#%E7%BC%93%E5%AD%98%E9%A2%84%E4%BC%B0" rel="nofollow">缓存预估</a></p> 
+  <p id="%E5%B3%B0%E5%80%BC%E6%B5%81%E9%87%8F%E5%A4%84%E7%90%86-toc" style="margin-left:40px;"><a href="#%E5%B3%B0%E5%80%BC%E6%B5%81%E9%87%8F%E5%A4%84%E7%90%86" rel="nofollow">峰值流量处理</a></p> 
+  <p id="%E5%8F%AF%E8%A1%8C%E6%80%A7%E6%96%B9%E6%A1%88-toc" style="margin-left:0px;"><a href="#%E5%8F%AF%E8%A1%8C%E6%80%A7%E6%96%B9%E6%A1%88" rel="nofollow">可行性方案</a></p> 
+  <p id="%E6%BA%90%E7%AB%AF%E8%BD%AC%E5%8F%91-toc" style="margin-left:40px;"><a href="#%E6%BA%90%E7%AB%AF%E8%BD%AC%E5%8F%91" rel="nofollow">源端转发</a></p> 
+  <p id="%E5%88%86%E5%B8%83%E5%BC%8F%E7%BC%93%E5%AD%98-toc" style="margin-left:40px;"><a href="#%E5%88%86%E5%B8%83%E5%BC%8F%E7%BC%93%E5%AD%98" rel="nofollow">分布式缓存</a></p> 
+  <p id="%E6%9C%AC%E5%9C%B0%E7%BC%93%E5%AD%98-toc" style="margin-left:40px;"><a href="#%E6%9C%AC%E5%9C%B0%E7%BC%93%E5%AD%98" rel="nofollow">本地缓存</a></p> 
+  <p id="%E5%8F%AF%E8%A1%8C%E6%80%A7%E5%AE%9E%E8%B7%B5-toc" style="margin-left:0px;"><a href="#%E5%8F%AF%E8%A1%8C%E6%80%A7%E5%AE%9E%E8%B7%B5" rel="nofollow">可行性实践</a></p> 
+  <p id="%E6%A1%88%E4%BE%8B1-toc" style="margin-left:40px;"><a href="#%E6%A1%88%E4%BE%8B1" rel="nofollow">案例1</a></p> 
+  <p id="%E9%97%AE%E9%A2%98%E5%88%86%E6%9E%90-toc" style="margin-left:80px;"><a href="#%E9%97%AE%E9%A2%98%E5%88%86%E6%9E%90" rel="nofollow">问题分析</a></p> 
+  <p id="%E5%9F%BA%E4%BA%8EGuava%E7%9A%84%E6%9C%AC%E5%9C%B0%E7%BC%93%E5%AD%98-toc" style="margin-left:80px;"><a href="#%E5%9F%BA%E4%BA%8EGuava%E7%9A%84%E6%9C%AC%E5%9C%B0%E7%BC%93%E5%AD%98" rel="nofollow">基于Guava的本地缓存</a></p> 
+  <p id="%E5%9F%BA%E4%BA%8EGuava%E7%9A%84%E4%BB%A4%E7%89%8C%E6%A1%B6%E9%99%90%E6%B5%81%E7%AE%97%E6%B3%95-toc" style="margin-left:80px;"><a href="#%E5%9F%BA%E4%BA%8EGuava%E7%9A%84%E4%BB%A4%E7%89%8C%E6%A1%B6%E9%99%90%E6%B5%81%E7%AE%97%E6%B3%95" rel="nofollow">基于Guava的令牌桶限流算法</a></p> 
+  <p id="%E5%8F%82%E6%95%B0%E9%85%8D%E7%BD%AE-toc" style="margin-left:80px;"><a href="#%E5%8F%82%E6%95%B0%E9%85%8D%E7%BD%AE" rel="nofollow">参数配置</a></p> 
+  <hr id="hr-toc">
+  <h1 id="%E5%9C%BA%E6%99%AF%E6%8F%8F%E8%BF%B0%3A"><strong>场景描述</strong>:</h1> 
+  <p style="text-indent:50px;">平台接入了大量的图片，稳定情况下大概1200张/秒；现有架构下内部系统需要先将这部分数据落地并生成结构化URL存储到分布式存储中。同时，需要将已经落地的图片上传至三个第三方平台。目前遇到的问题是推送服务大面积报错，原因主要是图片下载失败，目前的存储/读取流程如下:</p> 
+  <p style="text-indent:50px;"><img alt="" class="has" height="788" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512135109627.png" width="287"></p> 
+  <p style="text-indent:50px;">主要问题表现在，从接入到存储出现大面积写入失败,下载服务也大面积失败，报错信息是从存储集群获取连接失败；</p> 
+  <h2 id="%E5%8E%86%E5%8F%B2%E4%BC%98%E5%8C%96%E6%8E%AA%E6%96%BD"><strong>历史优化措施</strong></h2> 
+  <p style="text-indent:50px;">之前是做过一些优化，稳定了一段时间，随着发送的第三发越来越多，最终难以维持。</p> 
+  <ol>
+   <li> <p style="text-indent:0;">针对存储集群的连接进行了优化，针对客户端连接进行了优化</p> </li> 
+   <li> <p style="text-indent:0;">存储层面针对读写进行了分离</p> </li> 
+  </ol>
+  <h1 id="%E5%8F%AF%E8%A1%8C%E6%80%A7%E5%88%86%E6%9E%90" style="margin-left:0cm;"><em>可行性分析</em></h1> 
+  <h2 id="%E7%A1%AC%E4%BB%B6%E8%AE%BE%E5%A4%87">硬件设备</h2> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 166个STORAGE +4Tracker&nbsp;&nbsp; ,之前已经分别针对Storage和Tracker进行了多次优化,Tracker进行了读写分离(两读两写);</p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 图片下载服务有8台;</p> 
+  <h2 id="%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90">流量分析</h2> 
+  <p style="text-indent:0;">平均单张图片大小:150 K</p> 
+  <p style="text-indent:0;">平均每条记录图片数</p> 
+  <ol>
+   <li> <p style="text-indent:0;">200KB全景图+4KB号牌特征图+110KB车牌特征图</p> </li> 
+   <li> <p style="text-indent:0;">5张</p> </li> 
+  </ol>
+  <p style="margin-left:0cm;">QPS:300/S【每条记录3-5张图片,后边统一为4】</p> 
+  <p style="margin-left:0cm;">数据推送方:3</p> 
+  <p style="margin-left:0cm;">输入总流量:200M/S</p> 
+  <p style="margin-left:0cm;">输出总流量:200*3=600M/S 【估算,应用程序访问的忽略】</p> 
+  <p style="margin-left:0cm;">单个下载服务流量=600M /8=75M/S=150张/秒【在增加数据推送可能会以倍数递增】</p> 
+  <h2 id="%E5%B3%B0%E5%80%BC%E9%A2%84%E4%BC%B0%E3%80%90%E5%8D%95%E4%B8%AA%E6%9C%8D%E5%8A%A1%E3%80%91">峰值预估【单个服务】</h2> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 实时场景: 300/S</p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 积压1分钟]:1800/S =74*60=9000张/S</p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 积压5分钟:9000/S=540000张/S&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp; [135000记录/S]</p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 消费者限流:1000/S&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 【限流的阀值是要保证积压趋向于缓解】</p> 
+  <h2 id="%E7%BC%93%E5%AD%98%E9%A2%84%E4%BC%B0">缓存预估</h2> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 缓存最近5分钟的图片;</p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 缓存总大小: 150 K*4*300*60*5=5.2G</p> 
+  <p style="margin-left:0cm;">单个服务缓存大小: 28125/8=6.5G 【加上服务自用内存大体上可以分配8G左右的内存】;</p> 
+  <p style="margin-left:0cm;">缓存总记录数:300*4*5*60=360000张</p> 
+  <p style="margin-left:0cm;">单个服务缓存记录数:45000</p> 
+  <p style="margin-left:0cm;">其它粒度依此类推;</p> 
+  <h2 id="%E5%B3%B0%E5%80%BC%E6%B5%81%E9%87%8F%E5%A4%84%E7%90%86">峰值流量处理</h2> 
+  <p style="margin-left:0cm;">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;上传服务是分布式服务,部分场景下允许积压,极容易出现并发瞬间到达数万级别. 很容易在启动时就将下载服务DOWN掉。</p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 合理的解决方案是进行必要的限流,由于使用了缓存,在缓存预热期间和缓存预热后预估的吞吐量差距较大,极端场景下会出现数量级的差异。</p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 限流需要考虑针对总吞吐量的限流,用来做服务级别的保护;同时要考虑资源级别的保护,对图片下载来说,可并发的存储访问数应该受到保护,避免将峰值流量传递到分布式存储系统,导致更严重的灾难。<br> &nbsp;</p> 
+  <h1 id="%E5%8F%AF%E8%A1%8C%E6%80%A7%E6%96%B9%E6%A1%88" style="margin-left:0cm;"><em>可行性方案</em></h1> 
+  <h2 id="%E6%BA%90%E7%AB%AF%E8%BD%AC%E5%8F%91">源端转发</h2> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 在图片数据未落地前直接进行转发操作;需要将部分逻辑前置;因为图片未落地降低了很大一部分由于存储的IO开销和网络延迟;</p> 
+  <p style="margin-left:0cm;"><img alt="" class="has" height="312" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512140233812.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA4MjA3MDI=,size_16,color_FFFFFF,t_70" width="467"></p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 【新版的接口可以预留该模块,需要时允许进行扩展】;</p> 
+  <h2 id="%E5%88%86%E5%B8%83%E5%BC%8F%E7%BC%93%E5%AD%98">分布式缓存</h2> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 需要一定规模的缓存集群,分布式缓存由于跨主机的数据访问,相比本地缓存效率要低一些;通常对缓存的数据没有特殊要求,需要结合具体的实现来进行选择;</p> 
+  <p style="margin-left:0cm;"><img alt="" class="has" height="486" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512140255903.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA4MjA3MDI=,size_16,color_FFFFFF,t_70" width="328"></p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 【新版URL设计中去除了与服务主机的强绑定关系,未来可以规划一个可插拔的缓存接口便于在大流量场景下的快速接入】</p> 
+  <h2 id="%E6%9C%AC%E5%9C%B0%E7%BC%93%E5%AD%98">本地缓存</h2> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 相比之下本地缓存效率更高,分布式环境下某些资源并不是每次都通过同一个本地节点进行访问,需要权衡本地缓存与分布式缓存的适用性;</p> 
+  <p style="margin-left:0cm;"><img alt="" class="has" height="564" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512140332910.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA4MjA3MDI=,size_16,color_FFFFFF,t_70" width="360"></p> 
+  <p style="margin-left:0cm;">我们当前的版本中图片同下载服务存在强绑定关系,基于本地缓存效果更明显</p> 
+  <h1 id="%E5%8F%AF%E8%A1%8C%E6%80%A7%E5%AE%9E%E8%B7%B5" style="margin-left:0cm;"><em>可行性实践</em></h1> 
+  <h2 id="%E6%A1%88%E4%BE%8B1"><em>案例1</em></h2> 
+  <h3 id="%E9%97%AE%E9%A2%98%E5%88%86%E6%9E%90">问题分析</h3> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 现在表现出以下问题,下面结合以前的问题整理下:</p> 
+  <ol>
+   <li>实时数据接入量在300条/秒，每条记录3-5张图片,合计每秒需要存储1200张左右图片;每张图片大小平均在150KB左右;每秒写入流量在200M左右【稳定情况下】</li> 
+   <li>实时数据推送,目前一条过车记录的图片【字节】,需要给三个第三方推送,输出输出总流量大概在500M/秒【稳定情况下】</li> 
+   <li>曾经多次针对连接进行过优化(连接池、短连接),存储层面也进行或多次优化,系统现在仍然不稳定,最近一次出问题是由于服务器下电重启;</li> 
+   <li>上传服务与下载服务竞争存储连接资源,如果下载出现峰值严重影响入库,直接导致入库操作失败;</li> 
+  </ol>
+  <h3 id="%E5%9F%BA%E4%BA%8EGuava%E7%9A%84%E6%9C%AC%E5%9C%B0%E7%BC%93%E5%AD%98"><em>基于Guava的本地缓存</em></h3> 
+  <p style="margin-left:0cm;">&nbsp; &nbsp; &nbsp; &nbsp; 现有设计中所有图片路径中绑定了唯一的图片下载服务实例,基于此在考虑对整体影响的情况下,在图片下载服务中使用本地缓存的方式可以大大提高实时图片读取的效率。</p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <img alt="" class="has" height="535" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512140748375.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA4MjA3MDI=,size_16,color_FFFFFF,t_70" width="998"></p> 
+  <h3 id="%E5%9F%BA%E4%BA%8EGuava%E7%9A%84%E4%BB%A4%E7%89%8C%E6%A1%B6%E9%99%90%E6%B5%81%E7%AE%97%E6%B3%95" style="margin-left:0cm;"><em>基于Guava的令牌桶限流算法</em></h3> 
+  <p><img alt="" class="has" height="209" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512140808900.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTA4MjA3MDI=,size_16,color_FFFFFF,t_70" width="1004"></p> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+  <h3 id="%E5%8F%82%E6%95%B0%E9%85%8D%E7%BD%AE"><em>参数配置</em></h3> 
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+  <ol>
+   <li>JVM 配置</li> 
+  </ol>
+  <p style="margin-left:0cm;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; -Xms4096m -Xmx8000m</p> 
+  <ol>
+   <li>缓存参数配置</li> 
+  </ol>
+  <pre class="has">
+<code>#图片下载缓存优化参数
+#最大缓存图片数
+imagedownload.cache.maxSize=15000
+#并发访问数量
+imagedownload.cache.concurrencyLevel=8
+#初始缓存大小
+imagedownload.cache.initSize=500
+#缓存过期时间[单位/S]
+imagedownload.cache.liveTime=300
+
+#图片下载限流配置
+#接口限流
+imagedownload.limit.permitsPerSecondForRequest=2000
+#访问存储限流
+imagedownload.limit.permitsPerSecondForDownload=100</code></pre> 
+  <p>&nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>MySQL同步复制报错处理总结 « NotBeCN</title>
+  <meta name="description" content="         一. 常见的3种故障   A.在master上删除一条记录时出现故障现象在master上删除一条记录后,slave上因找不到该记录而报错，报错信息如下： Could not execute Delete_rows events on table &lt;database.table_name&g...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/11/Z13580480392_90116740.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">MySQL同步复制报错处理总结</h1>
+    <p class="post-meta">May 11, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <h2>一. 常见的3种故障</h2> 
+  <p><strong>A</strong>.在master上删除一条记录时出现故障现象在master上删除一条记录后,slave上因找不到该记录而报错，报错信息如下：<br> Could not execute Delete_rows events on table &lt;database.table_name&gt;; Can't find record in &lt;table_name&gt;, Error_code: 1032; handler error HA_ERR_KEY_NOT_FOUND; the event's master log mysql-bin.000002, end_log_pos 84718<br> 出现这种情况是因为主机上已经将其删除了，对此，可采取从机直接跳过的方式解决,命令如下：<br> 分为GTID和binlog两种</p> 
+  <p><strong>A1. GTID复制的跳过:</strong><br> 1，停止slave进程<br> STOP SLAVE;<br> 2，设置事务号，事务号从Retrieved_Gtid_Set获取<br> SET @@SESSION.GTID_NEXT= '1ffbb886-e3a6-11e2-89fd-18a905565190:7'<br> 3，设置空事务<br> &nbsp;BEGIN; COMMIT;<br> 4，恢复事务号<br> SET SESSION GTID_NEXT = AUTOMATIC;<br> 5，启动slave进程<br> START SLAVE;</p> 
+  <p><br><strong>A2. binlog复制的跳过:</strong></p> 
+  <p>stop slave;<br> set global sql_salve_skip_count=1;start slave;</p> 
+  <p><strong>针对这种情况，个人写了一个skip_deleterows_replication.sh来处理该种情况，脚本具体如下（我以前是直接放在cron里面用定时任务去检测）:</strong></p> 
+  <blockquote> 
+   <p>#!/bin/bash<br> #######################################################################<br> ##<br> ##此脚本是参考maakit脚本编写的，默认跳过10次<br> ##<br> ##只有Could not execute Delete_rows events on table &lt;database.table_name&gt;; Can't find record in &lt;table_name&gt;, Error_code: 1032; handler error HA_ERR_KEY_NOT_FOUND; the event's master log mysql-bin.000002, end_log_pos 84718<br> ##这种情况才会跳过，其他情况，需要自行处理，一面丢失数据<br> ##<br> ## author zxb<br> ######################################################################<br> export LANG=zh_CN<br> v_dir=/usr/bin/<br> v_user=root<br> v_passwd=binbin<br> v_log=/tmp/logs<br> v_times=10</p> 
+   <p><br> ##创建和初始化各类日志目录<br> if [ -d "${v_log}" ]; then<br> &nbsp;&nbsp; &nbsp;echo "${v_log} has existed."<br> else<br> &nbsp;&nbsp; &nbsp;mkdir ${v_log}<br> fi</p> 
+   <p>echo ""&gt;${v_log}/slave_status.log<br> echo ""&gt;${v_log}/slave_status_error.log<br> count=1<br> while true<br> do<br> &nbsp;&nbsp; &nbsp;Seconds_Behind_Master=$(${v_dir}mysql -u${v_user} -p${v_passwd} -e "show slave status\G;"|grep Seconds_Behind_Master|awk -F: '{print $2}')</p> 
+   <p>if[ ${Seconds_Behind_Master} !="NULL" ];then<br> &nbsp;&nbsp; &nbsp;echo "slave is ok!"<br> &nbsp;&nbsp; &nbsp;${v_dir}mysql -u${v_user} -p${v_passwd} -e "show slave status\G;"&gt;&gt;${v_log}/slave_status.log<br> &nbsp;&nbsp; &nbsp;break<br> else<br> &nbsp;&nbsp; &nbsp;echo ""&gt;&gt;${v_log}/slave_status_error.log<br> &nbsp;&nbsp; &nbsp;date&gt;&gt;${v_log}/slave_status_error.log<br> &nbsp;&nbsp; &nbsp;${v_dir}mysql -u${v_user} -p${v_passwd} -e "show slave status\G;"&gt;&gt;${v_log}/slave_status_error.log<br> &nbsp;&nbsp; &nbsp;${v_dir}mysql -u${v_user} -p${v_passwd} -e "show slave status\G;"|egrep 'Delete_rows'&gt;/dev/null 2&gt;&amp;1<br> &nbsp;&nbsp; &nbsp;if[ $?=0 ]; then<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;${v_dir}mysql -u${v_user} -p${v_passwd} -e "stop slave;set global sql_salve_skip_count=1;start slave;"<br> &nbsp;&nbsp; &nbsp;else<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;${v_dir}mysql -u${v_user} -p${v_passwd} -e "start slave;"<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;Last_SQL_Error=${v_dir}mysql -u${v_user} -p${v_passwd} -e "show slave status\G;"|grep -v 'Last_SQL_Error_Timestamp'|awk -F: '/Last_SQL_Error/{print $2}'<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;if [ ${Last_SQL_Error} !="NULL" ];then<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;echo "replication is error and must manual handling;"||mail -s "replication alert" zhangxianbin@onething.net -f zhangxianbin330.pingan.com.cn<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;else<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;echo "replication is ok"<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;break<br> &nbsp;&nbsp; &nbsp;fi<br> &nbsp;&nbsp; &nbsp;fi<br> &nbsp;&nbsp; &nbsp;let count++<br> &nbsp;&nbsp; &nbsp;if [ $count -gt ${v_times} ];then<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;break<br> &nbsp;&nbsp; &nbsp;else<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;${v_dir}mysql -u${v_user} -p${v_passwd} -e "show slave status\G;"&gt;&gt;${v_log}/slave_status_error.log<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;sleep 2<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;continue<br> &nbsp;&nbsp; &nbsp;fi<br> fi</p> 
+  </blockquote> 
+  <p><strong>B. 主键冲突</strong><br> 主从数据不一致时,slave上已经有该条记录，但我们又在master插入了同一条记录，此时就会报错，报错信息如下:&nbsp;</p> 
+  <p>Could not execute Write_rows event on table zxb.test; Duplicate entry '29889' for key 'PRIMARY', Error_code: 1062; handler error HA_ERR_FOUND_DUPP_KEY; the event's master log mysql-bin.000008, end_log_pos 617275634<br> 解决方法:先查看slave的表结构 desc bbs.zxb;具体如下所示:<br> MySQL&gt;desc zxb.test;<br> +-------+---------+------+------+---------+-------+<br> | Field | Type &nbsp; &nbsp;| Null | Key &nbsp;| Default | Extra |<br> +-------+---------+------+------+---------+-------+<br> | id &nbsp; &nbsp;| int(11) | NO &nbsp; | PRI &nbsp;| NULL &nbsp; &nbsp;| &nbsp; &nbsp; &nbsp; |<br> | name &nbsp;| char(5) | YES &nbsp;| &nbsp; &nbsp; &nbsp;| NULL &nbsp; &nbsp;| &nbsp; &nbsp; &nbsp; |<br> +-------+---------+------+------+---------+-------+</p> 
+  <p>查看该表字段信息，得到主键的字段名。接着删除重复的主键，然后start slave;就ok了</p> 
+  <p><strong>C. 在master 更新一条记录，而slave上却找不到</strong><br> 解决方法:在master上，用mysqlbinlog分析一下出错的binlog日志在干什么,如果主库是更新一条数据但是数据没有找到，这种情况可能是导数或者其他操作将binlog关闭了。正常我们的做法是：<br> C1. 在主库找到相应的记录<br> C2. 跳过这个操作。set global sql_salve_skip_count=1;<br> C3.重启slave ;start slave;</p> 
+  <h1>二. slave的中继日志relay-log 损坏</h1> 
+  <p>当slave意外宕机时，有可能会损坏中继日志relay-log,再次开启同步复制时，报错信息如下：</p> 
+  <blockquote> 
+   <p>Last_SQL_Error: Error initializing relay log position: I/O error reading the header from the binary log<br> Last_SQL_Error: Error initializing relay log position: Binlog has bad magic number; &nbsp;<br> It's not a binary log file that can be used by &nbsp;this version of MySQL.</p> 
+  </blockquote> 
+  <p>处理方法(两种方法都适用)：<br> 1.在my.cnf 加上relay_log_recovery=1&nbsp;<br> 2.重新配置主从同步：</p> 
+  <blockquote> 
+   <p>stop slave;<br> change master to master_log_file='' master_log_pos='';--binlog 模式的<br> CHANGE MASTER TO MASTER_HOST='xxx', MASTER_USER='xxx',Master_Port=xxx, MASTER_PASSWORD='xxx', MASTER_AUTO_POSITION=1;&nbsp; --gtid模式的<br> start slave;</p> 
+  </blockquote> 
+  <h1>三.主库myisam，出现数据不支持事务</h1> 
+  <p>报错如下：<br> Last_SQL_Error: Could not execute Write_rows event on table ggcond.der_report_num; Duplicate entry '119728' for key 'PRIMARY', Error_code: 1062; handler error HA_ERR_FOUND_DUPP_KEY; the event's master log mysql-bin.008062, end_log_pos 42041</p> 
+  <p>解决方法:改造相应的表(将myisam表改造为innodb)，直接忽略相应的表操作(暂时处理方法)<br> &nbsp;replicate-ignore-table=ggcond.der_report_num</p> 
+  <h1>四.主从复制变慢，暂时提高复制的方法(两个参数的含义)</h1> 
+  <blockquote> 
+   <p>set global innodb_flush_log_at_trx_commit=0;<br> set global sync_binlog=0;</p> 
+   <p>a、innodb_flush_log_at_trx_commit：是 InnoDB 引擎特有的，ib_logfile的刷新方式（ ib_logfile：记录的是redo log和undo log的信息）<br> 取值:0/1/2<br> innodb_flush_log_at_trx_commit=0，表示每隔一秒把log buffer刷到文件系统中(os buffer)去，并且调用文件系统的“flush”操作将缓存刷新到磁盘上去。也就是说一秒之前的日志都保存在日志缓冲区，也就是内存上，如果机器宕掉，可能丢失1秒的事务数据。<br> innodb_flush_log_at_trx_commit=1，表示在每次事务提交的时候，都把log buffer刷到文件系统中(os buffer)去，并且调用文件系统的“flush”操作将缓存刷新到磁盘上去。这样的话，数据库对IO的要求就非常高了，如果底层的硬件提供的IOPS比较差，那么MySQL数据库的并发很快就会由于硬件IO的问题而无法提升。<br> innodb_flush_log_at_trx_commit=2，表示在每次事务提交的时候会把log buffer刷到文件系统中去，但并不会立即刷写到磁盘。如果只是MySQL数据库挂掉了，由于文件系统没有问题，那么对应的事务数据并没有丢失。只有在数据库所在的主机操作系统损坏或者突然掉电的情况下，数据库的事务数据可能丢失1秒之类的事务数据。这样的好处，减少了事务数据丢失的概率，而对底层硬件的IO要求也没有那么高(log buffer写到文件系统中，一般只是从log buffer的内存转移的文件系统的内存缓存中，对底层IO没有压力)。</p> 
+   <p>b、sync_binlog<br> sync_binlog：是MySQL 的二进制日志（binary log）同步到磁盘的频率。<br> 取值：0-N<br> sync_binlog=0，当事务提交之后，MySQL不做fsync之类的磁盘同步指令刷新binlog_cache中的信息到磁盘，而让Filesystem自行决定什么时候来做同步，或者cache满了之后才同步到磁盘。这个是性能最好的。<br> sync_binlog=1，当每进行1次事务提交之后，MySQL将进行一次fsync之类的磁盘同步指令来将binlog_cache中的数据强制写入磁盘。<br> sync_binlog=n，当每进行n次事务提交之后，MySQL将进行一次fsync之类的磁盘同步指令来将binlog_cache中的数据强制写入磁盘。</p> 
+  </blockquote> 
+  <h1>五.myisam出现问题，需要修复&nbsp;</h1> 
+  <blockquote> 
+   <p>CHECK TABLE table_name;<br> SET SESSION myisam_sort_buffer_size = 256*1024*1024;<br> SET SESSION read_buffer_size = 64*1024*1024;<br> SET GLOBAL myisam_max_sort_file_size = 10*1024*1024*1024;<br> SET GLOBAL repair_cache.key_buffer_size = 128*1024*1024;<br> CACHE INDEX tbl_name IN repair_cache;<br> LOAD INDEX INTO CACHE tbl_name;<br> REPAIR TABLE tbl_name ;<br> SET GLOBAL repair_cache.key_buffer_size = 0;</p> 
+  </blockquote> 
+  <h1>六.避免在master上执行大事务&nbsp;</h1> 
+  <p>这个案例以前经常出现，就是一张很大的表（大约100G）,因业务需求需要删除数据或者说这个表都需要删除，然后开发竟然用delete，然后主从就悲剧了<br> 这种问题有两种情况，如果删除整个表的数据请用truncate,如果删除部分数据类似于delete from bigtable where id=v_id;<br> 碰到这种问题，那让开发采用批量提交,平均每2000条数据删除一次吧，具体代码实现如下：</p> 
+  <blockquote> 
+   <p>delimiter $$<br> use bigtable$$<br> drop procedure if exists big_table_delete_2k$$<br> create procedure big_table_delete_5k(in v_id int)<br> BEGIN<br> del_2k:loop:<br> delete from bigtable where id=v_id limit 2000;<br> select row_count() into @count;<br> if @count = 0 then<br> &nbsp;&nbsp; &nbsp;select concat('bigtable id=',v_id,'is',@count,'rows.') as bigtable_delete_finish;<br> &nbsp;&nbsp; &nbsp;leave del_2k;<br> &nbsp;&nbsp; &nbsp;end if;<br> &nbsp;&nbsp; &nbsp;select sleep(1);<br> &nbsp;&nbsp; &nbsp;end loop del_2k;<br> &nbsp;&nbsp; &nbsp;end$$<br> &nbsp;&nbsp; &nbsp;delimiter;</p> 
+  </blockquote> 
+  <p>如果以后出现上面问题，请用相关存储过程，谢谢</p> 
+  <h1>七. 通过sql_exec_mode参数自动处理同步复制错误&nbsp;</h1> 
+  <p>sql_exec_mode正常的值为strict,但是slave_exec_mode='IDEMPOTENT',如果以前有接触的同事应该知道。<br> 先说说这个参数使用的场景，就是第一个中的都可以强制跳过，不适用的场景有以下几个：<br> 1.使用冥等模式时表要有主键<br> 2.不能对DDL操作冥等,对字段长度不同导致的错误也不是冥等(譬如主机一个字段是char(20)而备机是char(10))</p> 
+  <blockquote> 
+   <p>同样设置完冥等模式之后要重启slave,具体代码实现如下:<br> ##############################################<br> ##<br> ##skip_slave_error.sh<br> ##<br> ##author zxb<br> ##<br> ##############################################</p> 
+   <p>#!/bin/bash<br> v_user=root<br> v_passwd=binbin<br> port=3306<br> v_dir=/usr/bin/<br> v_log=/tmp/logs<br> ##创建和初始化各类日志目录<br> if [ -d "${v_log}" ]; then<br> &nbsp;&nbsp; &nbsp;echo "${v_log} has existed."<br> else<br> &nbsp;&nbsp; &nbsp;mkdir ${v_log}<br> fi<br> for hostip in 'cat slaveip.txt'<br> do<br> &nbsp;&nbsp; &nbsp;result=$(${v_dir}mysql -u${v_user} -p${v_passwd} -h${hostip} -P${port} -e "show slave status\G;"|awk -F: '/slave_SQL_Running/{print $2}')<br> &nbsp;&nbsp; &nbsp;if [ "$result" != "Yes" ];then<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;${v_dir}mysql -u${v_user} -p${v_passwd} -h${hostip} -P${port} -e "set global slave_exec_mode=IDEMPOTENT;"<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;${v_dir}mysql -u${v_user} -p${v_passwd} -h${hostip} -P${port} -e "stop slave;start slave;"</p> 
+   <p>&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;echo "replication error and skip"&gt;&gt;${v_log}/skip.log | mail -s "replication alert " zhangxianbin330@pingan.com.cn<br> &nbsp;&nbsp; &nbsp;fi<br> done</p> 
+  </blockquote> 
+  <h1>八、binlog_ignore_db引起的同步复制故障</h1> 
+  <p>这个问题就是以前遇到过，场景是一个同事在库执行mysql -e "create table db.test like db.test1"但是从库一直没有写入bin_log,查了下，发现有binlog_ignore_db这个参数，解决方法用replicate-ignore-db=db取代相应参数<br> 具体参数解析，自己查查。<br> &nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

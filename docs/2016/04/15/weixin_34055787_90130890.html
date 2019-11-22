@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>内核内存池管理技术实现分析【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/uid-23634108-id-2393485.html    一．Linux系统内核内存管理简介    Linux采用“按需调页”算法，支持三层页式存储管理策略。将每个用户进程4GB长度的虚拟内存划分成固定大小的页面。其中0至3...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/04/15/weixin_34055787_90130890.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">内核内存池管理技术实现分析【转】</h1>
+    <p class="post-meta">Apr 15, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://blog.chinaunix.net/uid-23634108-id-2393485.html" rel="nofollow">http://blog.chinaunix.net/uid-23634108-id-2393485.html</a></p> 
+   <p>一．Linux系统内核内存管理简介</p> 
+   <p>Linux采用“按需调页”算法，支持三层页式存储管理策略。将每个用户进程4GB长度的虚拟内存划分成固定大小的页面。其中0至3GB是用户态空间，由各进程独占；3GB到4GB是内核态空间，由所有进程共享，但只有内核态进程才能访问。</p> 
+   <p>Linux将物理内存也划分成固定大小的页面，由数据结构page管理，有多少页面就有多少page结构，它们又作为元素组成一个数组mem_map[]。</p> 
+   <p>slab：在操作系统的运作过程中，经常会涉及到大量对象的重复生成、使用和释放问题。对象生成算法的改进，可以在很大程度上提高整个系统的性能。在Linux系统中所用到的对象，比较典型的例子是inode、task_struct等，都又这些特点。一般说来，这类对象的种类相对稳定，每种对象的数量却是巨大的，并且在初始化与析构时要做大量的工作，所占用的时间远远超过内存分配的时间。但是这些对象往往具有这样一个性质，即他们在生成时，所包括的成员属性值一般都赋成确定的数值，并且在使用完毕，释放结构前，这些属性又恢复为未使用前的状态。因此，如果我们能够用合适的方法使得在对象前后两次背使用时，在同一块内存，或同一类内存空间，且保留了基本的数据结构，就可以大大提高效率。slab算法就是针对上述特点设计的。</p> 
+   <p>slab算法思路中最基本的一点被称为object-caching，即对象缓存。其核心做法就是保留对象初始化状态的不变部分，这样对象就用不着在每次使用时重新初始化（构造）及破坏（析构）。</p> 
+   <p>面向对象的slab分配中有如下几个术语：</p> 
+   <p>l&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;缓冲区（cache）：一种对象的所有实例都存在同一个缓存区中。不同的对象，即使大小相同，也放在不同的缓存区内。每个缓存区有若干个slab，按照满，半满，空的顺序排列。在slab分配的思想中，整个内核态内存块可以看作是按照这种缓存区来组织的，对每一种对象使用一种缓存区，缓存区的管理者记录了这个缓存区中对象的大小，性质，每个slab块中对象的个数以及每个slab块大小。</p> 
+   <p>l&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;slab块：slab块是内核内存分配与页面级分配的接口。每个slab块的大小都是页面大小的整数倍，有若干个对象组成。slab块共分为三类：</p> 
+   <p>完全块：没有空闲对象。</p> 
+   <p>部分块：只分配了部分对象空间，仍有空闲对象。</p> 
+   <p>空闲块：没有分配对象，即整个块内对象空间均可分配。</p> 
+   <p>在申请新的对象空间时，如果缓冲区中存在部分块，那么首先查看部分块寻找空闲对象空间，若未成功再查看空闲块，如果还未成功则为这个对象分配一块新的slab块。</p> 
+   <p>l&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;对象：将被申请的空间视为对象，使用构造函数初始化对象，然后由用户使用对象。</p> 
+   <p>&nbsp;</p> 
+   <p>二．内存池的数据结构</p> 
+   <p>Linux内存池是在2.6版内核中加入的，主要的数据结构定义在mm/mempool.c中。</p> 
+   <p>typedef struct mempool_s {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;spinlock_t lock;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;int min_nr;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* elements数组中的成员数量&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;int curr_nr;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;当前elements数组中空闲的成员数量&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;void **elements;&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;用来存放内存成员的二维数组，其长度为min_nr，宽度是上述各个内存对象的长度，因为对于不同的对象类型，我们会创建相应的内存池对象，所以每个内存池对象实例的element宽度都是跟其内存对象相关的&nbsp;*/</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;void *pool_data;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;内存池与内核缓冲区结合使用（上面的简介当中提到了，Linux采用slab技术预先为每一种内存对象分配了缓存区，每当我们申请某个类型的内存对象时，实际是从这种缓存区获取内存），这个指针一般是指向这种内存对象对应的缓存区的指针&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mempool_alloc_t *alloc; /*&nbsp;用户在创建一个内存池对象时提供的内存分配函数，这个函数可以用户自行编写（因为对于某个内存对象如何获取内存，其开发者完全可以自行控制），也可以采用内存池提供的分配函数&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mempool_free_t *free;&nbsp;&nbsp;&nbsp;/*&nbsp;内存释放函数，其它同上&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;wait_queue_head_t wait;/*&nbsp;任务等待队列&nbsp;*/</p> 
+   <p>} mempool_t;</p> 
+   <p>&nbsp;</p> 
+   <p>三．内核缓存区和内存池的初始化</p> 
+   <p>上面提到，内存池的使用是与特定类型的内存对象缓存区相关联的。例如，在系统rpc服务中，系统初始化时，会为rpc_buffers预先分配缓存区，调用如下语句：</p> 
+   <p>rpc_buffer_slabp = kmem_cache_create("rpc_buffers",</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;RPC_BUFFER_MAXSIZE,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0, SLAB_HWCACHE_ALIGN,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;NULL, NULL);</p> 
+   <p>调用kmem_cache_create函数从系统缓存区cache_cache中获取长度为RPC_BUFFER_MAXSIZE的缓存区大小的内存，作为rpc_buffer使用的缓存区。而以后对rpc操作的所有数据结构内存都是从这块缓存区申请，这是linux的slab技术的要点，而内存池也是基于这段缓存区进行的操作。</p> 
+   <p>一旦rpc服务申请到了一个缓存区rpc_buffer_slabp以后，就可以创建一个内存池来管理这个缓存区了：</p> 
+   <p>rpc_buffer_mempool = mempool_create(RPC_BUFFER_POOLSIZE,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mempool_alloc_slab,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mempool_free_slab,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rpc_buffer_slabp);</p> 
+   <p>mempool_create函数就是内存池创建函数，负责为一类内存对象构造一个内存池，传递的参数包括，内存池大小，定制的内存分配函数，定制的内存析构函数，这个对象的缓存区指针。下面是mempool_create函数的具体实现：</p> 
+   <p>/**</p> 
+   <p>&nbsp;* mempool_create –&nbsp;创建一个内存池对象</p> 
+   <p>&nbsp;* @min_nr:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;为内存池分配的最小内存成员数量</p> 
+   <p>&nbsp;* @alloc_fn:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;用户自定义内存分配函数</p> 
+   <p>&nbsp;* @free_fn:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;用户自定义内存释放函数</p> 
+   <p>&nbsp;* @pool_data:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;根据用户自定义内存分配函数所提供的可选私有数据，一般是缓存区指针</p> 
+   <p>*/</p> 
+   <p>mempool_t * mempool_create(int min_nr, mempool_alloc_t *alloc_fn,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mempool_free_t *free_fn, void *pool_data)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mempool_t *pool;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*为内存池对象分配内存*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pool = kmalloc(sizeof(*pool), GFP_KERNEL);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (!pool)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return NULL;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;memset(pool, 0, sizeof(*pool));</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*根据内存池的最小长度为elements数组分配内存*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pool-&gt;elements = kmalloc(min_nr * sizeof(void *), GFP_KERNEL);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (!pool-&gt;elements) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;kfree(pool);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return NULL;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;spin_lock_init(&amp;pool-&gt;lock);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*初始化内存池的相关参数*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pool-&gt;min_nr = min_nr;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pool-&gt;pool_data = pool_data;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;init_waitqueue_head(&amp;pool-&gt;wait);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pool-&gt;alloc = alloc_fn;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pool-&gt;free = free_fn;</p> 
+   <p>&nbsp;</p> 
+   <p><br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*首先为内存池预先分配min_nr个element对象，这些对象就是为了存储相应类型的内存对象的。数据结构形入：</p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_a7e486546587a8a3e6e8a3de805034c5.jpg" alt=""></p> 
+   <p>*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;while (pool-&gt;curr_nr &lt; pool-&gt;min_nr) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;void *element;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;element = pool-&gt;alloc(GFP_KERNEL, pool-&gt;pool_data);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (unlikely(!element)) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;free_pool(pool);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return NULL;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*将刚刚申请到的内存挂到elements数组的相应位置上，并修改curr_nr的值*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;add_element(pool, element);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*若成功创建内存池，则返回内存池对象的指针，这样就可以利用mempool_alloc和mempool_free访问内存池了。*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return pool;</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>四．内存池的使用</p> 
+   <p>如果需要使用已经创建的内存池，则需要调用mempool_alloc从内存池中申请内存以及调用mempool_free将用完的内存还给内存池。</p> 
+   <p>void * mempool_alloc(mempool_t *pool, int gfp_mask)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;void *element;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;unsigned long flags;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;DEFINE_WAIT(wait);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;int gfp_nowait = gfp_mask &amp; ~(__GFP_WAIT | __GFP_IO);</p> 
+   <p>&nbsp;</p> 
+   <p>repeat_alloc:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*<em>这里存在一些不明白的地方，先将用户传递进来的gfp</em><em>掩码标志去掉__GFP_WAIT&nbsp;</em><em>和&nbsp;__GFP_IO&nbsp;</em><em>两个标志，试图调用用户自定义分配函数从缓存区申请一个内存对象，而不是首先从内存池从分配，如果申请不到，再从内存池中分配。</em>*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;element = pool-&gt;alloc(gfp_nowait|__GFP_NOWARN, pool-&gt;pool_data);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (likely(element != NULL))</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return element;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*如果池中的成员（空闲）的数量低于满时的一半时，需要额外从系统中申请内存，而不是从内存池中申请了。但是如果这段内存使用完了，则调用mempool_free将其存放到内存池中，下次使用就不再申请了。*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mb();</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

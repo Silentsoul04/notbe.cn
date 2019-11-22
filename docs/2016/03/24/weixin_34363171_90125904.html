@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>在linux内核中获得比jiffies精度更高的时间值【转】 « NotBeCN</title>
+  <meta name="description" content="                        转自：http://blog.chinaunix.net/uid-20672257-id-2831219.html      内核一般通过jiffies值来获取当前时间。尽管该数值表示的是自上次系统启动到当前的时间间隔，但因为驱动程序的生命期只限于系统的运行期 (u...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/03/24/weixin_34363171_90125904.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">在linux内核中获得比jiffies精度更高的时间值【转】</h1>
+    <p class="post-meta">Mar 24, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="Blog_wz1"> 
+    <div class="detail"> 
+     <p><span style="font-size:medium;">转自：<a href="http://blog.chinaunix.net/uid-20672257-id-2831219.html" rel="nofollow">http://blog.chinaunix.net/uid-20672257-id-2831219.html</a></span></p> 
+     <p><span style="font-size:medium;">内核一般通过jiffies值来获取当前时间。尽管该数值表示的是自上次系统启动到当前的时间间隔，但因为驱动程序的生命期只限于系统的运行期 (uptime)，所以也是可行的。驱动程序利用jiffies的当前值来计算不同事件间的时间间隔。 硬件给内核提供一个系统定时器用以计算和管理时间，内核通过编程预设系统定时器的频率，即节拍率（tick rate),每一个周期称作一个tick(节拍）。Linux内核从2.5版内核开始把频率从100调高到1000（当然带来了很多优点，<br>也有一些缺点）。jiffies是内核中的一个全局变量，用来记录自系统启动一来产生的节拍数。譬如，如果计算系统运行了多长时间，可以用 jiffies/tick rate 来计算。<br><br>jiffies定义在文件&nbsp;<br><br>如果您需要更精确的时间来测量或者记录某些事情的话，内核中有个xtime全局变量，类型是struct timespec {time_t tv_sec; long tv_nsec;}按照这个数据结构，它是ns级的。<br><br>而且还有一个current_kernel_time函数，通过它就可以获取xtime的值。但是xtime是在时钟中断里更新的，而一个tick往往是 10ms或者100ms，它只能保证在时钟中断ISR调用时刻，它返回的值是精确到ns级，并不能保证任何一个调用这个函数的时刻都能这样，原因是xtime的更新速度比它差几个数量级。<br><br>如果需要精确到微妙级别，可以使用do_gettimeofday函数。该函数并不返回今天是本周的星期几或类似的信息；它是用微秒值来填充一个指向struct timeval的指针变量。相应的原型如下：<br><br>#include&nbsp;<br><br>void do_gettimeofday(struct timeval *tv);<br><br>源码中声明的do_gettimeofday在Alpha和Sparc之外的体系结构上有“接近微秒级的分辨率” ，在Alpha和Sparc上和jiffies值的分辨率一样。Sparc的移植版本在2.1.34版的内核中升级了，可以支持更细粒度的时间度量。<br><br>void do_gettimeofday(struct timeval *tv)<br>{<br>&nbsp;unsigned long flags;<br>&nbsp;unsigned long seq;<br>&nbsp;unsigned long nsec, sec, lost;<br><br>&nbsp;do {<br>&nbsp; seq = read_seqbegin_irqsave(&amp;xtime_lock, flags);<br>&nbsp; usec = system_timer-&gt;offset();<br><br>&nbsp; lost = jiffies - wall_jiffies;<br>&nbsp; if (lost)<br>&nbsp; usec += lost * USECS_PER_JIFFY;<br><br>&nbsp; sec = xtime.tv_sec;<br>&nbsp; nsec += xtime.tv_nsec;<br>&nbsp;} while (read_seqretry_irqrestore(&amp;xtime_lock, seq, flags));<br><br>&nbsp;/* usec may have gone up a lot: be safe */<br>&nbsp;while (nsec &gt;= 1000000000) {<br>&nbsp; nsec -= 1000000000;<br>&nbsp; sec++;<br>&nbsp;}<br><br>&nbsp;tv-&gt;tv_sec = sec;<br>&nbsp;tv-&gt;tv_usec = usec;<br>}<br><br></span><span style="font-size:medium;"><br>从</span><span style="font-size:medium;">中可以发现，我们只要稍微的修改一下代码就可以达到纳秒的精确度了<br><br>void do_gettimeofday_nsec(struct timespec *tv)<br>{<br>&nbsp;unsigned long flags;<br>&nbsp;unsigned long seq;<br>&nbsp;unsigned long usec, sec, lost;<br><br>&nbsp;do {<br>&nbsp; seq = read_seqbegin_irqsave(&amp;xtime_lock, flags);<br>&nbsp; usec = system_timer-&gt;offset();<br><br>&nbsp; lost = jiffies - wall_jiffies;<br>&nbsp; if (lost)<br>&nbsp; usec += lost * USECS_PER_JIFFY;<br><br>&nbsp; sec = xtime.tv_sec;<br>&nbsp; usec += xtime.tv_nsec / 1000;<br>&nbsp;} while (read_seqretry_irqrestore(&amp;xtime_lock, seq, flags));<br><br>&nbsp;/* usec may have gone up a lot: be safe */<br>&nbsp;while (usec &gt;= 1000000) {<br>&nbsp; usec -= 1000000;<br>&nbsp; sec++;<br>&nbsp;}<br><br>&nbsp;tv-&gt;tv_sec = sec;<br>&nbsp;tv-&gt;tv_usec = usec;<br>}<br><br>注意这里使用了不同的时间结构。</span></p> 
+    </div> 
+   </div> 
+   <div class="Blog_con2_1 Blog_con3_2">
+    &nbsp;
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

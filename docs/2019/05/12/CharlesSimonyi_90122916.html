@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>使用Nginx为TCP/WebSocket协议做反向代理和几个易踩的坑 « NotBeCN</title>
+  <meta name="description" content="                   通常，我们使用Nginx为后端WEB服务做反向代理或负载均衡，但如果我们的后端服务，并不是HTTP/HTTPS协议，而是TCP协议或WebSocket协议呢 最近遇到一个需求，我们的HTTPS以及MQTT服务端在海外云主机上，从大陆直连延时丢包严重，但如果从香港转发的话，网络...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/CharlesSimonyi_90122916.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">使用Nginx为TCP/WebSocket协议做反向代理和几个易踩的坑</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>通常，我们使用Nginx为后端WEB服务做反向代理或负载均衡，但如果我们的后端服务，并不是HTTP/HTTPS协议，而是TCP协议或WebSocket协议呢<br> 最近遇到一个需求，我们的HTTPS以及MQTT服务端在海外云主机上，从大陆直连延时丢包严重，但如果从香港转发的话，网络质量会好很多，于是在香港云主机搭建反向代理，同时代理HTTPS和MQTT服务。<br> 说到TCP协议服务的反向代理，有个出名的软件是HAProxy，HAProxy在TCP代理方面更专注一些。但由于我们的服务器大量使用Nginx，不想再使用额外的软件，于是准备用Nginx完成这一任务。<br> 其实Nginx经过1.9和1.11两个大版本的大跃进般开发，目前在功能和特性上，已经大幅超越HAProxy。在TCP/UDP协议的代理上已经很完善了，完全不用担心他能否胜任。<br> 需要注意的是，Nginx从1.9.0版本开始才支持TCP协议代理，1.9.13版本开始才支持UDP代理，并且需要安装 --with-stream模块，在使用前请先用</p> 
+  <pre><code>nginx -V
+</code></pre> 
+  <p>检查你的版本和模块安装情况，因为输出的信息都在一行，非常乱，可以这样来逐行输出方便观看：</p> 
+  <pre><code>2&gt;&amp;1 nginx -V | tr ' '  '\n'
+</code></pre> 
+  <p>以Ubuntu系统为例，默认的apt源安装的nginx并没有带此模块，还需要安装 nginx-extras 以开启 --with-stream功能</p> 
+  <pre><code>sudo apt install nginx
+sudo apt install nginx-extras
+</code></pre> 
+  <p>接下来修改Nginx配置TCP反向代理即可，假设我们的MQTT服务运行于mq.mypig.com的8883端口</p> 
+  <pre><code>stream {
+    server {
+        listen 8883;
+        proxy_pass mq.mypig.com:8883;
+    }
+}
+</code></pre> 
+  <p>需要注意的是，我们通常配置nginx都是在 /etc/nginx/sites-enabled/ 中配置，但查看 /etc/nginx/nginx.conf 就会发现，/etc/nginx/sites-enabled/ 中的配置文件，实际上是被包含在了http { } 块中去了，如果把上面的 stream { } 块放到 /etc/nginx/sites-enabled/ 中的配置文件中，实际上相当于把 stream { } 块放到了 http { } 块中，自然就出错了，所以我们需要在 /etc/nginx/nginx.conf 中添加 stream { } 块以配置TCP代理服务。<br> 更多参数查看Nginx官方文档，进行配置：<a href="http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html" rel="nofollow">http://nginx.org/en/docs/stream/ngx_stream_proxy_module.html</a><br> 通常我们需要关注超时值问题主要是下面两个参数：<br> proxy_connect_timeout<br> 代理服务器到后端服务器的连接超时值，默认60秒<br> proxy_timeout<br> 代理超时值，即如果一条TCP连接已经建立，超过该值的时间没有任何数据在该连接上传输，则Nginx关闭该连接，默认10分钟</p> 
+  <p><strong>划重点</strong>：使用Nginx代理TCP连接，我们要注意一点，我们的TCP连接，是否开启了keep-alive心跳包，我们这个例子里，代理的是MQTT的TCP连接，由于MQTT客户端与服务端，默认设置了每60秒发一个心跳包，所以总是有数据在TCP连接上传输，而Nginx代理TCP连接时，proxy_timeout默认为10分钟，所以不会有什么问题。但如果你代理的TCP连接，并不会像MQTT那样发心跳包，那么在没有数据传输的时候，超过proxy_timeout设定的10分钟，Nginx就会将你们的TCP连接断开。如果我们代理的是基于TCP的自定义协议，你需要关注协议的实现，使用socket建立TCP连接，默认情况下keep-alive的不启用的，就算主动启用了，默认心跳时间是2小时，所以我们在编写代码的时候需要开启TCP keep-alive并设置合理的心跳时间。</p> 
+  <p>至此，我们已经完成了TCP协议的反向代理，MQTT服务已经可以通过代理正常工作了，但是存在的一个问题是，在MQTT服务端，所有的客户端IP都是同一个，即Nginx机器的IP，因为Nginx只是无脑转发TCP数据包，没有办法告诉后端服务器来源IP是什么。这样虽然不影响业务逻辑，但不利于分析客户来源以优化、调整线路。</p> 
+  <p>于是我们考虑开启MQTT的WebSocket连接功能，允许客户端通过WebSocket协议连接。MQTT服务使用WebSocket还是有很多优点的，一来，常见的MQTT客户端，无论是Android客户端还是PC客户端，都支持WebSocket协议连接MQTT，可以无缝切换，二来，前端网页上的javascript也可以通过WebSocket协议直接连接MQTT服务。</p> 
+  <p>对我们来说更重要的是，WebSocket建立连接时，会先发送标准HTTP请求头，利用这个HTTP请求头，我们可以在中间做很多额外的事情，比如身份验证、权限控制，我们可以根据HTTP请求头的信息，决定是否放行这个连接，还是直接拒绝关闭。同样，对于Nginx来说，Nginx在对WebSocket进行反向代理时，可以在建立连接时的HTTP请求头中放入一些内容，比如 X-Forwarded-For ，这样我们的后端服务就可以知道客户端的来源IP。</p> 
+  <p>说干就干，在Nginx上代理WebSocket，实际上和代理HTTP/HTTPS差不多，可以查看Nginx官方文档来进行配置：<br> <a href="http://nginx.org/en/docs/http/websocket.html" rel="nofollow">http://nginx.org/en/docs/http/websocket.html</a></p> 
+  <p>配置需写在http { } 块，而不是写在stream { } 块中，所以我们直接在 /etc/nginx/sites-enabled/ 下配置即可<br> 我们的后端为使用SSL加密的WebSocket协议，运行于8084端口，路径为/mqtt<br> wss://mq.mypig.com:8084/mqtt<br> 在Nginx反向代理上这样配置：</p> 
+  <pre><code>server {
+    listen 443 ssl;
+    server_name mq.mypig.com;
+    ssl_certificate /home/ubuntu/cert/mq.mypig.com.crt;
+    ssl_certificate_key /home/ubuntu/cert/mq.mypig.com.key;
+
+    location = /mqtt {
+        proxy_http_version 1.1;
+        proxy_pass https://mq.mypig.com:8084;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port $remote_port;
+        proxy_connect_timeout 60s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+</code></pre> 
+  <p>我们在Nginx代理服务器上使用443端口，这样可以和HTTPS服务复用同一个端口，只是在PATH上做区分。其实整个配置和HTTPS的反向代理差不多，我们需要把后端的SSL证书拿到Nginx反向代理服务器上，因为我们需要在Nginx上对数据解密，这样Nginx才能检查和修改请求头的内容（添加X-Forwarded-For请求头），然后又用SSL加密发送到后端。当然，如果是用来做负载均衡的话，Nginx和后端服务在同一个机房，同一个VPC，则数据在Nginx上SSL解密后直接明文发到后端即可，这样后端服务就不需要配置SSL证书，同时也减轻后端解密的计算压力。<br> 和HTTP的的反向代理不同的地方，在于：</p> 
+  <pre><code>proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+</code></pre> 
+  <p>一个是启用HTTP 1.1，因为Nginx对HTTP的反向代理，默认使用HTTP 1.0连接到后端，那样没法保持长连接，后端作出HTTP响应后，连接就被掐断了，所以启用HTTP 1.1以支持长连接。<br> 而对于Upgrade 和 Connection，为什么要让Nginx加这个请求头，对于WebSocket协议，客户端不是已经加了Upgrade和Connection请求头了吗？那是因为根据HTTP协议规范，Upgrade和Connection属于hop-by-hop请求头，Nginx作为中间的代理，按照规范不能直接转发hop-by-hop header ，所以需要我们手工强制设定。</p> 
+  <pre><code>proxy_set_header Host $host:$server_port;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Port $remote_port;
+</code></pre> 
+  <p>的作用在于，通过添加这些HTTP请求头，Nginx可以告诉后端服务器，客户端原本请求的目标HOST和目标端口，客户端自身的IP和客户端发起连接的端口。<br> 同样，需要关心的是连接的超时值：<br> proxy_read_timeout<br> proxy_send_timeout<br> 这两个配置的作用等同于TCP代理的proxy_timeout参数，如果Nginx在超过proxy_read_timeout的时间没有从后端读到数据，或者在超过proxy_send_timeout的时间没有向后端发送数据，那么Nginx会关闭该连接</p> 
+  <p><strong>划重点</strong>：很多同学就是在这里被坑了，没有去配置这两个参数，因为Nginx对WebSocket的代理，属于HTTP/HTTPS代理这一类，所以Nginx这两个参数默认的超时值是60秒，如果你用它代理MQTT，MQTT的默认心跳时间是60秒，所以会发现连接被频繁断开。所以你需要关注WebSocket协议上跑的服务，是否会发心跳包，心跳包间隔是多少，一定要小于Nginx的超时值，或者调高Nginx的超时值，以免莫名其妙被Nginx关闭了连接</p> 
+  <p>最后，我们的MQTT服务端使用的是 EMQ: <a href="http://www.emqtt.com/" rel="nofollow">http://www.emqtt.com/</a><br> 再次安利这个好东西，只需在配置文件中启用</p> 
+  <pre><code>listener.wss.external.proxy_address_header = X-Forwarded-For
+listener.wss.external.proxy_port_header = X-Forwarded-Port
+</code></pre> 
+  <p>即可自动处理Nginx代理添加的请求头，从而正确显示客户端IP和端口</p> 
+  <br> 
+  <br> 
+  <p>本文由encoderlee发表于CSDN博客：<a href="https://blog.csdn.net/CharlesSimonyi/article/details/90122916" rel="nofollow">https://blog.csdn.net/CharlesSimonyi/article/details/90122916</a> 转载请注明出处</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

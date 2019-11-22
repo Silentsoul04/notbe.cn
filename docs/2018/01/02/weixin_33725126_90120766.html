@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>中断唤醒系统流程【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.wowotech.net/irq_subsystem/418.html    1. 前言     曾几何时，不知道你是否想过外部中断是如何产生的呢？又是如何唤醒系统的呢？在项目中，一般具有中断唤醒的设备会有一个interrupt pin硬件连接到SoC的gpi...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/02/weixin_33725126_90120766.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">中断唤醒系统流程【转】</h1>
+    <p class="post-meta">Jan 2, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.wowotech.net/irq_subsystem/418.html" rel="nofollow">http://www.wowotech.net/irq_subsystem/418.html</a></p> 
+   <p><span style="font-size:18px;">1. 前言 </span></p> 
+   <p>曾几何时，不知道你是否想过外部中断是如何产生的呢？又是如何唤醒系统的呢？在项目中，一般具有中断唤醒的设备会有一个interrupt pin硬件连接到SoC的gpio pin。一般来说，当设备需要唤醒系统的时候，会通过改变interrupt pin电平状态，而SoC会检测到这个变化，将SoC从睡眠中唤醒，该设备通过相关的子系统通知上层应用做出相应的处理。这就是中断唤醒的过程。说起来很简洁，可以说是涵盖了软硬件两大块。是不是？</p> 
+   <p> 为了使能设备的唤醒能力，设备驱动中会在系统suspend的时候通过enable_irq_wake(irq)接口使能设备SoC引脚的中断唤醒能力。然后呢？然后当然是万事大吉了，静静的等待设备中断的到来，最后唤醒系统。假设我们做一款手机，手机有一个压感传感器，重压点亮屏幕，轻压在灭屏的时候无响应，在亮屏的时候作为home键功能，压力值通过i2c总线读取（描述挺像iPhone8的home键！）。假如有一天，你突然发现重压按键，屏幕不亮。于是你开始探究所以然，聪明的你一定会先去用示波器测量irq pin的波形，此时你发现了重压按键，的确产生了一个电平信号的变化，此时可就怪不得硬件了。而你又发现插入USB使用ADB工具抓取log的情况下（Android的adb工具需要通过USB协议通信，一般不会允许系统休眠），重压可以亮屏。此时，我觉得就很有可能是唤醒系统了，但是系统醒来后又睡下去了，而你注册的中断服务函数中的代码没有执行完成就睡了。什么情况下会出现呢？试想一下，你通过request_irq接口注册的handle函数中queue work了一个延迟工作队列（主要干活的，类似下半部吧），由于时间太长，还没来得及调度呢，系统又睡下了，虽然你不愿意，但是事情就是可能这样发生的。那这一切竟然是为什么呢？作为驱动工程师最关注的恐怕就是如何避开这些问题呢？<br> 1) 设备唤醒cpu之后是立即跳转中断向量表指定的位置吗？如果不是，那么是什么时候才会跳转呢？<br> 2) 已经跳转到中断服务函数开始执行代码，后续就会调用你注册的中断handle 代码吗？如果不是，那中断服务函数做什么准备呢？而你注册的中断handle又会在什么时候才开始执行呢？<br> 3) 假如register_thread_irq方式注册的threaded irq中调用msleep(1000)，睡眠1秒，请问系统此时会继续睡下去而没调度回来吗？因此导致msleep后续的操作没有执行。<br> 4) 如果在注册的中断handle中把主要的操作都放在delayed work中，然后queue delayed work，work延时1秒执行，请问系统此时会继续睡下去而没调度delayed work 吗？因此导致delayed work 中的操作没有执行呢？<br> 5) 如果4)成立的话，我们该如何编程避免这个问题呢？<br> 好了，本片文章就为你解答所有的疑问。<br> 注：文章代码分析基于linux-4.15.0-rc3。 </p> 
+   <p> <span style="font-size:18px;">2. 中断唤醒流程 </span></p> 
+   <p> <span style="font-size:18px;"><span style="font-size:12px;"><span style="font-size:12px;">现在还是假设你有一个上述的设备，现在你开始编写driver代码了。假设部分代码如下：</span></span></span></p> 
+   <p>&nbsp;</p> 
+   <ol>
+    <li class="L0"><span class="kwd">static<span class="pln"> <span class="typ">irqreturn_t<span class="pln"> smcdef_event_handler<span class="pun">(<span class="typ">int<span class="pln"> irq<span class="pun">,<span class="pln"> <span class="kwd">void<span class="pln"> <span class="pun">*<span class="kwd">private<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="com">/* do something you want, like report input events through input subsystem */</span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">return<span class="pln"> IRQ_HANDLED<span class="pun">;</span></span></span></span></li> 
+    <li class="L5"><span class="pun">}</span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="kwd">static<span class="pln"> <span class="typ">int<span class="pln"> smcdef_suspend<span class="pun">(<span class="kwd">struct<span class="pln"> device <span class="pun">*<span class="pln">dev<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pun">{</span></li> 
+    <li class="L9"><span class="pln"> enable_irq_wake<span class="pun">(<span class="pln">irq<span class="pun">);</span></span></span></span></li> 
+    <li class="L0"><span class="pun">}</span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="kwd">static<span class="pln"> <span class="typ">int<span class="pln"> smcdef_resume<span class="pun">(<span class="kwd">struct<span class="pln"> device <span class="pun">*<span class="pln">dev<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pun">{</span></li> 
+    <li class="L4"><span class="pln"> disable_irq_wake<span class="pun">(<span class="pln">irq<span class="pun">);</span></span></span></span></li> 
+    <li class="L5"><span class="pun">}</span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="kwd">static<span class="pln"> <span class="typ">int<span class="pln"> smcdef_probe<span class="pun">(<span class="kwd">struct<span class="pln"> i2c_client <span class="pun">*<span class="pln">client<span class="pun">,</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">const<span class="pln"> <span class="kwd">struct<span class="pln"> i2c_device_id <span class="pun">*<span class="pln">id<span class="pun">)</span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pun">{</span></li> 
+    <li class="L0"><span class="pln"> <span class="com">/* ... */</span></span></li> 
+    <li class="L1"><span class="pln"> request_thread_irq<span class="pun">(<span class="pln">irq<span class="pun">,</span></span></span></span></li> 
+    <li class="L2"><span class="pln"> smcdef_event_handler<span class="pun">,</span></span></li> 
+    <li class="L3"><span class="pln"> NULL<span class="pun">,</span></span></li> 
+    <li class="L4"><span class="pln"> IRQF_TRIGGER_FALLING<span class="pun">,</span></span></li> 
+    <li class="L5"><span class="pln"> <span class="str">"smcdef"<span class="pun">,</span></span></span></li> 
+    <li class="L6"><span class="pln"> pdata<span class="pun">);</span></span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">return<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L9"><span class="pun">}</span></li> 
+    <li class="L0"><span class="pln">&nbsp;</span></li> 
+    <li class="L1"><span class="kwd">static<span class="pln"> <span class="typ">int<span class="pln"> smcdef_remove<span class="pun">(<span class="kwd">struct<span class="pln"> i2c_client <span class="pun">*<span class="pln">client<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pun">{</span></li> 
+    <li class="L3"><span class="pln"> <span class="kwd">return<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L4"><span class="pun">}</span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="kwd">static<span class="pln"> <span class="kwd">const<span class="pln"> <span class="kwd">struct<span class="pln"> of_device_id smcdef_dt_ids<span class="pun">[]<span class="pln"> <span class="pun">=<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> <span class="pun">{.<span class="pln">compatible <span class="pun">=<span class="pln"> <span class="str">"wowo,smcdef"<span class="pln"> <span class="pun">},</span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> <span class="pun">{<span class="pln"> <span class="pun">}</span></span></span></span></li> 
+    <li class="L9"><span class="pun">};</span></li> 
+    <li class="L0"><span class="pln">MODULE_DEVICE_TABLE<span class="pun">(<span class="pln">of<span class="pun">,<span class="pln"> smcdef_dt_ids<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="kwd">static<span class="pln"> SIMPLE_DEV_PM_OPS<span class="pun">(<span class="pln">smcdef_pm_ops<span class="pun">,<span class="pln"> smcdef_suspend<span class="pun">,<span class="pln"> smcdef_resume<span class="pun">);</span></span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="kwd">static<span class="pln"> <span class="kwd">struct<span class="pln"> i2c_driver smcdef_driver <span class="pun">=<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> <span class="pun">.<span class="pln">driver <span class="pun">=<span class="pln"> <span class="pun">{</span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln"> <span class="pun">.<span class="pln">name <span class="pun">=<span class="pln"> <span class="str">"smcdef"<span class="pun">,</span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> <span class="pun">.<span class="pln">of_match_table <span class="pun">=<span class="pln"> of_match_ptr<span class="pun">(<span class="pln">smcdef_dt_ids<span class="pun">),</span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> <span class="pun">.<span class="pln">pm <span class="pun">=<span class="pln"> <span class="pun">&amp;<span class="pln">smcdef_pm_ops<span class="pun">,</span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="pun">},</span></span></li> 
+    <li class="L0"><span class="pln"> <span class="pun">.<span class="pln">probe <span class="pun">=<span class="pln"> smcdef_probe<span class="pun">,</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> <span class="pun">.<span class="pln">remove <span class="pun">=<span class="pln"> smcdef_remove<span class="pun">,</span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pun">};</span></li> 
+    <li class="L3"><span class="pln">module_i2c_driver<span class="pun">(<span class="pln">smcdef_driver<span class="pun">);</span></span></span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="pln">MODULE_AUTHOR<span class="pun">(<span class="str">"smcdef"<span class="pun">);</span></span></span></span></li> 
+    <li class="L6"><span class="pln">MODULE_DESCRIPTION<span class="pun">(<span class="str">"IRQ test"<span class="pun">);</span></span></span></span></li> 
+    <li class="L7"><span class="pln">MODULE_LICENSE<span class="pun">(<span class="str">"GPL"<span class="pun">);</span></span></span></span></li> 
+   </ol>
+   <p>在probe函数中通过request_thread_irq接口注册驱动的中断服务函数smcdef_event_handler，注意这里smcdef_event_handler的执行环境是中断上下文，thread_fn的方式下面也会介绍。</p> 
+   <p> <br></p> 
+   <p> <span style="font-size:18px;"><span style="font-size:12px;"><span style="font-size:16px;"><span style="font-size:16px;">2.1. enable_irq_wake<span style="font-size:16px;"><br></span></span></span></span></span></p> 
+   <p> 当系统睡眠（echo "mem" &gt; /sys/power/state）的时候，回想一下suspend的流程就会知道，最终会调用smcdef_suspend使能中断唤醒功能。enable_irq_wake主要工作是在irq_set_irq_wake中完成，代码如下： </p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="typ">int<span class="pln"> irq_set_irq_wake<span class="pun">(<span class="kwd">unsigned<span class="pln"> <span class="typ">int<span class="pln"> irq<span class="pun">,<span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="typ">int<span class="pln"> on<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">long<span class="pln"> flags<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> <span class="kwd">struct<span class="pln"> irq_desc <span class="pun">*<span class="pln">desc <span class="pun">=<span class="pln"> irq_get_desc_buslock<span class="pun">(<span class="pln">irq<span class="pun">,<span class="pln"> <span class="pun">&amp;<span class="pln">flags<span class="pun">,<span class="pln"> IRQ_GET_DESC_CHECK_GLOBAL<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> <span class="typ">int<span class="pln"> ret <span class="pun">=<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> <span class="com">/* wakeup-capable irqs can be shared between drivers that</span></span></li> 
+    <li class="L7"><span class="com"> * don't need to have the same sleep mode behaviors.</span></li> 
+    <li class="L8"><span class="com"> */</span></li> 
+    <li class="L9"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">on<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">desc<span class="pun">-&gt;<span class="pln">wake_depth<span class="pun">++<span class="pln"> <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> ret <span class="pun">=<span class="pln"> <span class="typ">set<span class="pln">_irq_wake_real<span class="pun">(<span class="pln">irq<span class="pun">,<span class="pln"> on<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">ret<span class="pun">)</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">wake_depth <span class="pun">=<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">else</span></span></li> 
+    <li class="L5"><span class="pln"> irqd_set<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">,<span class="pln"> IRQD_WAKEUP_STATE<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L7"><span class="pln"> <span class="pun">}<span class="pln"> <span class="kwd">else<span class="pln"> <span class="pun">{</span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">desc<span class="pun">-&gt;<span class="pln">wake_depth <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> WARN<span class="pun">(<span class="lit">1<span class="pun">,<span class="pln"> <span class="str">"Unbalanced IRQ %d wake disable\n"<span class="pun">,<span class="pln"> irq<span class="pun">);</span></span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="pun">}<span class="pln"> <span class="kwd">else<span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(--<span class="pln">desc<span class="pun">-&gt;<span class="pln">wake_depth <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> ret <span class="pun">=<span class="pln"> <span class="typ">set<span class="pln">_irq_wake_real<span class="pun">(<span class="pln">irq<span class="pun">,<span class="pln"> on<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">ret<span class="pun">)</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">wake_depth <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">else</span></span></li> 
+    <li class="L5"><span class="pln"> irqd_clear<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">,<span class="pln"> IRQD_WAKEUP_STATE<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L7"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L8"><span class="pln"> irq_put_desc_busunlock<span class="pun">(<span class="pln">desc<span class="pun">,<span class="pln"> flags<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="kwd">return<span class="pln"> ret<span class="pun">;</span></span></span></span></li> 
+    <li class="L0"><span class="pun">}</span></li> 
+   </ol>
+   <p> <br></p> 
+   <blockquote> 
+    <p> 1) 首先在set_irq_wake_real函数中通过irq_chip的irq_set_wake回调函数设置SoC相关wakeup寄存器使能中断唤醒功能，如果不使能的话，即使设备在那疯狂的产生中断signal，SoC可不会理睬你哦！<br> 2) 设置irq的state为IRQD_WAKEUP_STATE，这步很重要，suspend流程会用到的。 </p> 
+   </blockquote> 
+   <p> <br></p> 
+   <p> <span style="font-size:16px;">2.2. Suspend to RAM流程 </span></p> 
+   <p> <span style="font-size:16px;"><br></span></p> 
+   <p> 先画个图示意一下系统Suspend to RAM流程。我们可以看到图片画的很漂亮。从enter_state开始到suspend_ops-&gt;enter()结束。对于suspend_ops-&gt;enter()调用，我的理解是CPU停在这里了，待到醒来的时候，就从这里开始继续前行的脚步。 </p> 
+   <div> 
+    <span style="font-family:Consolas;"><a id="ematt:332" href="https://yqfile.alicdn.com/img_085193ae53ccfeaf68989b1a027ea68d.png" rel="nofollow"><img title="点击查看原图" src="https://yqfile.alicdn.com/img_085193ae53ccfeaf68989b1a027ea68d.png" alt="STR流程.png" width="1200" height="792"></a> </span> 
+   </div> 
+   <p> <span style="font-family:Consolas;"><br></span></p> 
+   <blockquote> 
+    <p> 1) enable_irq_wake()可以有两种途径，一是在driver的suspend函数中由驱动开发者主动调用；二是在driver的probe函数中调用dev_pm_set_wake_irq()和device_init_wakeup()。因为suspend的过程中会通过dev_pm_arm_wake_irq()打开所有wakeup source的irq wake功能。我更推荐途径1，因为系统已经帮我们做了，何必重复造轮子呢！<br> 2) 对于已经enable 并且使能wakeup的irq，置位IRQD_WAKEUP_ARMED，然后等待IRQ handler和threaded handler执行完成。后续详细分析这一块。<br> 3) 针对仅仅enable的irq，设置IRQS_SUSPENDED标志位，并disable irq。<br> 4) 图中第④步关闭noboot cpu，紧接着第⑤步diasble boot cpu的irq，即cpu不在响应中断。<br> 5) 在cpu sleep之前进行最后一步操作就是syscore suspend。既然是最后suspend，那一定是其他device都依赖的系统核心驱动。后面说说什么的设备会注册syscore suspend。 </p> 
+   </blockquote> 
+   <p> <span style="font-size:16px;">2.3. resume流程 </span></p> 
+   <p> <span style="font-size:16px;"><br></span></p> 
+   <p> 假设我们使用的是gic-v3代码，边沿触发中断设备。现在设备需要唤醒系统了，产生一个边沿电平触发中断。此时会唤醒boot cpu（因为noboot cpu在suspend的时候已经被disable）。你以为此时就开始跳转中断服务函数了吗？no！还记得上一节说的吗？suspend之后已经diasble boot cpu的irq，因此中断不会立即执行。什么时候呢？当然是等到local_irq_enable()之后。resume流程如下图。 </p> 
+   <p> <a id="ematt:330" href="https://yqfile.alicdn.com/img_7bc012189716c05ded6970a456cf21c2.png" rel="nofollow"><img title="点击查看原图" src="https://yqfile.alicdn.com/img_7bc012189716c05ded6970a456cf21c2.png" alt="resume流程.png" width="1051" height="549"></a> </p> 
+   <blockquote> 
+    <p> 1) 首先执行syscore resume，马上为你讲解syscore的用意。<br> 2) arch_suspend_enable_irqs()结束后就会进入中断服务函数，因为中断打开了，interrupt controller的pending寄存器没有清除，因此触发中断。你以为此时会调用到你注册的中断handle吗？错了！此时中断服务函数还没执行你注册的handle就返回了。马上为你揭晓为什么。先等等。 </p> 
+   </blockquote> 
+   <p> 先说到这里，先看看什么是syscore。 </p> 
+   <p> <span style="font-size:16px;">2.4. system core operations有什么用？ </span></p> 
+   <p> <span style="font-size:16px;"><br> 先想一想为什么要等到syscore_resume之后才arch_suspend_enable_irqs()之后呢？试想一下，系统刚被唤醒，最重要的事情是不是先打开相关的时钟以及最基本driver（例如：gpio、irq_chip等）呢？因此syscore_resume主要是clock以及gpio的驱动resume，因为这是其他设备依赖的最基本设备。回想一下上一节中Susoend to RAM流程中，syscore_suspend也同样是最后suspend的，毕竟人家是大部分设备的基础，当然最后才能suspend。可以通过register_syscore_ops()接口注册syscore operation。 </span></p> 
+   <p> <br><span style="font-size:16px;">2.5. gic interrupt controller中断执行流程 </span></p> 
+   <p> <span style="font-size:16px;"><br> 接下来arch_suspend_enable_irqs()之后就是中断流程了，其函数执行流程如下。 </span></p> 
+   <p> <a id="ematt:334" href="https://yqfile.alicdn.com/img_23149d1210f031e68095974661ade60d.png" rel="nofollow"><img title="点击查看原图" src="https://yqfile.alicdn.com/img_23149d1210f031e68095974661ade60d.png" alt="中断执行流程.png" width="1008" height="737"></a> </p> 
+   <p> <br></p> 
+   <p>&nbsp;</p> 
+   <p> 图片中是一个中断从汇编开始到结束的流程。假设我们的设备是边沿触发中断，那么一定会执行到handle_edge_irq()，如果你不想追踪代码，或者对中断流程不熟悉，我教你个方法，在注册的中断handle中加上一句WARN_ON(1);语句，请查看log信息即可。handle_edge_irq()代码如下： </p> 
+   <ol>
+    <li class="L0"><span class="kwd">void<span class="pln"> handle_edge_irq<span class="pun">(<span class="kwd">struct<span class="pln"> irq_desc <span class="pun">*<span class="pln">desc<span class="pun">)</span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> raw_spin_lock<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">lock<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">&amp;=<span class="pln"> <span class="pun">~(<span class="pln">IRQS_REPLAY <span class="pun">|<span class="pln"> IRQS_WAITING<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(!<span class="pln">irq_may_run<span class="pun">(<span class="pln">desc<span class="pun">))<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">|=<span class="pln"> IRQS_PENDING<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> mask_ack_irq<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="kwd">goto<span class="pln"> out_unlock<span class="pun">;</span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L3"><span class="com"> * If its disabled or no action available then mask it and get</span></li> 
+    <li class="L4"><span class="com"> * out of here.</span></li> 
+    <li class="L5"><span class="com"> */</span></li> 
+    <li class="L6"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">irqd_irq_disabled<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">)<span class="pln"> <span class="pun">||<span class="pln"> <span class="pun">!<span class="pln">desc<span class="pun">-&gt;<span class="pln">action<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">|=<span class="pln"> IRQS_PENDING<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> mask_ack_irq<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="kwd">goto<span class="pln"> out_unlock<span class="pun">;</span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> kstat_incr_irqs_this_cpu<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="com">/* Start handling the irq */</span></span></li> 
+    <li class="L5"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">.<span class="pln">chip<span class="pun">-&gt;<span class="pln">irq_ack<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="pln"> <span class="kwd">do<span class="pln"> <span class="pun">{</span></span></span></span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">unlikely<span class="pun">(!<span class="pln">desc<span class="pun">-&gt;<span class="pln">action<span class="pun">))<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> mask_irq<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">goto<span class="pln"> out_unlock<span class="pun">;</span></span></span></span></li> 
+    <li class="L1"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L2"><span class="pln">&nbsp;</span></li> 
+    <li class="L3"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L4"><span class="com"> * When another irq arrived while we were handling</span></li> 
+    <li class="L5"><span class="com"> * one, we could have masked the irq.</span></li> 
+    <li class="L6"><span class="com"> * Renable it, if it was not disabled in meantime.</span></li> 
+    <li class="L7"><span class="com"> */</span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">unlikely<span class="pun">(<span class="pln">desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">&amp;<span class="pln"> IRQS_PENDING<span class="pun">))<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(!<span class="pln">irqd_irq_disabled<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">)<span class="pln"> <span class="pun">&amp;&amp;</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln"> irqd_irq_masked<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">))</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> unmask_irq<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></li> 
+    <li class="L2"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> handle_irq_event<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> <span class="pun">}<span class="pln"> <span class="kwd">while<span class="pln"> <span class="pun">((<span class="pln">desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">&amp;<span class="pln"> IRQS_PENDING<span class="pun">)<span class="pln"> <span class="pun">&amp;&amp;</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> <span class="pun">!<span class="pln">irqd_irq_disabled<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">));</span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln">&nbsp;</span></li> 
+    <li class="L9"><span class="pln">out_unlock<span class="pun">:</span></span></li> 
+    <li class="L0"><span class="pln"> raw_spin_unlock<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">lock<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">}</span></li> 
+   </ol>
+   <blockquote> 
+    <p> 1)&nbsp;irq_may_run()判断irq是否有IRQD_WAKEUP_ARMED标志位，当然这里是有的。随后调用irq_pm_check_wakeup()清楚IRQD_WAKEUP_ARMED flag顺便置位IRQS_SUSPENDED和IRQS_PENDING flag，又irq_disable关闭了中断。<br> 2)&nbsp;irq_may_run()返回false，因此这里直接返回了，所以你注册的中断handle并没有执行。你绝望，也没办法。当然这里也可以知道，唤醒系统的这次中断注册的handle的执行环境不是硬件中断上下文。 </p> 
+   </blockquote> 
+   <p> <span style="font-size:16px;"><span style="font-size:16px;"> <span style="font-size:16px;"><span style="font-size:16px;">2.6. dpm_resume_noirq()<br></span></span></span></span></p> 
+   <p> <span style="font-size:16px;"><br> 我们来继续分析2.3节resume的后续流程，把图继续搬过来。 </span></p> 
+   <p> <a href="https://yqfile.alicdn.com/img_7bc012189716c05ded6970a456cf21c2.png" rel="nofollow"><img title="点击查看原图" src="https://yqfile.alicdn.com/img_7bc012189716c05ded6970a456cf21c2.png" alt="resume流程.png" width="1051" height="549"></a> </p> 
+   <blockquote> 
+    <p> 1)&nbsp;继续enable所有的noboot cpu之后，开始dpm_resume_noirq()。这里为什么起名noirq呢？中断已经可以响应了，我猜测是这样的：虽然可以响应中断，但是也是仅限于suspend之前的enable_irq_wake的irq，因为其他irq已经被disable。并且具有唤醒功能的irq也仅仅是进入中断后设置一些flag就立即退出了，没有执行irq handle，因此相当于noirq。<br> 2)&nbsp;dpm_noirq_resume_devices()会调用"noirq" resume callbacks，这个就是struct dev_pm_ops结构体的resume_noirq成员。那么什么的设备驱动需要填充resume_noirq成员呢？我们考虑一个事情，到现在为止唤醒系统的irq的handle还没有执行，如果注册的中断handle是通过spi、i2c等方式通信，那么在即将执行之前，我们是不是应该首先resume spi、i2c等设备呢！所以说，很多设备依赖的设备，尽量填充resume_noirq成员，这样才比较合理。毕竟唤醒的设备是要使用的嘛！而gpio驱动就适合syscore resume，因为这里i2c设备肯定依赖gpio设备。大家可以看看自己平台的i2c、spi等设备驱动是不是都实现resume_noirq成员。当然了，前提是这个设备需要resume操作，如果不需要resume就可以使用，那么完全没有必要resume_noirq。所以，写driver也是要考虑很多问题的，driver应该实现哪些dev_pm_ops的回调函数？<br> 3)&nbsp;resume_device_irqs中会根帮我们把已经enable_irq_wake的设备进行disable_irq_wake，但是前提是driver中通过2.2节中途径1的方式。<br> 4)&nbsp;resume_irqs继续调用，最终会enable所有在susoend中关闭的irq。<br> 5)&nbsp;check_irq_resend才是真正触发你注册的中断handle执行的真凶。 </p> 
+   </blockquote> 
+   <p> check_irq_resend代码如下: </p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="kwd">void<span class="pln"> check_irq_resend<span class="pun">(<span class="kwd">struct<span class="pln"> irq_desc <span class="pun">*<span class="pln">desc<span class="pun">)</span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L3"><span class="com"> * We do not resend level type interrupts. Level type</span></li> 
+    <li class="L4"><span class="com"> * interrupts are resent by hardware when they are still</span></li> 
+    <li class="L5"><span class="com"> * active. Clear the pending bit so suspend/resume does not</span></li> 
+    <li class="L6"><span class="com"> * get confused.</span></li> 
+    <li class="L7"><span class="com"> */</span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">irq_settings_is_level<span class="pun">(<span class="pln">desc<span class="pun">))<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">&amp;=<span class="pln"> <span class="pun">~<span class="pln">IRQS_PENDING<span class="pun">;</span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">return<span class="pun">;</span></span></span></li> 
+    <li class="L1"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">&amp;<span class="pln"> IRQS_REPLAY<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> <span class="kwd">return<span class="pun">;</span></span></span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">&amp;<span class="pln"> IRQS_PENDING<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">&amp;=<span class="pln"> <span class="pun">~<span class="pln">IRQS_PENDING<span class="pun">;</span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">istate <span class="pun">|=<span class="pln"> IRQS_REPLAY<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(!<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">.<span class="pln">chip<span class="pun">-&gt;<span class="pln">irq_retrigger <span class="pun">||</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="pun">!<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">.<span class="pln">chip<span class="pun">-&gt;<span class="pln">irq_retrigger<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">))<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln">&nbsp;</span></li> 
+    <li class="L1"><span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="typ">int<span class="pln"> irq <span class="pun">=<span class="pln"> irq_desc_get_irq<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln">&nbsp;</span></li> 
+    <li class="L3"><span class="pln"> <span class="com">/* Set it pending and activate the softirq: */</span></span></li> 
+    <li class="L4"><span class="pln"> <span class="typ">set<span class="pln">_bit<span class="pun">(<span class="pln">irq<span class="pun">,<span class="pln"> irqs_resend<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> tasklet_schedule<span class="pun">(&amp;<span class="pln">resend_tasklet<span class="pun">);</span></span></span></span></li> 
+    <li class="L6"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L7"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L8"><span class="pun">}</span></li> 
+   </ol>
+   <p> <br></p> 
+   <p> 由于在之前分析已经设置了IRQS_PENDING flag，因此这里会tasklet_schedule(&amp;resend_tasklet)并且置位irqs_resend变量中相应的bit位，代表软中断触发。然后就开始tasklet_schedule最终会唤醒ksoftirqd线程，在ksoftirqd线程中中会调用你注册的中断handle，毕竟ksoftirqd线程优先级很高，所以很快就会调度了。具体调用过程可以参考wowo的softirq和tasklet文章。这里我们也可以得出中断handle执行的上下文环境是软中断上下文的结论。当然我们还是有必要分析一下tasklet最后一步关键步骤的函数resend_irqs()，代码如下： </p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="com">/* Bitmap to handle software resend of interrupts: */</span></li> 
+    <li class="L1"><span class="kwd">static<span class="pln"> DECLARE_BITMAP<span class="pun">(<span class="pln">irqs_resend<span class="pun">,<span class="pln"> IRQ_BITMAP_BITS<span class="pun">);</span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln">&nbsp;</span></li> 
+    <li class="L3"><span class="com">/*</span></li> 
+    <li class="L4"><span class="com"> * Run software resends of IRQ's</span></li> 
+    <li class="L5"><span class="com"> */</span></li> 
+    <li class="L6"><span class="kwd">static<span class="pln"> <span class="kwd">void<span class="pln"> resend_irqs<span class="pun">(<span class="kwd">unsigned<span class="pln"> <span class="kwd">long<span class="pln"> arg<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pun">{</span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">struct<span class="pln"> irq_desc <span class="pun">*<span class="pln">desc<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="typ">int<span class="pln"> irq<span class="pun">;</span></span></span></span></li> 
+    <li class="L0"><span class="pln">&nbsp;</span></li> 
+    <li class="L1"><span class="pln"> <span class="kwd">while<span class="pln"> <span class="pun">(!<span class="pln">bitmap_empty<span class="pun">(<span class="pln">irqs_resend<span class="pun">,<span class="pln"> nr_irqs<span class="pun">))<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> irq <span class="pun">=<span class="pln"> find_first_bit<span class="pun">(<span class="pln">irqs_resend<span class="pun">,<span class="pln"> nr_irqs<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> clear_bit<span class="pun">(<span class="pln">irq<span class="pun">,<span class="pln"> irqs_resend<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> desc <span class="pun">=<span class="pln"> irq_to_desc<span class="pun">(<span class="pln">irq<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> local_irq_disable<span class="pun">();</span></span></li> 
+    <li class="L6"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">handle_irq<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> local_irq_enable<span class="pun">();</span></span></li> 
+    <li class="L8"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L9"><span class="pun">}</span></li> 
+    <li class="L0"><span class="com">/* Tasklet to handle resend: */</span></li> 
+    <li class="L1"><span class="kwd">static<span class="pln"> DECLARE_TASKLET<span class="pun">(<span class="pln">resend_tasklet<span class="pun">,<span class="pln"> resend_irqs<span class="pun">,<span class="pln"> <span class="lit">0<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+   </ol>
+   <p> <br></p> 
+   <blockquote> 
+    <p> 1)&nbsp; irqs_resend是一个unsigned int类型的数组，每一个bit都代表一个irq是否resend。<br> 2)&nbsp; resend_irqs是注册的resend_tasklet的callback函数，当tasklet_schedule(&amp;resend_tasklet)之后就会被调度执行。<br> 3)&nbsp; 在resend_irqs函数中，通过判断irqs_resend变量中的每一个bit位是否为1（即是否需要resend，也就是调用irq注册的中断handle）。<br> 好了，现在可以解答清楚的解答第一个问题了：设备唤醒cpu之后是立即跳转中断向量表指定的位置吗？如果不是，那么是什么时候才会跳转呢？设备唤醒cpu之后并不是立即跳转中断向量执行中断，而是等到syscore_resume以及打开cpu中断之后才开始。第二个问题也有答案了，已经跳转到中断服务函数开始执行代码，后续就会调用你注册的中断handle 代码吗？如果不是，那中断服务函数做什么准备呢？而你注册的中断handle又会在什么时候才开始执行呢？第一次跳转执行中断仅仅是设置相关的flag并且disable_irq，在执行完成设备的resume noirq回调函数之后通过check_irq_resend中调度tasklet，最终执行注册的中断handle，至于为什么要这么做，前面分析也给了答案。 </p> 
+    <p> <br></p> 
+   </blockquote> 
+   <p> <span style="font-size:16px;">2.7. IRQ handler会睡眠吗？ </span></p> 
+   <p> <span style="font-size:16px;"><br> 你想过request_thread_irq函数注册的hardirq handler或者是threaded handler会执行一半时，系统会再一次的休眠下去吗？再看看2.2节的图，实际上对于所有已经打开的irq在suspend_device_irqs()会调用synchronize_irq()等待左右正在处理的hardirq handler或者threaded handler。synchronize_irq()代码如下： </span></p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="kwd">void<span class="pln"> synchronize_irq<span class="pun">(<span class="kwd">unsigned<span class="pln"> <span class="typ">int<span class="pln"> irq<span class="pun">)</span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">struct<span class="pln"> irq_desc <span class="pun">*<span class="pln">desc <span class="pun">=<span class="pln"> irq_to_desc<span class="pun">(<span class="pln">irq<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">desc<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> __synchronize_hardirq<span class="pun">(<span class="pln">desc<span class="pun">);</span></span></span></span></li> 
+    <li class="L6"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L7"><span class="com"> * We made sure that no hardirq handler is</span></li> 
+    <li class="L8"><span class="com"> * running. Now verify that no threaded handlers are</span></li> 
+    <li class="L9"><span class="com"> * active.</span></li> 
+    <li class="L0"><span class="com"> */</span></li> 
+    <li class="L1"><span class="pln"> wait_event<span class="pun">(<span class="pln">desc<span class="pun">-&gt;<span class="pln">wait_for_threads<span class="pun">,</span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> <span class="pun">!<span class="pln">atomic_read<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">threads_active<span class="pun">));</span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L4"><span class="pun">}</span></li> 
+   </ol>
+   <p> <br></p> 
+   <blockquote> 
+    <p> 1)&nbsp;__synchronize_hardirq()是等待hardirq handler执行完毕。<br> 2)&nbsp;只要threads_active计数不为0就，等待threaded handler执行完毕。 </p> 
+   </blockquote> 
+   <p> __synchronize_hardirq()代码如下： </p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="kwd">static<span class="pln"> <span class="kwd">void<span class="pln"> __synchronize_hardirq<span class="pun">(<span class="kwd">struct<span class="pln"> irq_desc <span class="pun">*<span class="pln">desc<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">bool<span class="pln"> inprogress<span class="pun">;</span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">do<span class="pln"> <span class="pun">{</span></span></span></span></li> 
+    <li class="L5"><span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">long<span class="pln"> flags<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L8"><span class="com"> * Wait until we're out of the critical section. This might</span></li> 
+    <li class="L9"><span class="com"> * give the wrong answer due to the lack of memory barriers.</span></li> 
+    <li class="L0"><span class="com"> */</span></li> 
+    <li class="L1"><span class="pln"> <span class="kwd">while<span class="pln"> <span class="pun">(<span class="pln">irqd_irq_inprogress<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">))</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> cpu_relax<span class="pun">();</span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="com">/* Ok, that indicated we're done: double-check carefully. */</span></span></li> 
+    <li class="L5"><span class="pln"> raw_spin_lock_irqsave<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">lock<span class="pun">,<span class="pln"> flags<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln"> inprogress <span class="pun">=<span class="pln"> irqd_irq_inprogress<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">irq_data<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> raw_spin_unlock_irqrestore<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">lock<span class="pun">,<span class="pln"> flags<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln">&nbsp;</span></li> 
+    <li class="L9"><span class="pln"> <span class="com">/* Oops, that failed? */</span></span></li> 
+    <li class="L0"><span class="pln"> <span class="pun">}<span class="pln"> <span class="kwd">while<span class="pln"> <span class="pun">(<span class="pln">inprogress<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">}</span></li> 
+   </ol>
+   <p> <br></p> 
+   <p> irqd_irq_inprogress()是判断irq时候设置了IRQD_IRQ_INPROGRESS 标志位。标识hardirq thread正在执行，IRQD_IRQ_INPROGRESS在handle_irq_event()执行开始设置，等到handle_irq_event_percpu()执行完毕之后，同样在handle_irq_event()之后清除。因此hardirq handler执行结束之前系统不会睡眠。那么threaded handler情况也是这样吗？在__handle_irq_event_percpu()函数中通过__irq_wake_thread()函数唤醒irq_thread线程。__irq_wake_thread()函数如下： </p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="kwd">void<span class="pln"> __irq_wake_thread<span class="pun">(<span class="kwd">struct<span class="pln"> irq_desc <span class="pun">*<span class="pln">desc<span class="pun">,<span class="pln"> <span class="kwd">struct<span class="pln"> irqaction <span class="pun">*<span class="pln">action<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L3"><span class="com"> * In case the thread crashed and was killed we just pretend that</span></li> 
+    <li class="L4"><span class="com"> * we handled the interrupt. The hardirq handler has disabled the</span></li> 
+    <li class="L5"><span class="com"> * device interrupt, so no irq storm is lurking.</span></li> 
+    <li class="L6"><span class="com"> */</span></li> 
+    <li class="L7"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">action<span class="pun">-&gt;<span class="pln">thread<span class="pun">-&gt;<span class="pln">flags <span class="pun">&amp;<span class="pln"> PF_EXITING<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">return<span class="pun">;</span></span></span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L1"><span class="com"> * Wake up the handler thread for this action. If the</span></li> 
+    <li class="L2"><span class="com"> * RUNTHREAD bit is already set, nothing to do.</span></li> 
+    <li class="L3"><span class="com"> */</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">test_and_set_bit<span class="pun">(<span class="pln">IRQTF_RUNTHREAD<span class="pun">,<span class="pln"> <span class="pun">&amp;<span class="pln">action<span class="pun">-&gt;<span class="pln">thread_flags<span class="pun">))</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> <span class="kwd">return<span class="pun">;</span></span></span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="pln"> desc<span class="pun">-&gt;<span class="pln">threads_oneshot <span class="pun">|=<span class="pln"> action<span class="pun">-&gt;<span class="pln">thread_mask<span class="pun">;</span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="pln"> atomic_inc<span class="pun">(&amp;<span class="pln">desc<span class="pun">-&gt;<span class="pln">threads_active<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> wake_up_process<span class="pun">(<span class="pln">action<span class="pun">-&gt;<span class="pln">thread<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pun">}</span></li> 
+   </ol>
+   <p> <br></p> 
+   <blockquote> 
+    <p> 1)&nbsp;如果irq的中断线程已经设置IRQTF_RUNTHREAD标志位，代表irq线程已经正在运行，因此无需重新唤醒，直接返回即可。<br> 2)&nbsp;使用stomic_inc()增加threads_active计数，在synchronize_irq()函数中会判断threads_active计数是否为0来决定是否需要等待irq_thread执行完毕。 </p> 
+   </blockquote> 
+   <p> 说了这些，不知道你是否知道什么是irq_thread呢？我们通过request_thread_irq()函数指定thread_fn，这个thread_fn就是irq_thread线程最终调用的函数。而每个irq都会创建一个irq线程，创建的过程在setup_irq_thread()函数进行，setup_irq_thread()函数代码如下： </p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="kwd">static<span class="pln"> <span class="typ">int<span class="pln"> <span class="typ">set<span class="pln">up_irq_thread<span class="pun">(<span class="kwd">struct<span class="pln"> irqaction <span class="pun">*<span class="kwd">new<span class="pun">,<span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="typ">int<span class="pln"> irq<span class="pun">,<span class="pln"> <span class="kwd">bool<span class="pln"> secondary<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">struct<span class="pln"> task_struct <span class="pun">*<span class="pln">t<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> <span class="kwd">struct<span class="pln"> sched_param param <span class="pun">=<span class="pln"> <span class="pun">{</span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> <span class="pun">.<span class="pln">sched_priority <span class="pun">=<span class="pln"> MAX_USER_RT_PRIO<span class="pun">/<span class="lit">2<span class="pun">,</span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> <span class="pun">};</span></span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(!<span class="pln">secondary<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> t <span class="pun">=<span class="pln"> kthread_create<span class="pun">(<span class="pln">irq_thread<span class="pun">,<span class="pln"> <span class="kwd">new<span class="pun">,<span class="pln"> <span class="str">"irq/%d-%s"<span class="pun">,<span class="pln"> irq<span class="pun">,<span class="pln"> <span class="kwd">new<span class="pun">-&gt;<span class="pln">name<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="pun">}<span class="pln"> <span class="kwd">else<span class="pln"> <span class="pun">{</span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln"> t <span class="pun">=<span class="pln"> kthread_create<span class="pun">(<span class="pln">irq_thread<span class="pun">,<span class="pln"> <span class="kwd">new<span class="pun">,<span class="pln"> <span class="str">"irq/%d-s-%s"<span class="pun">,<span class="pln"> irq<span class="pun">,<span class="pln"> <span class="kwd">new<span class="pun">-&gt;<span class="pln">name<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> param<span class="pun">.<span class="pln">sched_priority <span class="pun">-=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">IS_ERR<span class="pun">(<span class="pln">t<span class="pun">))</span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> <span class="kwd">return<span class="pln"> PTR_ERR<span class="pun">(<span class="pln">t<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="pln"> sched_setscheduler_nocheck<span class="pun">(<span class="pln">t<span class="pun">,<span class="pln"> SCHED_FIFO<span class="pun">,<span class="pln"> <span class="pun">&amp;<span class="pln">param<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln">&nbsp;</span></li> 
+    <li class="L9"><span class="pln"> get_task_struct<span class="pun">(<span class="pln">t<span class="pun">);</span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">new<span class="pun">-&gt;<span class="pln">thread <span class="pun">=<span class="pln"> t<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> <span class="typ">set<span class="pln">_bit<span class="pun">(<span class="pln">IRQTF_AFFINITY<span class="pun">,<span class="pln"> <span class="pun">&amp;<span class="kwd">new<span class="pun">-&gt;<span class="pln">thread_flags<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> <span class="kwd">return<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L4"><span class="pun">}</span></li> 
+   </ol>
+   <p> <br></p> 
+   <p> 通过kthread_create()创建irq/irq-new-name的线程，该线程的入口函数值irq_thread。在irq_thread()中每执行完成一个thread_fn就会threads_active计数减1。<br> 现在可以考虑第三个问题了，假如register_thread_irq方式注册的threaded irq中调用msleep(1000)，睡眠1秒，请问系统此时会继续睡下去而没调度回来吗？因此导致msleep后续的操作没有执行。答案就是不会，因为suspend时候会等待threaded handler执行完毕，所以系统不会睡眠，放心好了。 </p> 
+   <p> <br><span style="font-size:16px;">2.8. 工作队列会睡眠吗？ </span></p> 
+   <p> <span style="font-size:16px;"><br> 现在来思考一个按键消抖问题。如果你还不知道什么是按键消抖的话，我……。按键消抖在内核中通常是这样处理，通过变压触发中断，在中断handler中通过queue delayed work一段时间，计时结束执行按键上报处理。从内核的gpio_keys抠出部分代码如下： </span></p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="kwd">static<span class="pln"> <span class="kwd">void<span class="pln"> gpio_keys_gpio_work_func<span class="pun">(<span class="kwd">struct<span class="pln"> work_struct <span class="pun">*<span class="pln">work<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">struct<span class="pln"> gpio_button_data <span class="pun">*<span class="pln">bdata <span class="pun">=</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> container_of<span class="pun">(<span class="pln">work<span class="pun">,<span class="pln"> <span class="kwd">struct<span class="pln"> gpio_button_data<span class="pun">,<span class="pln"> work<span class="pun">.<span class="pln">work<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="pln"> gpio_keys_gpio_report_event<span class="pun">(<span class="pln">bdata<span class="pun">);</span></span></span></span></li> 
+    <li class="L6"><span class="pun">}</span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="kwd">static<span class="pln"> <span class="typ">irqreturn_t<span class="pln"> gpio_keys_gpio_isr<span class="pun">(<span class="typ">int<span class="pln"> irq<span class="pun">,<span class="pln"> <span class="kwd">void<span class="pln"> <span class="pun">*<span class="pln">dev_id<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pun">{</span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">struct<span class="pln"> gpio_button_data <span class="pun">*<span class="pln">bdata <span class="pun">=<span class="pln"> dev_id<span class="pun">;</span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> mod_delayed_work<span class="pun">(<span class="pln">system_wq<span class="pun">,</span></span></span></span></li> 
+    <li class="L3"><span class="pln"> <span class="pun">&amp;<span class="pln">bdata<span class="pun">-&gt;<span class="pln">work<span class="pun">,</span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> msecs_to_jiffies<span class="pun">(<span class="pln">bdata<span class="pun">-&gt;<span class="pln">software_debounce<span class="pun">));</span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> <span class="kwd">return<span class="pln"> IRQ_HANDLED<span class="pun">;</span></span></span></span></li> 
+    <li class="L7"><span class="pun">}</span></li> 
+   </ol>
+   <p> <br></p> 
+   <p> 当按键按下，中断handler gpio_keys_gpio_isr执行，设定delayed work的定时器，等到定时器计时结束执行gpio_keys_gpio_work_func()，在gpio_keys_gpio_work_func()上报键值。你有考虑过一个问题吗？加入系统已经睡眠，此时第一次按下按键，有可能出现gpio_keys_gpio_work_func()函数没有执行，系统又继续睡眠，在第二次按键的时候执行第一次按键应该调用的gpio_keys_gpio_work_func()的情况吗？其实是有可能出现。只要bdata-&gt;software_debounce大于一定的时间就有可能出现。如果这个时间巧合，还有可能出现有时候正确上报，有时候没有上报。其实原因就是，内核的suspend只保证了IRQ handler的执行完成，并没有保证工作队列的执行完毕。 </p> 
+   <p> <br><span style="font-size:16px;">2.9. 如何解决工作队列睡眠问题？ </span></p> 
+   <p> <span style="font-size:16px;"><br> 系统suspend的过程中，主要是通过pm_wakeup_pending()判断suspend时候需要abort。如果你对我说的这一块不清楚，可以看看wowo其他几篇关于电源管理的文章。pm_wakeup_pending()主要是判断combined_event_count变量在suspend的过程中是否改变，如果改变suspend就应该abort。既然知道了原理，那么就好办了。在中断handler开始处增加combined_event_count计数，在处理完成工作队列的事情减小combined_event_count计数即可。当然是不用你自己写代码，系统提供了接口函数pm_stay_awake()和pm_relax()。2.8节修改后的代码如下： </span></p> 
+   <p> <br></p> 
+   <ol>
+    <li class="L0"><span class="kwd">static<span class="pln"> <span class="kwd">void<span class="pln"> gpio_keys_gpio_work_func<span class="pun">(<span class="kwd">struct<span class="pln"> work_struct <span class="pun">*<span class="pln">work<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">struct<span class="pln"> gpio_button_data <span class="pun">*<span class="pln">bdata <span class="pun">=</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> container_of<span class="pun">(<span class="pln">work<span class="pun">,<span class="pln"> <span class="kwd">struct<span class="pln"> gpio_button_data<span class="pun">,<span class="pln"> work<span class="pun">.<span class="pln">work<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="pln"> gpio_keys_gpio_report_event<span class="pun">(<span class="pln">bdata<span class="pun">);</span></span></span></span></li> 
+    <li class="L6"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">bdata<span class="pun">-&gt;<span class="pln">button<span class="pun">-&gt;<span class="pln">wakeup<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> pm_relax<span class="pun">(<span class="pln">bdata<span class="pun">-&gt;<span class="pln">input<span class="pun">-&gt;<span class="pln">dev<span class="pun">.<span class="pln">parent<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pun">}</span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="kwd">static<span class="pln"> <span class="typ">irqreturn_t<span class="pln"> gpio_keys_gpio_isr<span class="pun">(<span class="typ">int<span class="pln"> irq<span class="pun">,<span class="pln"> <span class="kwd">void<span class="pln"> <span class="pun">*<span class="pln">dev_id<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">struct<span class="pln"> gpio_button_data <span class="pun">*<span class="pln">bdata <span class="pun">=<span class="pln"> dev_id<span class="pun">;</span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">bdata<span class="pun">-&gt;<span class="pln">button<span class="pun">-&gt;<span class="pln">wakeup<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> <span class="kwd">const<span class="pln"> <span class="kwd">struct<span class="pln"> gpio_keys_button <span class="pun">*<span class="pln">button <span class="pun">=<span class="pln"> bdata<span class="pun">-&gt;<span class="pln">button<span class="pun">;</span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="pln"> pm_stay_awake<span class="pun">(<span class="pln">bdata<span class="pun">-&gt;<span class="pln">input<span class="pun">-&gt;<span class="pln">dev<span class="pun">.<span class="pln">parent<span class="pun">);</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="pln"> mod_delayed_work<span class="pun">(<span class="pln">system_wq<span class="pun">,</span></span></span></span></li> 
+    <li class="L1"><span class="pln"> <span class="pun">&amp;<span class="pln">bdata<span class="pun">-&gt;<span class="pln">work<span class="pun">,</span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> msecs_to_jiffies<span class="pun">(<span class="pln">bdata<span class="pun">-&gt;<span class="pln">software_debounce<span class="pun">));</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">return<span class="pln"> IRQ_HANDLED<span class="pun">;</span></span></span></span></li> 
+    <li class="L5"><span class="pun">}</span></li> 
+   </ol>
+   <p> <br></p> 
+   <p> 好了，现在你放心好了，即使你是在gpio_keys_gpio_work_func()中msleep(2000)，系统也会等到pm_relax()执行之后才系统才可能suspend。 </p> 
+   <p> <br><span style="font-size:18px;">3. 驱动工程师建议 </span></p> 
+   <p> <span style="font-size:18px;"><br> 看了这么多代码总是想说点东西。不管是建议还是什么。我由衷地希望驱动工程师可以写出完美没有bug并且简介的代码。因此，这里有点小建议给驱动工程师（某些特性可能需要比较新的内核版本）。<br> 1)&nbsp;如果设备具有唤醒系统的功能，请在probe函数中调用device_init_wakeup()和dev_pm_set_wake_irq()（注意调用顺序，先device_init_wakeup()再dev_pm_set_wake_irq()）。毕竟这样系统suspend的时候会自动帮助我们enable_irq_wake()和disable_irq_wake()，何乐而不为呢！简单就是美。如果你是i2c设备，那么可以更完美。连probe函数里面也可以不用调用了。只需要在设备的dts中添加wakeup-source属性即可。i2c core会自动帮我们完成这些操作。<br> 2)&nbsp;如果你习惯在driver的suspend()中关闭中断，在resum()中打开中断，我觉你你没必要这么做，何必要这些冗余代码呢！<br> 3)&nbsp;既然dts现在这么流行了，你又何必不用呢！设备dts中的interrupts属性都会指明中断触发type，那你就用嘛！怎么获取这个flag呢？irqd_get_trigger_type()可以通过dts获取irq的触发type。所以request_threaded_irq()的第四个参数irqflags可以使用irqd_get_trigger_type()获得。如果你的内核版本更新的话，还可以更简单，irqflags传入0即可，在request_threaded_irq()中会自动帮我们调用irqd_get_trigger_type()获取。当然了，我也看聪明的IC厂家提供的driver，在dts中自定义一个属性表明irqflags，在driver中获取。我只能猜测driver的编写者不知道irqd_get_trigger_type()接口吧！<br> 4)&nbsp;如果在IRQ handler中需要使用delayed work，请成对使用pm_stay_awake()和pm_relax()。否则，谁也无法保证系统不会再一次的睡眠。 </span></p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

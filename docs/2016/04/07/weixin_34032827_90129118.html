@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核通知链分析【转】 « NotBeCN</title>
+  <meta name="description" content="                 转自：    http://www.cnblogs.com/jason-lu/articles/2807758.html            Linux内核通知链分析            1. 引言     Linux是单内核架构(monolithic kernel),大多数...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/04/07/weixin_34032827_90129118.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核通知链分析【转】</h1>
+    <p class="post-meta">Apr 7, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div class="postTitle">
+    转自：
+    <a href="http://www.cnblogs.com/jason-lu/articles/2807758.html" rel="nofollow">http://www.cnblogs.com/jason-lu/articles/2807758.html</a> 
+   </div> 
+   <div class="postTitle">
+    <a id="cb_post_title_url" class="postTitle2" href="http://www.cnblogs.com/jason-lu/archive/2012/12/07/2807758.html" rel="nofollow">Linux内核通知链分析</a>
+   </div> 
+   <div> 
+    <h3>1. 引言</h3> 
+    <p>Linux是单内核架构(monolithic kernel),大多数内核子系统和模块是相互独立的,它们被动态地加载或卸载,以使内核变得小巧和可扩展.然而,子系统或模块之间需要通信,或者说某个特定模块扑捉到的事件可能其它模块对此感兴趣,这就需要一种机制来满足子系统或模块之间交互的需求.</p> 
+    <p>Linux使用通知链表来实现这一需求,它是一个简单的函数链表,当某件事件发生时,链表上的函数就会执行.这是一种发布-订阅(publish-subscribe)模式,当客户(订阅者)需要某个特定事件的通知时,会向主机(发布者)注册自己;接下来,只要感兴趣的事件一发生,主机便会通知客户.</p> 
+    <p>讨论内核通知链之前,有必要注意以下几点:</p> 
+    <ul>
+     <li>通知链表只能够在内核的子系统之间使用,而不能够在内核与用户空间之间进行事件的通知.</li> 
+     <li>通知链表是一个函数链表,链表上的每一个节点都注册了一个函数.当某个事情发生时,链表上所有节点对应的函数就会被执行.所以对于通知链表来说有一个通知方(主机)与一个接收方(订阅者).</li> 
+     <li>在通知这个事件时所运行的函数由被通知方(订阅者通过回调函数)决定,实际上也即是被通知方注册(订阅者实现)了某个函数,在发生某个事件时这些函数就得到执行.</li> 
+    </ul>
+    <h3>2. 数据结构</h3> 
+    <h4>清单1. 原子通知链(Atomic notifier chains):</h4> 
+    <p>通知链元素的回调函数(当事件发生时要执行的函数)只能在中断上下文中运行,不允许阻塞</p> 
+    <div class="cnblogs_code"> 
+     <pre>1 struct atomic_notifier_head {
+2     spinlock_t lock;        /*锁*/
+3     struct notifier_block *head;
+4 };</pre> 
+    </div> 
+    <h4>清单2. 可阻塞通知链(Blocking notifier chains):</h4> 
+    <p>阻塞通知头结构,增加了一个读写信号灯,通知链元素的回调函数在进程上下文中运行,允许阻塞</p> 
+    <div class="cnblogs_code"> 
+     <pre>1 struct blocking_notifier_head {
+2     struct rw_semaphore rwsem;    /*读写控制信号量*/
+3     struct notifier_block *head;
+4 };</pre> 
+    </div> 
+    <h4>清单3. 原始通知链(Raw notifier chains):</h4> 
+    <p>原始通知头结构,就是一个通知块指针,对通知链元素的回调函数没有任何限制,所有锁和保护机制都由调用者维护</p> 
+    <div class="cnblogs_code"> 
+     <pre>1 struct raw_notifier_head {
+2     struct notifier_block *head;
+3 };</pre> 
+    </div> 
+    <h4>清单4. SRCU 通知链(SRCU notifier chains):</h4> 
+    <p>可阻塞通知链的一种变体,(SRCU)Sleepable Read Copy Update 的链表通知,与block链表通知类似,不同在处理锁与保护上,SRCU在调用通知时的系统开销小,而从通知链表中去除通知调用的系统开销大,因此适合用在调用通知频繁,而移除调用通知少的情况中</p> 
+    <div class="cnblogs_code"> 
+     <pre>1 struct srcu_notifier_head {
+2     struct mutex mutex;
+3     struct srcu_struct srcu;
+4     struct notifier_block *head;
+5 };</pre> 
+    </div> 
+    <p>参看：<a href="http://geyingzhen.blog.163.com/blog/static/6558665520091165531675/" rel="nofollow">http://geyingzhen.blog.163.com/blog/static/6558665520091165531675/</a></p> 
+    <h4>清单5. 基本的通知块结构(notifier_block):</h4> 
+    <p>通知链的核心结构</p> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre>1 struct notifier_block {
+2     int (*notifier_call)(struct notifier_block *, unsigned long, void *);        /*回调函数*/
+3     struct notifier_block *next;        /*指向链表的下一个元素节点，这是一个单向链表*/
+4     int priority;        /*该块的优先级, 在链表中各个块是按此优先级值进
+5                     *行排序的, 值大的在链表前, 表明
+6                     *相应回调函数执行的顺序*/
+7 };</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <p>其中,函数指针notifier_call注册了当某个事件发生时需要调用的函数;next指向下一个链表节点;priority设定链表节点的优先级;数值越大优先级越高,默认为0.因此,所有的通知链表节点组成了一个单链表,并以优先级(priority)排列.</p> 
+    <h3><strong>3. 运行机制</strong></h3> 
+    <p align="left">通知链的运作机制包括两个角色:</p> 
+    <ul>
+     <li>被通知者(订阅者):对某一事件感兴趣一方,定义了当事件发生时,相应的处理函数,即回调函数.但需要事先将其注册到通知链中(被通知者注册的动作就是在通知链中增加一项).</li> 
+     <li>通知者(主机):事件的通知者.当检测到某事件,或者本身产生事件时,通知所有对该事件感兴趣的一方事件发生.他定义了一个通知链,其中保存了每一个被通知者对事件的处理函数(回调函数).通知这个过程实际上就是遍历通知链中的每一项,然后调用相应的事件处理函数.</li> 
+    </ul>
+    <p align="left">通知机制实现包括以下三个步骤:</p> 
+    <ol>
+     <li>通知者(主机)定义通知链;</li> 
+     <li>被通知者(订阅者)向通知链中注册回调函数;</li> 
+     <li>当事件发生时,通知者(主机)发出通知(执行通知链中所有元素的回调函数).</li> 
+    </ol>
+    <h4>清单6. notifier_chain_register函数:</h4> 
+    <p align="left">被通知者(订阅者)调用 notifier_chain_register函数注册回调函数,该函数按照优先级将回调函数加入到通知链中:</p> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /*
+ 2  *    Notifier chain core routines.  The exported routines below
+ 3  *    are layered on top of these, with appropriate locking added.
+ 4  */
+ 5 /*nl是链表头块的地址, n是要添加到该链表的通知块*/
+ 6 static int notifier_chain_register(struct notifier_block **nl,
+ 7         struct notifier_block *n)
+ 8 {
+ 9     while ((*nl) != NULL) {    /*使用的是dummy header算法, 即使刚开始时链表为空也不用显示判断区分*/
+10         if (n-&gt;priority &gt; (*nl)-&gt;priority)        /*判断优先权值, 优先权值越大位置越靠前*/
+11             break;
+12         nl = &amp;((*nl)-&gt;next);
+13     }
+14     n-&gt;next = *nl;    /*将节点n链接到链表nl中的合适位置*/
+15     rcu_assign_pointer(*nl, n);    /*使用rcu处理函数保证SMP下的安全性, 相当于加上锁再赋值*/
+16     return 0;
+17 }</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h4>清单7. notifier_chain_unregister函数:</h4> 
+    <p align="left">注销回调函数则使用notifier_chain_unregister函数,即将回调函数从通知链中删除:</p> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /*nl是链表头块的地址, n是要删除的通知块*/
+ 2 static int notifier_chain_unregister(struct notifier_block **nl,
+ 3         struct notifier_block *n)
+ 4 {
+ 5     while ((*nl) != NULL) {
+ 6         if ((*nl) == n) {
+ 7             rcu_assign_pointer(*nl, n-&gt;next);    /* *nl=n-&gt;next的安全赋值操作,相当于将节点从链表断开*/
+ 8             return 0;
+ 9         }
+10         nl = &amp;((*nl)-&gt;next);
+11     }
+12     return -ENOENT;
+13 }</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h4>清单8. notifier_call_chain函数:</h4> 
+    <p align="left">通知者(主机)调用 notifier_call_chain函数通知事件的到达,这个函数会遍历通知链中所有的元素,然后依次调用每一个的回调函数(即完成通知动作):</p> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  * notifier_call_chain - Informs the registered notifiers about an event.
+ 3  *    @nl:        Pointer to head of the blocking notifier chain
+ 4  *    @val:        Value passed unmodified to notifier function
+ 5  *    @v:        Pointer passed unmodified to notifier function
+ 6  *    @nr_to_call:    Number of notifier functions to be called. Don't care
+ 7  *            value of this parameter is -1.
+ 8  *    @nr_calls:    Records the number of notifications sent. Don't care
+ 9  *            value of this field is NULL.
+10  *    @returns:    notifier_call_chain returns the value returned by the
+11  *            last notifier function called.
+12  */
+13 static int __kprobes notifier_call_chain(struct notifier_block **nl,
+14                     unsigned long val, void *v,
+15                     int nr_to_call,    int *nr_calls)
+16 {
+17     int ret = NOTIFY_DONE;
+18     struct notifier_block *nb, *next_nb;
+19 
+20     nb = rcu_dereference(*nl);    /*安全地获取通知块指针*/
+21 
+22     while (nb &amp;&amp; nr_to_call) {        /*链表循环*/
+23         next_nb = rcu_dereference(nb-&gt;next);    /*找下一个块*/
+24 
+25 #ifdef CONFIG_DEBUG_NOTIFIERS
+26         if (unlikely(!func_ptr_is_kernel_text(nb-&gt;notifier_call))) {
+27             WARN(1, "Invalid notifier called!");
+28             nb = next_nb;
+29             continue;
+30         }
+31 #endif
+32         ret = nb-&gt;notifier_call(nb, val, v);    /*执行订阅者注册的回调函数，对此通知做出响应*/
+33 
+34         if (nr_calls)
+35             (*nr_calls)++;
+36 
+37         if ((ret &amp; NOTIFY_STOP_MASK) == NOTIFY_STOP_MASK)    /*如果返回停止标志, 不执行后续结构*/
+38             break;
+39         nb = next_nb;        /*循环执行，进入下一个节点*/
+40         nr_to_call--;
+41     }
+42     return ret;
+43 }</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <p>参数nl是通知链的头部,val表示事件类型,v用来指向通知链上的函数执行时需要用到的参数,一般不同的通知链,参数类型也不一样,例如当通知一个网卡被注册时,v就指向net_device结构,nr_to_call表示准备最多通知几个,-1表示整条链都通知,nr_calls非空的话,返回通知了多少个.</p> 
+    <p>每个被执行的notifier_block回调函数的返回值可能取值为以下几个:</p> 
+    <ul>
+     <li>NOTIFY_DONE:表示对相关的事件类型不关心;</li> 
+     <li>NOTIFY_OK:顺利执行;</li> 
+     <li>NOTIFY_BAD:执行有错;</li> 
+     <li>NOTIFY_STOP:停止执行后面的回调函数;</li> 
+     <li>NOTIFY_STOP_MASK:停止执行的掩码;</li> 
+     <li>Notifier_call_chain()把最后一个被调用的回调函数的返回值作为它的返回值.</li> 
+    </ul>
+    <h3>4. 应用实例</h3> 
+    <p>在这里,写了一个简单的通知链表的代码.实际上,整个通知链的编写也就两个过程:</p> 
+    <ol>
+     <li>首先是定义自己的通知链的头节点,并将要执行的函数注册到自己的通知链中;</li> 
+     <li>其次则是由另外的子系统来通知这个链,让其上面注册的函数运行.</li> 
+    </ol>
+    <p>这里将第一个过程分成了两步来写,第一步是定义了头节点和一些自定义的注册函数(针对该头节点的),第二步则是使用自定义的注册函数注册了一些通知链节点.分别在代码buildchain.c与regchain.c中.发送通知信息的代码为notify.c.</p> 
+    <h4>清单9. buildchain.c</h4> 
+    <p>它的作用是自定义一个通知链表test_chain,然后再自定义两个函数分别向这个通知链中加入或删除节点,最后再定义一个函数通知这个test_chain链</p> 
+    <div class="cnblogs_code"> 
+     <img class="code_img_closed" src="https://yqfile.alicdn.com/img_1c53668bcee393edac0d7b3b3daff1ae.gif" alt="">
+     <span class="cnblogs_code_collapse">buildchain.c</span> 
+    </div> 
+    <h4>清单10. regchain.c</h4> 
+    <p>该代码的作用是将test_notifier1,test_notifier2,test_notifier3这三个节点加到之前定义的test_chain这个通知链表上,同时每个节点都注册了一个函数</p> 
+    <div class="cnblogs_code"> 
+     <img class="code_img_closed" src="https://yqfile.alicdn.com/img_1c53668bcee393edac0d7b3b3daff1ae.gif" alt="">
+     <span class="cnblogs_code_collapse">regchain.c</span> 
+    </div> 
+    <h4>清单11. notify.c</h4> 
+    <p>该代码的作用就是向test_chain通知链中发送消息,让链中的函数运行</p> 
+    <div class="cnblogs_code"> 
+     <img class="code_img_closed" src="https://yqfile.alicdn.com/img_1c53668bcee393edac0d7b3b3daff1ae.gif" alt="">
+     <span class="cnblogs_code_collapse">notify.c</span> 
+    </div> 
+    <h4>清单12. Makefile</h4> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 obj-m:=buildchain.o regchain.o notify.o
+ 2 CURRENT_PATH := $(shell pwd)
+ 3 LINUX_KERNEL := $(shell uname -r)
+ 4 KERNELDIR := /usr/src/linux-headers-$(LINUX_KERNEL)
+ 5 
+ 6 all:
+ 7 make -C $(KERNELDIR) M=$(CURRENT_PATH) modules
+ 8 
+ 9 clean:
+10 
+11 make -C $(KERNELDIR) M=$(CURRENT_PATH) clean</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h4>清单13. compile&amp;load</h4> 
+    <div class="cnblogs_code"> 
+     <pre>1 #make
+2 
+3 #insmod buildchain.ko
+4 #insmod regchain.ko
+5 #insmod notify.ko</pre> 
+    </div> 
+    <h4>清单14. result</h4> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 init_notifier
+ 2 Begin to register:
+ 3 register test_notifier1 completed
+ 4 register test_notifier2 completed
+ 5 register test_notifier3 completed
+ 6 Begin to notify:
+ 7 ==============================
+ 8 In Event 1: Event Number is 1
+ 9 In Event 2: Event Number is 1
+10 In Event 3: Event Number is 1
+11 ==============================</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h3><strong>5. 通知头结构的有关宏</strong></h3> 
+    <h4>清单15. Head-macro</h4> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /*以下是一些宏来初始化各种类型的通知头结构, 一般在程序中使用*/
+ 2 #define ATOMIC_INIT_NOTIFIER_HEAD(name) do{ \
+ 3   spin_lock_init(&amp;(name)-&gt;lock); \
+ 4   (name)-&gt;head =NULL;  \
+ 5  } while (0)
+ 6 
+ 7 #define BLOCKING_INIT_NOTIFIER_HEAD(name) do{ \
+ 8   init_rwsem(&amp;(name)-&gt;rwsem); \
+ 9   (name)-&gt;head =NULL;  \
+10  } while (0)
+11 
+12 #define RAW_INIT_NOTIFIER_HEAD(name) do{ \
+13   (name)-&gt;head =NULL;  \
+14  } while (0)
+15 
+16  
+17 /*以下这些宏也是用来初始化各种类型的通知头结构,但是在参数定义时使用（即作为赋值的右半部分，作为等号右边的部分）*/
+18 #define ATOMIC_NOTIFIER_INIT(name){    \
+19   .lock =__SPIN_LOCK_UNLOCKED(name.lock), \
+20   .head = NULL }
+21 #define BLOCKING_NOTIFIER_INIT(name){    \
+22   .rwsem =__RWSEM_INITIALIZER((name).rwsem), \
+23   .head = NULL }
+24 #defineRAW_NOTIFIER_INIT(name) {    \
+25   .head = NULL }
+26 
+27 /*注意, 没有定义scru通知头结构的初始化, 因为scru是不能静态初始化的.*/
+28 
+29  
+30 /*以下这些宏用来直接定义通知头结构*/
+31 #defineATOMIC_NOTIFIER_HEAD(name)    \
+32  struct atomic_notifier_head name=   \
+33   ATOMIC_NOTIFIER_INIT(name)
+34 #defineBLOCKING_NOTIFIER_HEAD(name)    \
+35  struct blocking_notifier_head name=   \
+36   BLOCKING_NOTIFIER_INIT(name)
+37 #defineRAW_NOTIFIER_HEAD(name)     \
+38  struct raw_notifier_head name=    \
+39   RAW_NOTIFIER_INIT(name)</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h3><strong>6. 扩展的通知块操作</strong></h3> 
+    <p>扩展的通知块操作功能和基本通知块类似,但使用了扩展的结构中的参数保证操作的安全</p> 
+    <h4>6.1 原子通知块</h4> 
+    <h5>6.1.1 登记</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    atomic_notifier_chain_register - Add notifier to an atomic notifier chain
+ 3  *    @nh: Pointer to head of the atomic notifier chain
+ 4  *    @n: New entry in notifier chain
+ 5  *
+ 6  *    Adds a notifier to an atomic notifier chain.
+ 7  *
+ 8  *    Currently always returns zero.
+ 9  */
+10 /*只在基本通知登记操作前后加锁进行保护*/
+11 int atomic_notifier_chain_register(struct atomic_notifier_head *nh,
+12         struct notifier_block *n)
+13 {
+14     unsigned long flags;
+15     int ret;
+16 
+17     spin_lock_irqsave(&amp;nh-&gt;lock, flags);    /*加锁*/
+18     ret = notifier_chain_register(&amp;nh-&gt;head, n);
+19     spin_unlock_irqrestore(&amp;nh-&gt;lock, flags);    /*解锁*/
+20     return ret;
+21 }
+22 EXPORT_SYMBOL_GPL(atomic_notifier_chain_register);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h5>6.1.2 撤销</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    atomic_notifier_chain_unregister - Remove notifier from an atomic notifier chain
+ 3  *    @nh: Pointer to head of the atomic notifier chain
+ 4  *    @n: Entry to remove from notifier chain
+ 5  *
+ 6  *    Removes a notifier from an atomic notifier chain.
+ 7  *
+ 8  *    Returns zero on success or %-ENOENT on failure.
+ 9  */
+10  /*只是在基本通知块撤销操作前后加锁解锁进行保护*/
+11 int atomic_notifier_chain_unregister(struct atomic_notifier_head *nh,
+12         struct notifier_block *n)
+13 {
+14     unsigned long flags;
+15     int ret;
+16 
+17     spin_lock_irqsave(&amp;nh-&gt;lock, flags);    /*加锁*/
+18     ret = notifier_chain_unregister(&amp;nh-&gt;head, n);
+19     spin_unlock_irqrestore(&amp;nh-&gt;lock, flags);    /*解锁*/
+20     synchronize_rcu();    /*同步rcu, 等待一个grace period*/
+21     return ret;
+22 }
+23 EXPORT_SYMBOL_GPL(atomic_notifier_chain_unregister);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h5>6.1.3 原子回调</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    __atomic_notifier_call_chain - Call functions in an atomic notifier chain
+ 3  *    @nh: Pointer to head of the atomic notifier chain
+ 4  *    @val: Value passed unmodified to notifier function
+ 5  *    @v: Pointer passed unmodified to notifier function
+ 6  *    @nr_to_call: See the comment for notifier_call_chain.
+ 7  *    @nr_calls: See the comment for notifier_call_chain.
+ 8  *
+ 9  *    Calls each function in a notifier chain in turn.  The functions
+10  *    run in an atomic context, so they must not block.
+11  *    This routine uses RCU to synchronize with changes to the chain.
+12  *
+13  *    If the return value of the notifier can be and'ed
+14  *    with %NOTIFY_STOP_MASK then atomic_notifier_call_chain()
+15  *    will return immediately, with the return value of
+16  *    the notifier function which halted execution.
+17  *    Otherwise the return value is the return value
+18  *    of the last notifier function called.
+19  */
+20 int __kprobes __atomic_notifier_call_chain(struct atomic_notifier_head *nh,
+21                     unsigned long val, void *v,
+22                     int nr_to_call, int *nr_calls)
+23 {
+24     int ret;
+25 
+26     rcu_read_lock();        /*禁止抢占*/
+27     ret = notifier_call_chain(&amp;nh-&gt;head, val, v, nr_to_call, nr_calls);    /*使用基本通知块回调*/
+28     rcu_read_unlock();    /*使能抢占*/
+29     return ret;
+30 }
+31 EXPORT_SYMBOL_GPL(__atomic_notifier_call_chain);
+32 
+33 /*这个函数是在原子操作上下文中调用, 是不能阻塞的*/
+34 int __kprobes atomic_notifier_call_chain(struct atomic_notifier_head *nh,
+35         unsigned long val, void *v)
+36 {
+37     return __atomic_notifier_call_chain(nh, val, v, -1, NULL);
+38 }
+39 EXPORT_SYMBOL_GPL(atomic_notifier_call_chain);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h4>6.2 可阻塞通知块</h4> 
+    <h5>6.2.1 登记</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    blocking_notifier_chain_register - Add notifier to a blocking notifier chain
+ 3  *    @nh: Pointer to head of the blocking notifier chain
+ 4  *    @n: New entry in notifier chain
+ 5  *
+ 6  *    Adds a notifier to a blocking notifier chain.
+ 7  *    Must be called in process context.
+ 8  *
+ 9  *    Currently always returns zero.
+10  */
+11 int blocking_notifier_chain_register(struct blocking_notifier_head *nh,
+12         struct notifier_block *n)
+13 {
+14     int ret;
+15 
+16     /*
+17      * This code gets used during boot-up, when task switching is
+18      * not yet working and interrupts must remain disabled.  At
+19      * such times we must not call down_write().
+20      */
+21     if (unlikely(system_state == SYSTEM_BOOTING))    /*此时是不能阻塞*/
+22         return notifier_chain_register(&amp;nh-&gt;head, n);
+23 
+24     down_write(&amp;nh-&gt;rwsem);    /*使用信号灯进行同步, 可能阻塞*/
+25     ret = notifier_chain_register(&amp;nh-&gt;head, n);    /*基本登记函数*/
+26     up_write(&amp;nh-&gt;rwsem);        /*释放信号量*/
+27     return ret;
+28 }
+29 EXPORT_SYMBOL_GPL(blocking_notifier_chain_register);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h5>6.2.2 撤销</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    blocking_notifier_chain_unregister - Remove notifier from a blocking notifier chain
+ 3  *    @nh: Pointer to head of the blocking notifier chain
+ 4  *    @n: Entry to remove from notifier chain
+ 5  *
+ 6  *    Removes a notifier from a blocking notifier chain.
+ 7  *    Must be called from process context.
+ 8  *
+ 9  *    Returns zero on success or %-ENOENT on failure.
+10  */
+11  /*该函数是在进程处理过程中调用,可阻塞*/
+12 int blocking_notifier_chain_unregister(struct blocking_notifier_head *nh,
+13         struct notifier_block *n)
+14 {
+15     int ret;
+16 
+17     /*
+18      * This code gets used during boot-up, when task switching is
+19      * not yet working and interrupts must remain disabled.  At
+20      * such times we must not call down_write().
+21      */
+22     if (unlikely(system_state == SYSTEM_BOOTING))
+23         return notifier_chain_unregister(&amp;nh-&gt;head, n);
+24 
+25     down_write(&amp;nh-&gt;rwsem);
+26     ret = notifier_chain_unregister(&amp;nh-&gt;head, n);
+27     up_write(&amp;nh-&gt;rwsem);
+28     return ret;
+29 }
+30 EXPORT_SYMBOL_GPL(blocking_notifier_chain_unregister);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h5>6.2.3 回调</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    __blocking_notifier_call_chain - Call functions in a blocking notifier chain
+ 3  *    @nh: Pointer to head of the blocking notifier chain
+ 4  *    @val: Value passed unmodified to notifier function
+ 5  *    @v: Pointer passed unmodified to notifier function
+ 6  *    @nr_to_call: See comment for notifier_call_chain.
+ 7  *    @nr_calls: See comment for notifier_call_chain.
+ 8  *
+ 9  *    Calls each function in a notifier chain in turn.  The functions
+10  *    run in a process context, so they are allowed to block.
+11  *
+12  *    If the return value of the notifier can be and'ed
+13  *    with %NOTIFY_STOP_MASK then blocking_notifier_call_chain()
+14  *    will return immediately, with the return value of
+15  *    the notifier function which halted execution.
+16  *    Otherwise the return value is the return value
+17  *    of the last notifier function called.
+18  */
+19 int __blocking_notifier_call_chain(struct blocking_notifier_head *nh,
+20                    unsigned long val, void *v,
+21                    int nr_to_call, int *nr_calls)
+22 {
+23     int ret = NOTIFY_DONE;
+24 
+25     /*
+26      * We check the head outside the lock, but if this access is
+27      * racy then it does not matter what the result of the test
+28      * is, we re-check the list after having taken the lock anyway:
+29      */
+30     if (rcu_dereference(nh-&gt;head)) {
+31         down_read(&amp;nh-&gt;rwsem);
+32         ret = notifier_call_chain(&amp;nh-&gt;head, val, v, nr_to_call,
+33                     nr_calls);
+34         up_read(&amp;nh-&gt;rwsem);
+35     }
+36     return ret;
+37 }
+38 EXPORT_SYMBOL_GPL(__blocking_notifier_call_chain);
+39 /*在进行上下文中调用, 可以阻塞*/
+40 int blocking_notifier_call_chain(struct blocking_notifier_head *nh,
+41         unsigned long val, void *v)
+42 {
+43     return __blocking_notifier_call_chain(nh, val, v, -1, NULL);
+44 }
+45 EXPORT_SYMBOL_GPL(blocking_notifier_call_chain);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h4>6.3 原始通知块操作</h4> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /*
+ 2  *    Raw notifier chain routines.  There is no protection;
+ 3  *    the caller must provide it.  Use at your own risk!
+ 4  */
+ 5 
+ 6 /**
+ 7  *    raw_notifier_chain_register - Add notifier to a raw notifier chain
+ 8  *    @nh: Pointer to head of the raw notifier chain
+ 9  *    @n: New entry in notifier chain
+10  *
+11  *    Adds a notifier to a raw notifier chain.
+12  *    All locking must be provided by the caller.
+13  *
+14  *    Currently always returns zero.
+15  */
+16  /*
+17 和基本原始块操作完全相同*/
+18 int raw_notifier_chain_register(struct raw_notifier_head *nh,
+19         struct notifier_block *n)
+20 {
+21     return notifier_chain_register(&amp;nh-&gt;head, n);
+22 }
+23 EXPORT_SYMBOL_GPL(raw_notifier_chain_register);
+24 
+25 /**
+26  *    raw_notifier_chain_unregister - Remove notifier from a raw notifier chain
+27  *    @nh: Pointer to head of the raw notifier chain
+28  *    @n: Entry to remove from notifier chain
+29  *
+30  *    Removes a notifier from a raw notifier chain.
+31  *    All locking must be provided by the caller.
+32  *
+33  *    Returns zero on success or %-ENOENT on failure.
+34  */
+35 int raw_notifier_chain_unregister(struct raw_notifier_head *nh,
+36         struct notifier_block *n)
+37 {
+38     return notifier_chain_unregister(&amp;nh-&gt;head, n);
+39 }
+40 EXPORT_SYMBOL_GPL(raw_notifier_chain_unregister);
+41 
+42 /**
+43  *    __raw_notifier_call_chain - Call functions in a raw notifier chain
+44  *    @nh: Pointer to head of the raw notifier chain
+45  *    @val: Value passed unmodified to notifier function
+46  *    @v: Pointer passed unmodified to notifier function
+47  *    @nr_to_call: See comment for notifier_call_chain.
+48  *    @nr_calls: See comment for notifier_call_chain
+49  *
+50  *    Calls each function in a notifier chain in turn.  The functions
+51  *    run in an undefined context.
+52  *    All locking must be provided by the caller.
+53  *
+54  *    If the return value of the notifier can be and'ed
+55  *    with %NOTIFY_STOP_MASK then raw_notifier_call_chain()
+56  *    will return immediately, with the return value of
+57  *    the notifier function which halted execution.
+58  *    Otherwise the return value is the return value
+59  *    of the last notifier function called.
+60  */
+61 int __raw_notifier_call_chain(struct raw_notifier_head *nh,
+62                   unsigned long val, void *v,
+63                   int nr_to_call, int *nr_calls)
+64 {
+65     return notifier_call_chain(&amp;nh-&gt;head, val, v, nr_to_call, nr_calls);
+66 }
+67 EXPORT_SYMBOL_GPL(__raw_notifier_call_chain);
+68 
+69 int raw_notifier_call_chain(struct raw_notifier_head *nh,
+70         unsigned long val, void *v)
+71 {
+72     return __raw_notifier_call_chain(nh, val, v, -1, NULL);
+73 }
+74 EXPORT_SYMBOL_GPL(raw_notifier_call_chain);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h4>6.4 SRCU通知块</h4> 
+    <h5>6.4.1 登记</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    srcu_notifier_chain_register - Add notifier to an SRCU notifier chain
+ 3  *    @nh: Pointer to head of the SRCU notifier chain
+ 4  *    @n: New entry in notifier chain
+ 5  *
+ 6  *    Adds a notifier to an SRCU notifier chain.
+ 7  *    Must be called in process context.
+ 8  *
+ 9  *    Currently always returns zero.
+10  */
+11  /*必须在进程的上下文中调用, 和blocking通知类似*/
+12 int srcu_notifier_chain_register(struct srcu_notifier_head *nh,
+13         struct notifier_block *n)
+14 {
+15     int ret;
+16 
+17     /*
+18      * This code gets used during boot-up, when task switching is
+19      * not yet working and interrupts must remain disabled.  At
+20      * such times we must not call mutex_lock().
+21      */
+22     if (unlikely(system_state == SYSTEM_BOOTING))
+23         return notifier_chain_register(&amp;nh-&gt;head, n);
+24 
+25     mutex_lock(&amp;nh-&gt;mutex);
+26     ret = notifier_chain_register(&amp;nh-&gt;head, n);
+27     mutex_unlock(&amp;nh-&gt;mutex);
+28     return ret;
+29 }
+30 EXPORT_SYMBOL_GPL(srcu_notifier_chain_register);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h5>6.4.2 撤销</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    srcu_notifier_chain_unregister - Remove notifier from an SRCU notifier chain
+ 3  *    @nh: Pointer to head of the SRCU notifier chain
+ 4  *    @n: Entry to remove from notifier chain
+ 5  *
+ 6  *    Removes a notifier from an SRCU notifier chain.
+ 7  *    Must be called from process context.
+ 8  *
+ 9  *    Returns zero on success or %-ENOENT on failure.
+10  */
+11  /*必须在进程的上下文中调用, 和blocking通知类似*/
+12 int srcu_notifier_chain_unregister(struct srcu_notifier_head *nh,
+13         struct notifier_block *n)
+14 {
+15     int ret;
+16 
+17     /*
+18      * This code gets used during boot-up, when task switching is
+19      * not yet working and interrupts must remain disabled.  At
+20      * such times we must not call mutex_lock().
+21      */
+22     if (unlikely(system_state == SYSTEM_BOOTING))
+23         return notifier_chain_unregister(&amp;nh-&gt;head, n);
+24 
+25     mutex_lock(&amp;nh-&gt;mutex);
+26     ret = notifier_chain_unregister(&amp;nh-&gt;head, n);
+27     mutex_unlock(&amp;nh-&gt;mutex);
+28     synchronize_srcu(&amp;nh-&gt;srcu);
+29     return ret;
+30 }
+31 EXPORT_SYMBOL_GPL(srcu_notifier_chain_unregister);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h5>6.4.3 回调</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    __srcu_notifier_call_chain - Call functions in an SRCU notifier chain
+ 3  *    @nh: Pointer to head of the SRCU notifier chain
+ 4  *    @val: Value passed unmodified to notifier function
+ 5  *    @v: Pointer passed unmodified to notifier function
+ 6  *    @nr_to_call: See comment for notifier_call_chain.
+ 7  *    @nr_calls: See comment for notifier_call_chain
+ 8  *
+ 9  *    Calls each function in a notifier chain in turn.  The functions
+10  *    run in a process context, so they are allowed to block.
+11  *
+12  *    If the return value of the notifier can be and'ed
+13  *    with %NOTIFY_STOP_MASK then srcu_notifier_call_chain()
+14  *    will return immediately, with the return value of
+15  *    the notifier function which halted execution.
+16  *    Otherwise the return value is the return value
+17  *    of the last notifier function called.
+18  */
+19 int __srcu_notifier_call_chain(struct srcu_notifier_head *nh,
+20                    unsigned long val, void *v,
+21                    int nr_to_call, int *nr_calls)
+22 {
+23     int ret;
+24     int idx;
+25 
+26     idx = srcu_read_lock(&amp;nh-&gt;srcu);    /*使用srcu来加锁*/
+27     ret = notifier_call_chain(&amp;nh-&gt;head, val, v, nr_to_call, nr_calls);
+28     srcu_read_unlock(&amp;nh-&gt;srcu, idx);
+29     return ret;
+30 }
+31 EXPORT_SYMBOL_GPL(__srcu_notifier_call_chain);
+32 /*在进程的上下文中调用, 可以阻塞*/
+33 int srcu_notifier_call_chain(struct srcu_notifier_head *nh,
+34         unsigned long val, void *v)
+35 {
+36     return __srcu_notifier_call_chain(nh, val, v, -1, NULL);
+37 }
+38 EXPORT_SYMBOL_GPL(srcu_notifier_call_chain);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <h5>6.4.4 初始化</h5> 
+    <div class="cnblogs_code"> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+     <pre> 1 /**
+ 2  *    srcu_init_notifier_head - Initialize an SRCU notifier head
+ 3  *    @nh: Pointer to head of the srcu notifier chain
+ 4  *
+ 5  *    Unlike other sorts of notifier heads, SRCU notifier heads require
+ 6  *    dynamic initialization.  Be sure to call this routine before
+ 7  *    calling any of the other SRCU notifier routines for this head.
+ 8  *
+ 9  *    If an SRCU notifier head is deallocated, it must first be cleaned
+10  *    up by calling srcu_cleanup_notifier_head().  Otherwise the head's
+11  *    per-cpu data (used by the SRCU mechanism) will leak.
+12  */
+13  /*因为SRCU通知不能通过宏来初始化,必须要专门定义一个初始化函数来初始化srcu的通知块参数*/
+14 void srcu_init_notifier_head(struct srcu_notifier_head *nh)
+15 {
+16     mutex_init(&amp;nh-&gt;mutex);
+17     if (init_srcu_struct(&amp;nh-&gt;srcu) &lt; 0)
+18         BUG();
+19     nh-&gt;head = NULL;
+20 }
+21 EXPORT_SYMBOL_GPL(srcu_init_notifier_head);</pre> 
+     <div class="cnblogs_code_toolbar">
+      <span class="cnblogs_code_copy"><a title="复制代码"><img src="https://yqfile.alicdn.com/img_51e409b11aa51c150090697429a953ed.gif" alt="复制代码"></a></span>
+     </div> 
+    </div> 
+    <p>本文参考：</p> 
+    <p><a href="http://blog.csdn.net/tommy_wxie/article/details/7963926" rel="nofollow">http://blog.csdn.net/tommy_wxie/article/details/7963926</a></p> 
+    <p><a href="http://blog.sina.com.cn/s/blog_5426448c0100ntqb.html" rel="nofollow">http://blog.sina.com.cn/s/blog_5426448c0100ntqb.html</a></p> 
+    <p><a href="http://hi.baidu.com/yskcg/item/8947658d7cbdd8c0b07154a5" rel="nofollow">http://hi.baidu.com/yskcg/item/8947658d7cbdd8c0b07154a5</a></p> 
+    <p><a href="http://geyingzhen.blog.163.com/blog/static/6558665520091165531675/" rel="nofollow">http://geyingzhen.blog.163.com/blog/static/6558665520091165531675/</a></p> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

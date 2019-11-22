@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核中的GPIO系统之（3）：pin controller driver代码分析--devm_kzalloc使用【转】... « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.wowotech.net/linux_kenrel/pin-controller-driver.html    一、前言    对于一个嵌入式软件工程师，我们的软件模块经常和硬件打交道，pin control subsystem也不例外，被它驱动的硬件叫做pi...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/05/11/weixin_33743661_90132932.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核中的GPIO系统之（3）：pin controller driver代码分析--devm_kzalloc使用【转】...</h1>
+    <p class="post-meta">May 11, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.wowotech.net/linux_kenrel/pin-controller-driver.html" rel="nofollow">http://www.wowotech.net/linux_kenrel/pin-controller-driver.html</a></p> 
+   <p>一、前言</p> 
+   <p>对于一个嵌入式软件工程师，我们的软件模块经常和硬件打交道，pin control subsystem也不例外，被它驱动的硬件叫做pin controller（一般ARM soc的datasheet会把pin controller的内容放入GPIO controller的章节中），主要功能包括：</p> 
+   <p>（1）pin multiplexing。基于ARM core的嵌入式处理器一般会提供丰富的功能，例如camera interface、LCD interface、USB、I2C、SPI等等。虽然处理器有几百个pin，但是这些pin还是不够分配，因此有些pin需要复用。例如：127号GPIO可以做一个普通的GPIO控制LED，也可以配置成I2C的clock信号，也可以配置成SPI的data out信号。当然，这些功能不可能同时存在，因为硬件信号只有一个。</p> 
+   <p>（2）pin configuration。这些配置参数包括：pull-up/down电阻的设定， tri-state设定，drive-strength的设定。</p> 
+   <p>本文主要描述pin control subsystem中的low level driver，也就是驱动pin controller的driver。具体的硬件选用的是S3C2416的硬件平台。既然是代码分析，本文不是非常多的描述框架性的内容，关于整个pin control subsystem软件结构的描述请参考Linux内核中的GPIO系统之（2）。</p> 
+   <p>阅读本文需要device tree的知识，建议首先阅读<a href="http://www.wowotech.net/linux_kenrel/dt-code-analysis.html" rel="nofollow">device tree代码分析</a>。</p> 
+   <p>&nbsp;</p> 
+   <p>二、pin controller相关的DTS描述</p> 
+   <p>类似其他的硬件，pin controller这个HW block需要是device tree中的一个节点。此外，各个其他的HW block在驱动之前也需要先配置其引脚复用功能，因此，这些device（我们称pin controller是host，那么这些使用pin controller进行引脚配置的device叫做client device）也需要在它自己的device tree node中描述pin control的相关内容</p> 
+   <p>1、S3C2416 pin controller DTS结构</p> 
+   <p>下面的伪代码描述了S3C2416 pin controller 的DTS结构：</p> 
+   <blockquote> 
+    <p>pinctrl@56000000 {&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 定义S3C2416 pin controller自己的属性</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 定义属于S3C2416 pin controller的pin configurations</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>每个pin configuration都是pin controller的child node，描述了client device要使用到的一组pin的配置信息。具体如何定义pin configuration是和具体的pin controller相关的。</p> 
+   <p>在pin controller node中定义pin configuration其目的是为了让client device引用。所谓client device其实就是使用pin control subsystem提供服务的那些设备，例如串口设备。在使用之前，我们一般会在初始化代码中配置相关的引脚功能是串口功能。有了device tree，我们可以通过device tree来传递这样的信息。也就是说，各个device可以通过自己节点的属性来指向pin controller的某个child node，也就是pin configuration了。samsung 24xx系列SOC的pin controller的pin configurations包括两类，一类是定义pin bank，另外一类是定义功能复用配置。</p> 
+   <p>2、pin configuration定义</p> 
+   <p>我们举两个简单的例子（当然一个是pin bank，另外一个是定义功能复用配置）来理解pin configuration第一个例子是描述pin bank：</p> 
+   <blockquote> 
+    <p>pinctrl@56000000 {&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 定义S3C2416 pin controller自己的属性</p> 
+    <p>……</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; gpf {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; gpio-controller;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; #gpio-cells = &lt;0x2&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; interrupt-controller;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; #interrupt-cells = &lt;0x2&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; linux,phandle = &lt;0xc&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; phandle = &lt;0xc&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; };</p> 
+    <p>……</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>其实S3C2416 pin controller定义了gpa到gpm共计11个sub node，每个sub node是描述S3C2416 GPIO controller的各个bank信息。S3C2416有138个I/O 端口（或者叫做pin、finger、pad）这些端口分成了11个bank（这里没有用group这个术语，为了和pin group这个概念区分开，pin group的概念下面会具体描述）：</p> 
+   <blockquote>
+    Port A(GPA) : 25-output port&nbsp;
+    <br>Port B(GPB) : 9-input/output port&nbsp;
+    <br>Port C(GPC) : 16-input/output port&nbsp;
+    <br>Port D(GPD) : 16-input/output port&nbsp;
+    <br>Port E(GPE) : 16-input/output port&nbsp;
+    <br>Port F(GPF) : 8-input/output port&nbsp;
+    <br>Port G(GPG) : 8-input/output port&nbsp;
+    <br>Port H(GPH) : 15-input/output port&nbsp;
+    <br>Port K(GPK) : 16-input/output port&nbsp;
+    <br>Port L(GPL) : 7-input/output port&nbsp;
+    <br>Port M(GPM) : 2-input port
+   </blockquote> 
+   <p>之所以分成bank，主要是把特性相同的GPIO进行分组，方便控制。例如：这些bank中，只有GPF和GPG这两个bank上的引脚有中断功能，其他的都没有。interrupt-controller这个属性相信大家已经熟悉，就是说明该node是一个interrupt controller。gpio-controller类似，说明该device node是一个GPIO controller。#gpio-cells属性是一个GPIO controller的必须定义的属性，它描述了需要多少个cell来具体描述一个GPIO（这是和具体的GPIO controller相关的）。#interrupt-cells的概念类似，不再赘述。phandle（linux,phandle这个属性和phandle是一样的，只不过linux,phandle是old-style，多定义一个属性是为了兼容）定义了一个句柄，当其他的device node想要引用这个node的时候就可以使用该句柄。具体的例子参考下节client device的DTS的描述。</p> 
+   <p>另外一个例子是uart的pin configuration，代码如下：</p> 
+   <blockquote> 
+    <p>pinctrl@56000000 {&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 定义S3C2416 pin controller自己的属性</p> 
+    <p>……</p> 
+    <p>uart0-data {&nbsp;<br>&nbsp;&nbsp;&nbsp; samsung,pins = "gph-0", "gph-1";&nbsp;<br>&nbsp;&nbsp;&nbsp; samsung,pin-function = &lt;0x2&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp; linux,phandle = &lt;0x2&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp; phandle = &lt;0x2&gt;;&nbsp;<br>};</p> 
+    <p>uart0-fctl {&nbsp;<br>&nbsp;&nbsp;&nbsp; samsung,pins = "gph-8", "gph-9";&nbsp;<br>&nbsp;&nbsp;&nbsp; samsung,pin-function = &lt;0x2&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp; linux,phandle = &lt;0x3&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp; phandle = &lt;0x3&gt;;&nbsp;<br>};</p> 
+    <p>……</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>samsung,pins这个属性定义了一个pin configuration所涉及到的引脚定义。对于uart0-data这个node，该配置涉及了gph bank中的第一个和第二个GPIO pin。一旦选择了一个功能，那么samsung,pins定义的所有的引脚都需要做相应的功能设定，那么具体设定什么值呢？这就是samsung,pin-function定义的内容了。而具体设定哪个值则需要去查阅datasheet了。对于uart0-data，向gph bank中的第一个和第二个GPIO pin对应的配置寄存器中写入2就可以把这两个pin定义为uart功能。</p> 
+   <p>3.client device的DTS</p> 
+   <p>一个典型的device tree中的外设node定义如下：</p> 
+   <blockquote> 
+    <p>device-node-name {&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 定义该device自己的属性&nbsp;&nbsp;</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pinctrl-names = "sleep", "active";－－－－－－（1）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pinctrl-0 =&nbsp;&lt;pin-config-0-a&gt;;－－－－－－－－－－－－－－（2）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pinctrl-1 =&nbsp;&lt;pin-config-1-a pin-config-1-b&gt;;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp; };</p> 
+   </blockquote> 
+   <p>（1）pinctrl-names定义了一个state列表。那么什么是state呢？具体说应该是pin state，对于一个client device，它使用了一组pin，这一组pin应该同时处于某种状态，毕竟这些pin是属于一个具体的设备功能。state的定义和电源管理关系比较紧密，例如当设备active的时候，我们需要pin controller将相关的一组pin设定为具体的设备功能，而当设备进入sleep状态的时候，需要pin controller将相关的一组pin设定为普通GPIO，并精确的控制GPIO状态以便节省系统的功耗。state有两种，标识，一种就是pinctrl-names定义的字符串列表，另外一种就是ID。ID从0开始，依次加一。根据例子中的定义，state ID等于0（名字是active）的state对应pinctrl-0属性，state ID等于1（名字是idle）的state对应pinctrl-1属性。具体设备state的定义和各个设备相关，具体参考在自己的device bind。</p> 
+   <p>（2）pinctrl-x的定义。pinctrl-x是一个句柄（phandle）列表，每个句柄指向一个pin configuration。有时候，一个state对应多个pin configure。例如在active的时候，I2C功能有两种配置，一种是从pin ID{7,8}引出，另外一个是从pin ID{69,103}引出。</p> 
+   <p>我们选取samsung串口的dts定义如下：</p> 
+   <blockquote> 
+    <p>serial@50000000 {&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ……&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pinctrl-names = "default";&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pinctrl-0 = &lt;0x2 0x3&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp; };</p> 
+   </blockquote> 
+   <p>该serial device只定义了一个state就是default，对应pinctrl-0属性定义。pinctrl-0是一个句柄（phandle）列表，每个句柄指向一个pin configuration。0x2对应上节中的uart0-data节点，0x03对应uart0-fctl 节点，也就是说，这个串口有两种配置，一种是从gph bank中的第一个和第二个GPIO pin引出，另外一个是从gph bank中的第8个和第9个GPIO pin引出。</p> 
+   <p>&nbsp;</p> 
+   <p>三、 pin controller driver初始化</p> 
+   <p>1、注册pin control device</p> 
+   <p>旧的内核一般是在machine相关的代码中建立静态的platform device的数据结构，然后在machine初始化的时候，将静态定义的platform device注册到系统。不过在引入device tree之后，事情发生了变化。</p> 
+   <p>根据<a href="http://www.wowotech.net/linux_kenrel/dt-code-analysis.html" rel="nofollow">device tree代码分析</a>，我们知道，在系统初始化的时候，dts描述的device node会形成一个树状结构，在machine初始化的过程中，会scan device node的树状结构，将真正的硬件device node变成一个个的设备模型中的device结构（比如struct platform_device）并加入到系统中。我们看看具体2416描述pin controller的dts code，如下：</p> 
+   <blockquote> 
+    <p>pinctrl@56000000 {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reg = &lt;0x56000000 0x1000=""&gt;;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; compatible = "samsung,s3c2416-pinctrl";</p> 
+    <p>……省略wakeup的pin configuration</p> 
+    <p>……省略gpb～gpm这些pink bank的pin configuration</p> 
+    <p>……省略Pin groups的相关描述</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>reg属性描述pin controller硬件的地址信息，开始地址是0x56000000 ，地址长度是0x1000。compatible属性用来描述pin controller的programming model。该属性的值是string list，定义了一系列的modle（每个string是一个model）。这些字符串列表被操作系统用来选择用哪一个pin controller driver来驱动该设备，后面的代码会更详细的描述。 pin control subsystem要想进行控制，必须首先了解自己控制的对象，也就是说软件需要提供一个方法将各种硬件信息（total有多少可控的pin，有多少bank，pin的复用情况以及pin的配置情况）注册到pin control subsystem中，这也是pin controller driver的初始化的主要内容。这些信息当然可以通过定义静态的表格（参考linux/drivers/pinctrl目录下的pinctrl-u300.c文件，该文件定义了一个大数组u300_pads来描述每一个pin），也可以通过dts加上静态表格的方式（2416采用的方式）。</p> 
+   <p>2、注册pin controller driver</p> 
+   <p>当然，<a href="mailto:pinctrl@56000000" rel="nofollow">pinctrl@56000000</a>这个device node也会变成一个platform device加入系统。有了device，那么对应的platform driver是如何注册到系统中的呢？代码如下：</p> 
+   <blockquote> 
+    <p>static int __init samsung_pinctrl_drv_register(void)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp; ……</p> 
+    <p>&nbsp;&nbsp;&nbsp; return platform_driver_register(&amp;samsung_pinctrl_driver);&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>系统初始化的时候，该函数会执行，向系统注册了samsung_pinctrl_driver：</p> 
+   <blockquote> 
+    <p>static struct platform_driver samsung_pinctrl_driver = {&nbsp;<br>&nbsp;&nbsp;&nbsp; .probe&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = samsung_pinctrl_probe, －－－－该driver的初始化函数&nbsp;<br>&nbsp;&nbsp;&nbsp; .driver = {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .name&nbsp;&nbsp;&nbsp; = "samsung-pinctrl",&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .owner&nbsp;&nbsp;&nbsp; = THIS_MODULE,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .of_match_table = samsung_pinctrl_dt_match, －－－－匹配列表&nbsp;<br>&nbsp;&nbsp;&nbsp; },&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>&nbsp;</p> 
+   <p>3、probe过程（driver初始化过程）</p> 
+   <p>在linux kernel引入统一设备模型之后，bus、driver和device形成了设备模型中的铁三角。对于platform这种类型的bus，其铁三角数据是platform_bus_type（表示platform这种类型的bus）、struct platform_device（platform bus上的device）、struct platform_driver（platform bus上的driver）。统一设备模型大大降低了驱动工程师的工作量，驱动工程师只要将driver注册到系统即可，剩余的事情交给统一设备模型来完成。每次系统增加一个platform_driver，platform_bus_type都会启动scan过程，让新加入的driver扫描整个platform bus上的device的链表，看看是否有device让该driver驱动。同样的，每次系统增加一个platform_device，platform_bus_type也会启动scan过程，遍历整个platform bus上的driver的链表，看看是否有适合驱动该device的driver。具体匹配的代码是platform bus上的match函数，如下：</p> 
+   <blockquote> 
+    <p>static int platform_match(struct device *dev, struct device_driver *drv)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct platform_device *pdev = to_platform_device(dev);&nbsp;<br>&nbsp;&nbsp;&nbsp; struct platform_driver *pdrv = to_platform_driver(drv);</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* Attempt an OF style match first */&nbsp;<br>&nbsp;&nbsp;&nbsp; if (of_driver_match_device(dev, drv))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 1;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* Then try ACPI style match */&nbsp;<br>&nbsp;&nbsp;&nbsp; if (acpi_driver_match_device(dev, drv))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 1;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* Then try to match against the id table */&nbsp;<br>&nbsp;&nbsp;&nbsp; if (pdrv-&gt;id_table)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return platform_match_id(pdrv-&gt;id_table, pdev) != NULL;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* fall-back to driver name match */&nbsp;<br>&nbsp;&nbsp;&nbsp; return (strcmp(pdev-&gt;name, drv-&gt;name) == 0);&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>旧的的platform的匹配函数就是简单的比较device和driver的名字，多么简单，多么清晰，真是有点怀念过去单纯而美好的生活。当然，事情没有那么糟糕，我们这里只要关注OF style的匹配过程即可，思路很简单，解铃还需系铃人，把匹配过程推给device tree模块，代码如下：</p> 
+   <blockquote> 
+    <p>const struct of_device_id *of_match_device(const struct of_device_id *matches,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; const struct device *dev)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; if ((!matches) || (!dev-&gt;of_node))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return NULL;&nbsp;<br>&nbsp;&nbsp;&nbsp; return of_match_node(matches, dev-&gt;of_node);&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>platform driver提供了match table（struct device_driver 中的of_match_table的成员）。platform device提供了device tree node（struct device中的of_node成员）。对于我们这个场景，match table是samsung_pinctrl_dt_match，代码如下：</p> 
+   <blockquote> 
+    <p>static const struct of_device_id samsung_pinctrl_dt_match[] = {&nbsp;<br>……&nbsp;<br>&nbsp;&nbsp;&nbsp; { .compatible = "samsung,s3c2416-pinctrl",&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .data = s3c2416_pin_ctrl },&nbsp;<br>……&nbsp;<br>&nbsp;&nbsp;&nbsp; {},&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>再去看看dts中pin controller的节点compatible属性的定义，你会禁不住感慨：啊，终于遇到对的人。这里还要特别说明的是data成员被设定为s3c2416_pin_ctrl ，它描述了2416的HW pin controller，我们称之samsung pin controller的描述符，初始化的过程中需要这个数据结构，后面还会详细介绍它。一旦pin controller这个device遇到了适当的driver，就会调用probe函数进行具体的driver初始化的动作了，代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_pinctrl_probe(struct platform_device *pdev)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct device *dev = &amp;pdev-&gt;dev;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_ctrl *ctrl;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct resource *res;&nbsp;<br>&nbsp;&nbsp;&nbsp; int ret;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = devm_kzalloc(dev, sizeof(*drvdata), GFP_KERNEL); －－－－－－（1）</p> 
+    <p>&nbsp;&nbsp;&nbsp; ctrl = samsung_pinctrl_get_soc_data(drvdata, pdev); －－－－－－－－－－（2）&nbsp;<br>&nbsp;&nbsp;&nbsp; drvdata-&gt;ctrl = ctrl;&nbsp;<br>&nbsp;&nbsp;&nbsp; drvdata-&gt;dev = dev;</p> 
+    <p>&nbsp;&nbsp;&nbsp; res = platform_get_resource(pdev, IORESOURCE_MEM, 0); －－－－－分配memory资源&nbsp;<br>&nbsp;&nbsp;&nbsp; drvdata-&gt;virt_base = devm_ioremap_resource(&amp;pdev-&gt;dev, res);&nbsp;<br>&nbsp;&nbsp;&nbsp; if (IS_ERR(drvdata-&gt;virt_base))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return PTR_ERR(drvdata-&gt;virt_base);</p> 
+    <p>&nbsp;&nbsp;&nbsp; res = platform_get_resource(pdev, IORESOURCE_IRQ, 0); －－－－－－分配IRQ资源&nbsp;<br>&nbsp;&nbsp;&nbsp; if (res)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; drvdata-&gt;irq = res-&gt;start;</p> 
+    <p>&nbsp;&nbsp;&nbsp; ret = samsung_gpiolib_register(pdev, drvdata); －－－－－－－－－－－－－（3）</p> 
+    <p>&nbsp;&nbsp;&nbsp; ret = samsung_pinctrl_register(pdev, drvdata); －－－－－－－－－－－－－（4）</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (ctrl-&gt;eint_gpio_init) －－－－－－－－－－－－－－－－－－（5）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ctrl-&gt;eint_gpio_init(drvdata);&nbsp;<br>&nbsp;&nbsp;&nbsp; if (ctrl-&gt;eint_wkup_init)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ctrl-&gt;eint_wkup_init(drvdata);</p> 
+    <p>&nbsp;&nbsp;&nbsp; platform_set_drvdata(pdev, drvdata); －设定platform device的私有数据为samsung_pinctrl_drv_data</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* Add to the global list */&nbsp;<br>&nbsp;&nbsp;&nbsp; list_add_tail(&amp;drvdata-&gt;node, &amp;drvdata_list); －－挂入全局链表</p> 
+    <p>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>（1）devm_kzalloc函数是为struct samsung_pinctrl_drv_data数据结构分配内存。每当driver probe一个具体的device实例的时候，都需要建立一些私有的数据结构来保存该device的一些具体的硬件信息（本场景中，这个数据结构就是struct samsung_pinctrl_drv_data）。在过去，驱动工程师多半使用kmalloc或者kzalloc来分配内存，但这会带来一些潜在的问题。例如：在初始化过程中，有各种各样可能的失败情况，这时候就依靠driver工程师小心的撰写代码，释放之前分配的内存。当然，初始化过程中，除了memory，driver会为probe的device分配各种资源，例如IRQ 号，io memory map、DMA等等。当初始化需要管理这么多的资源分配和释放的时候，很多驱动程序都出现了资源管理的issue。而且，由于这些issue是异常路径上的issue，不是那么容易测试出来，更加重了解决这个issue的必要性。内核解决这个问题的模式（所谓解决一类问题的设计方法就叫做设计模式）是Devres，即device resource management软件模块。更细节的内容就不介绍了，其核心思想就是资源是设备的资源，那么资源的管理归于device，也就是说不需要driver过多的参与。当device和driver detach的时候，device会自动的释放其所有的资源。</p> 
+   <p>（2）分配了struct samsung_pinctrl_drv_data数据结构的内存，当然下一步就是初始化这个数据结构了。我们先看看2416的pin controller driver是如何定义该数据结构的：</p> 
+   <blockquote> 
+    <p>struct samsung_pinctrl_drv_data {&nbsp;<br>&nbsp;&nbsp;&nbsp; struct list_head&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; node;－－－－－－－－－多个pin controller的描述符可以形成链表&nbsp;<br>&nbsp;&nbsp;&nbsp; void __iomem&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *virt_base;－－－－－－－－－访问硬件寄存器的基地址&nbsp;<br>&nbsp;&nbsp;&nbsp; struct device&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *dev;－－－－－－－－－－－和platform device建立联系&nbsp;<br>&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq; －－－－－－－－irq number，对于2416 pin control硬件而言，不需要irq资源</p> 
+    <p>&nbsp;&nbsp;&nbsp; struct samsung_pin_ctrl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *ctrl;－－－－samsung pin controller描述符&nbsp;<br>&nbsp;&nbsp;&nbsp; struct pinctrl_desc&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pctl; －－－－－－指向pin control subsystem中core driver中抽象的</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin controller描述符。&nbsp;<br>&nbsp;&nbsp;&nbsp; struct pinctrl_dev&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *pctl_dev; －－－－－－指向core driver的pin controller class device</p> 
+    <p>&nbsp;&nbsp;&nbsp; const struct samsung_pin_group&nbsp;&nbsp;&nbsp; *pin_groups; －描述samsung pin controller中pin groups的信息&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nr_groups; －－－－－－－－描述samsung pin controller中pin groups的数目&nbsp;<br>&nbsp;&nbsp;&nbsp; const struct samsung_pmx_func&nbsp;&nbsp;&nbsp; *pmx_functions; －－描述samsung pin controller中function信息<br>&nbsp;&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nr_functions; －－－－－－－－描述samsung pin controller中function的数目&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>struct pinctrl_desc和struct pinctrl_dev 都是pin control subsystem中core driver的概念。各个具体硬件的pin controller可能会各不相同，但是可以抽取其共同的部分来形成一个HW independent的数据结构，这个数据就是pin controller描述符，在core driver中用struct pinctrl_desc表示，具体该数据结构的定义如下：</p> 
+   <blockquote> 
+    <p>struct pinctrl_desc {&nbsp;<br>&nbsp;&nbsp;&nbsp; const char *name;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct pinctrl_pin_desc const *pins;－－－指向npins个pin描述符，每个描述符描述一个pin&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int npins;－－－－－－－－－－－－该pin controller中有多少个可控的pin&nbsp;<br>&nbsp;&nbsp;&nbsp; const struct pinctrl_ops *pctlops;－－－－－－callback函数，是core driver和底层driver的接口&nbsp;<br>&nbsp;&nbsp;&nbsp; const struct pinmux_ops *pmxops;－－－－－callback函数，是core driver和底层driver的接口&nbsp;<br>&nbsp;&nbsp;&nbsp; const struct pinconf_ops *confops;－－－－－callback函数，是core driver和底层driver的接口&nbsp;<br>&nbsp;&nbsp;&nbsp; struct module *owner;&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>其实整个初始化过程的核心思想就是low level的driver定义一个pinctrl_desc ，设定pin相关的定义和callback函数，注册到pin control subsystem中。我们用引脚描述符（pin descriptor）来描述一个pin。在pin control subsystem中，struct pinctrl_pin_desc用来描述一个可以控制的引脚，我们称之引脚描述符，代码如下：</p> 
+   <blockquote> 
+    <p>struct pinctrl_pin_desc {&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned number;－－－－－－－ID，在本pin controller中唯一标识该引脚&nbsp;<br>&nbsp;&nbsp;&nbsp; const char *name;－－－－－－－user friedly name&nbsp;<br>&nbsp;&nbsp;&nbsp; void *drv_data;&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>冰冷的pin ID是给机器用的，而name是给用户使用的，是ascii字符。</p> 
+   <p>struct pinctrl_dev在pin control subsystem的core driver中抽象一个pin control device。其实我们可以通过多个层面来定义一个device。在这个场景下，pin control subsystem的core driver关注的是一类pin controller的硬件设备，具体其底层是什么硬件连接方式，使用什么硬件协议它不关心，它关心的是pin controller这类设备所有的通用特性和功能。当然2416的pin controller是通过platform bus连接的，因此，在low level的层面，需要一个platform device来标识2416的pin controller（需要注意的是：pin controller class device和platform device都是基于一个驱动模型中的device派生而来的，这里struct device是基类，struct pinctrl_dev和struct platform_device都是派生类，当然c本身不支持class，但面向对象的概念是同样的）。为了充分理解class这个概念，我们再举一个例子。对于audio的硬件抽象层，它应该管理所有的audio设备，因此这个软件模块应该有一个audio class的链表，连接了所有的系统中的audio设备。但这些具体的audio设备可能是PCI接口的audio设备，也可能是usb接口的audio设备，从具体的总线层面来看，也会有PCI或者USB设备来抽象对应的声卡设备。</p> 
+   <p>OK，我们再看看samsung_pinctrl_drv_data底部四个成员，要理解该数据结构底部的四个成员，还要理解什么是pin mux function，什么是pin group。对于SOC而言，其引脚除了配置成普通GPIO之外，若干个引脚还可以组成一个pin group，形成特定的功能。例如pin number是{ 0, 8, 16, 24 }这四个引脚组合形成一个pin group，提供SPI的功能。既然有了pin group的概念，为何又有function这个概念呢？什么是function呢？SPI是function，I2C也是一个function，当然GPIO也是一个function。一个function有可能对应一组或者多组pin。例如：为了设计灵活，芯片内部的SPI0的功能可能引出到pin group { A8, A7, A6, A5 }，也可能引出到另外一个pin group{ G4, G3, G2, G1 }，但毫无疑问，这两个pin group不能同时active，毕竟芯片内部的SPI0的逻辑功能电路只有一个。 从这个角度看，pin control subsystem要进行功能设定的时候必须要给出function以及function的pin group才能确定所有的物理pin的位置。</p> 
+   <p>我们前面已经说过了，struct samsung_pinctrl_drv_data数据结构就是2416的pin controller driver要驱动2416的HW pin controller的私有数据结构。这个数据结构中最重要的就是samsung pin controller描述符了。关于pin controller有两个描述符，一个是struct pinctrl_desc，是具体硬件无关的pin controller的描述符。struct samsung_pin_ctrl描述的具体samsung pin controller硬件相关的信息，比如说：pin bank的信息，不是所有的pin controller都是分bank的，因此pin bank的信息只能封装在low level的samsung pin controller driver中。这个数据结构定义如下：</p> 
+   <blockquote> 
+    <p>struct samsung_pin_ctrl {&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_bank&nbsp;&nbsp;&nbsp; *pin_banks;－－－－定义具体的pin bank信息&nbsp;<br>&nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nr_banks; －－－－－－－－－number of pin bank</p> 
+    <p>&nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; base;－－－－该pin controller的pin ID base。&nbsp;<br>&nbsp;&nbsp;&nbsp; u32&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nr_pins; －－－－－总的可以控制的pin的数目</p> 
+    <p>其他成员和本场景无关，和GPIO type的中断控制器驱动代码有关&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>关于上面的base可以多说两句。实际上，系统支持多个pin controller设备，这时候，系统要管理多个pin controller控制下的多个pin。每个pin有自己的pin ID，是唯一的，假设系统中有两个pin controller，一个是A，控制32个，另外一个是B，控制64个pin，我们可以统一编号，对A，pin ID从0～31，对于B，pin ID是从32～95。对于B，其pin base就是32。</p> 
+   <p>samsung_pinctrl_probe-&gt;samsung_pinctrl_get_soc_data函数中会根据device tree的信息和静态定义的table来初始化该描述符，具体的代码如下：</p> 
+   <blockquote> 
+    <p>static struct samsung_pin_ctrl *samsung_pinctrl_get_soc_data(&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *d,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct platform_device *pdev)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; int id;&nbsp;<br>&nbsp;&nbsp;&nbsp; const struct of_device_id *match;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct device_node *node = pdev-&gt;dev.of_node; －－－获取device tree中的device node指针&nbsp;<br>&nbsp;&nbsp;&nbsp; struct device_node *np;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_ctrl *ctrl;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_bank *bank;&nbsp;<br>&nbsp;&nbsp;&nbsp; int i;</p> 
+    <p>&nbsp;&nbsp;&nbsp; id = of_alias_get_id(node, "pinctrl");&nbsp;<br>&nbsp;&nbsp;&nbsp; match = of_match_node(samsung_pinctrl_dt_match, node);&nbsp;<br>&nbsp;&nbsp;&nbsp; ctrl = (struct samsung_pin_ctrl *)match-&gt;data + id; －－－－－－－－A</p> 
+    <p>&nbsp;&nbsp;&nbsp; bank = ctrl-&gt;pin_banks;&nbsp;<br>&nbsp;&nbsp;&nbsp; for (i = 0; i &lt; ctrl-&gt;nr_banks; ++i, ++bank) {－－－－－－－－－－－－B&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; spin_lock_init(&amp;bank-&gt;slock);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; bank-&gt;drvdata = d;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; bank-&gt;pin_base = ctrl-&gt;nr_pins; －－－ctrl-&gt;nr_pins初始的时候等于0，最后完成bank初始化后，</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 该值等于total的pin number。&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ctrl-&gt;nr_pins += bank-&gt;nr_pins;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>for_each_child_of_node(node, np) {&nbsp; －－－－－－－－－－－－－－－－C&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!of_find_property(np, "gpio-controller", NULL))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; continue;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; bank = ctrl-&gt;pin_banks;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for (i = 0; i &lt; ctrl-&gt;nr_banks; ++i, ++bank) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!strcmp(bank-&gt;name, np-&gt;name)) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; bank-&gt;of_node = np;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; break;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;</p> 
+    <p>ctrl-&gt;base = pin_base; －－－－－－－－－－－－－－－－－－－－－－D&nbsp;<br>&nbsp;&nbsp;&nbsp; pin_base += ctrl-&gt;nr_pins;</p> 
+    <p>&nbsp;&nbsp;&nbsp; return ctrl;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>samsung_pinctrl_get_soc_data这个函数名字基本反应了其功能，2416是samsung的一个具体的SOC型号，调用该函数可以返回一个表示2416 SOC的samsung pin controller的描述符。</p> 
+   <p>A：这段代码主要是获取具体的2416的HW pin controller的信息，该数据结构在上文中出现过（具体参考pin controller的device tree match table：samsung_pinctrl_dt_match），就是s3c2416_pin_ctrl这个变量。这个变量定义了2416的pin controller的信息（S3C2416的pin controller的pin bank信息是定义在pin controller driver的静态数据，其实最好在dts中定义）如下：</p> 
+   <blockquote> 
+    <p>struct samsung_pin_ctrl s3c2416_pin_ctrl[] = {&nbsp;<br>&nbsp;&nbsp;&nbsp; {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .pin_banks&nbsp;&nbsp;&nbsp; = s3c2416_pin_banks,－－－－－－静态定义的2416的pin bank的信息&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .nr_banks&nbsp;&nbsp;&nbsp; = ARRAY_SIZE(s3c2416_pin_banks),&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .eint_wkup_init = s3c24xx_eint_init,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .label&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = "S3C2416-GPIO",&nbsp;<br>&nbsp;&nbsp;&nbsp; },&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>这个变量中包含了2416的pin bank的信息，包括：有多少个pin bank，每个bank中有多少个pin，pin bank的名字是什么，寄存器的offset是多少。这些信息用来初始化pin controller描述符数据结构。</p> 
+   <p>B：初始化2416 samsung pin controller中各个bank的描述符。</p> 
+   <p>C：device tree中表示pin controller的device node有若干的child node，分别表示gpa～gpl这11个bank，每个bank都是一个gpio controller。下面的代码遍历各个child node，并初始化各个bank描述符中的device tree node成员。 这里需要注意的是静态定义的pin bank的名字要和dts文件中定义的pin bank node的名字一样。</p> 
+   <p>D：系统中有可能有多个pin controller，多个pin controller上的pin ID 应该是系统唯一的，ctrl-&gt;base表示本pin controller中的pin ID的起始值。</p> 
+   <p>（3）本来pin control subsystem和GPIO subsystem应该是无关的两个子系统，应该各自进行自己的初始化过程。但实际中，由于硬件的复杂性，这两个子系统耦合性非常高。这里samsung_gpiolib_register函数就是把各个bank代表的gpio chip注册到GPIO subsystem中。更具体的信息请参考GPIO subsystem软件框架文档。</p> 
+   <p>（4）samsung_pinctrl_register函数的主要功能是将本pin controller注册到pin control subsystem。代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_pinctrl_register(struct platform_device *pdev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct pinctrl_desc *ctrldesc = &amp;drvdata-&gt;pctl;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct pinctrl_pin_desc *pindesc, *pdesc;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_bank *pin_bank;&nbsp;<br>&nbsp;&nbsp;&nbsp; char *pin_names;&nbsp;<br>&nbsp;&nbsp;&nbsp; int pin, bank, ret;</p> 
+    <p>&nbsp;&nbsp;&nbsp; ctrldesc-&gt;name = "samsung-pinctrl";－－－－－－－－A&nbsp;<br>&nbsp;&nbsp;&nbsp; ctrldesc-&gt;owner = THIS_MODULE;&nbsp;<br>&nbsp;&nbsp;&nbsp; ctrldesc-&gt;pctlops = &amp;samsung_pctrl_ops; －－－call 函数，具体参考第四章的内容&nbsp;<br>&nbsp;&nbsp;&nbsp; ctrldesc-&gt;pmxops = &amp;samsung_pinmux_ops;&nbsp;<br>&nbsp;&nbsp;&nbsp; ctrldesc-&gt;confops = &amp;samsung_pinconf_ops;</p> 
+    <p>&nbsp;&nbsp;&nbsp; pindesc = devm_kzalloc(&amp;pdev-&gt;dev, sizeof(*pindesc) *－－－－－－－B&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; drvdata-&gt;ctrl-&gt;nr_pins, GFP_KERNEL);&nbsp;<br>&nbsp;&nbsp;&nbsp; ctrldesc-&gt;pins = pindesc;&nbsp;<br>&nbsp;&nbsp;&nbsp; ctrldesc-&gt;npins = drvdata-&gt;ctrl-&gt;nr_pins;&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp; for (pin = 0, pdesc = pindesc; pin &lt; ctrldesc-&gt;npins; pin++, pdesc++)－－－C&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pdesc-&gt;number = pin + drvdata-&gt;ctrl-&gt;base;</p> 
+    <p><br>&nbsp;&nbsp;&nbsp; pin_names = devm_kzalloc(&amp;pdev-&gt;dev, sizeof(char) * PIN_NAME_LENGTH *－－－B&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; drvdata-&gt;ctrl-&gt;nr_pins, GFP_KERNEL);</p> 
+    <p><br>&nbsp;&nbsp;&nbsp; for (bank = 0; bank &lt; drvdata-&gt;ctrl-&gt;nr_banks; bank++) { －－－－－－－－－C&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_bank = &amp;drvdata-&gt;ctrl-&gt;pin_banks[bank];&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; for (pin = 0; pin &lt; pin_bank-&gt;nr_pins; pin++) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sprintf(pin_names, "%s-%d", pin_bank-&gt;name, pin);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pdesc = pindesc + pin_bank-&gt;pin_base + pin;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pdesc-&gt;name = pin_names;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_names += PIN_NAME_LENGTH;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; ret = samsung_pinctrl_parse_dt(pdev, drvdata);－－－－－－D</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata-&gt;pctl_dev = pinctrl_register(ctrldesc, &amp;pdev-&gt;dev, drvdata);－－－E</p> 
+    <p>&nbsp;&nbsp;&nbsp; for (bank = 0; bank &lt; drvdata-&gt;ctrl-&gt;nr_banks; ++bank) {－－－－－F&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_bank = &amp;drvdata-&gt;ctrl-&gt;pin_banks[bank];&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_bank-&gt;grange.name = pin_bank-&gt;name;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_bank-&gt;grange.id = bank;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_bank-&gt;grange.pin_base = pin_bank-&gt;pin_base;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_bank-&gt;grange.base = pin_bank-&gt;gpio_chip.base;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_bank-&gt;grange.npins = pin_bank-&gt;gpio_chip.ngpio;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_bank-&gt;grange.gc = &amp;pin_bank-&gt;gpio_chip;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pinctrl_add_gpio_range(drvdata-&gt;pctl_dev, &amp;pin_bank-&gt;grange);&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>A：初始化硬件无关的pin controller描述符（struct samsung_pinctrl_drv_data中的pctl成员）。该数据结构中还包含了所有pin的描述符的信息，这些pin descriptor所需要的内存在步骤B中分配</p> 
+   <p>B：初始化过程中涉及不少内存分配，这些内存主要用于描述每一个pin（术语叫做pin descriptor）以及pin name。</p> 
+   <p>C：初始化每一个pin 描述符的名字和ID。对于samsung的pin描述符，其名字使用pin-bank name + pin ID的形式。 ID的分配是从该pin controller的pin base开始分配ID的，逐个加一。</p> 
+   <p>D：初始化pin group和function（具体内容在下节描述）</p> 
+   <p>E：调用pinctrl_register注册到pin control subsystem 。这是pin control subsystem的核心函数，可以参考GPIO系统之2的描述。</p> 
+   <p>F：在这里又不得不进行pin control subsystem和GPIO系统的耦合了。每个bank都是一个GPIO controller，但是pin bank使用的ID是pin control space中的ID，GPIO 子系统中使用的是GPIO space的ID，对于pin control subsystem而言，它需要建立这两个ID的映射关系。pinctrl_add_gpio_range就是起这个作用的。更具体的内容请参考pin control subsystem软件结构文档。 需要注意的是直接在pin controller driver中调用pinctrl_add_gpio_range是不推荐的，建议使用dts的方式在GPIO controller设备节点中描述。</p> 
+   <p>（5）这里的代码是向kernel中的中断子系统注册interrupt controller。对于2416，有两个bank有中断功能，gpf和gpg，本质上gpf和gpg就是两个interrupt controller，挂接在2416真正的那个interrupt contrller之下，形成树状结构。具体的代码就不分析了，请参考GPIO类型的中断控制器代码分析。</p> 
+   <p>&nbsp;</p> 
+   <p>4、pin control subsystem如何获取pin group的信息</p> 
+   <p>具体的代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_pinctrl_parse_dt(struct platform_device *pdev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct device *dev = &amp;pdev-&gt;dev;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct device_node *dev_np = dev-&gt;of_node;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct device_node *cfg_np;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_group *groups, *grp;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pmx_func *functions, *func;&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned *pin_list;&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned int npins, grp_cnt, func_idx = 0;&nbsp;<br>&nbsp;&nbsp;&nbsp; char *gname, *fname;&nbsp;<br>&nbsp;&nbsp;&nbsp; int ret;</p> 
+    <p>&nbsp;&nbsp;&nbsp; grp_cnt = of_get_child_count(dev_np); －－－－－－（1）</p> 
+    <p>&nbsp;&nbsp;&nbsp; groups = devm_kzalloc(dev, grp_cnt * sizeof(*groups), GFP_KERNEL); －－－－（2）&nbsp;<br>&nbsp;&nbsp;&nbsp; grp = groups;</p> 
+    <p>&nbsp;&nbsp;&nbsp; functions = devm_kzalloc(dev, grp_cnt * sizeof(*functions), GFP_KERNEL); －－－（2）&nbsp;<br>&nbsp;&nbsp;&nbsp; func = functions;</p> 
+    <p><br>&nbsp;&nbsp;&nbsp; for_each_child_of_node(dev_np, cfg_np) { －－－－遍历pin control的所有的child node&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; u32 function;&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!of_find_property(cfg_np, "samsung,pins", NULL)) －忽略掉那些没有samsung,pins属性的node&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; continue;</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = samsung_pinctrl_parse_dt_pins(pdev, cfg_np, －－－－－－－－（3）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;drvdata-&gt;pctl,&nbsp;&nbsp;&nbsp; &amp;pin_list, &amp;npins);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (ret)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return ret;</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* derive pin group name from the node name */&nbsp;&nbsp;<br>&nbsp; gname = devm_kzalloc(dev, strlen(cfg_np-&gt;name) + GSUFFIX_LEN, －分配pin group名字需要的内存<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GFP_KERNEL);</p> 
+    <p>&nbsp;&nbsp;&nbsp; sprintf(gname, "%s%s", cfg_np-&gt;name, GROUP_SUFFIX);－－添加“-grp”的后缀</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; grp-&gt;name = gname; －－－－－－－－－－－－－－－－（4）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; grp-&gt;pins = pin_list;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; grp-&gt;num_pins = npins;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; of_property_read_u32(cfg_np, "samsung,pin-function", &amp;function);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; grp-&gt;func = function;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; grp++;</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!of_find_property(cfg_np, "samsung,pin-function", NULL))&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; continue; －－－－忽略掉那些没有samsung,pin-function属性的node</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* derive function name from the node name */&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fname = devm_kzalloc(dev, strlen(cfg_np-&gt;name) + FSUFFIX_LEN,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GFP_KERNEL);&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sprintf(fname, "%s%s", cfg_np-&gt;name, FUNCTION_SUFFIX); －－－－－（5）</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; func-&gt;name = fname;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; func-&gt;groups = devm_kzalloc(dev, sizeof(char *), GFP_KERNEL); －－－－（6）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!func-&gt;groups) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dev_err(dev, "failed to alloc memory for group list "&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "in pin function");&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; func-&gt;groups[0] = gname;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; func-&gt;num_groups = 1;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; func++;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; func_idx++;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata-&gt;pin_groups = groups; －－－－最终，pin group和function的信息被copy到pin controller</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; driver的私有数据结构struct samsung_pinctrl_drv_data 中&nbsp;<br>&nbsp;&nbsp;&nbsp; drvdata-&gt;nr_groups = grp_cnt;&nbsp;<br>&nbsp;&nbsp;&nbsp; drvdata-&gt;pmx_functions = functions;&nbsp;<br>&nbsp;&nbsp;&nbsp; drvdata-&gt;nr_functions = func_idx;</p> 
+    <p>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>（1）pin controller的device node有若干个child node，每个child node都描述了一个pin configuration。of_get_child_count函数可以获取pin configuration的数目。</p> 
+   <p>（2）根据pin configuration的数目分配内存。在这里共计分配了两片内存，一片保存了所有pin group的信息（struct samsung_pin_group ），一片保存了pin mux function的信息（struct samsung_pmx_func）。实际上，分配pin configuration的数目的内存有些浪费，因为不是每一个pin control的child node都是和pin group相关（例如pin bank node就是和pin group无关）。对于function，就更浪费了，因为有可能多个pin group对应一个function。</p> 
+   <p>（3）samsung_pinctrl_parse_dt_pins函数主要分析samsung,pins这个属性，并根据属性值返回一个pin list，该list中每个entry是一个pin ID。</p> 
+   <p>（4）初始化samsung pin group的描述符。具体的数据结构解释如下：</p> 
+   <blockquote> 
+    <p>struct samsung_pin_group {&nbsp;<br>&nbsp;&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *name;－－－－－－－－－pin group的名字，名字是device tree node name＋-grp&nbsp;<br>&nbsp;&nbsp;&nbsp; const unsigned int&nbsp;&nbsp;&nbsp; *pins;－－－－－－－pin list的信息&nbsp;<br>&nbsp;&nbsp;&nbsp; u8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; num_pins;－－－－－－－－－－pin list中的数目&nbsp;<br>&nbsp;&nbsp;&nbsp; u8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; func;－－－－－－－－－－－－对应samsung,pin-function属性的值，用来配置pin list中各个pin的功能设定寄存器&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>（5）一个pin configuration的device tree node被解析成两个描述符，一个是samsung pin group的描述符，另外一个是samsung pin mux function描述符。这两个描述符的名字都是根据dts file中的pin configuration的device node name生成，只不过pin group的名字附加-grp的后缀，而function描述符的名字后面附加-mux的后缀。</p> 
+   <p>（6）对于samsung pin mux function描述符解释如下：</p> 
+   <blockquote> 
+    <p>struct samsung_pmx_func {&nbsp;<br>&nbsp;&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *name;－－－－－－pin function的名字，名字是device tree node name＋-mux</p> 
+    <p>&nbsp;&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **groups;－－－－－指向pin groups的指针数组&nbsp;<br>&nbsp;&nbsp;&nbsp; u8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; num_groups;－－－－－－属于该function的pin group的个数&nbsp;<br>};</p> 
+   </blockquote> 
+   <p>在具体的代码实现中num_groups总是等于1。</p> 
+   <p>&nbsp;</p> 
+   <p>四、S3C2416 pin controller driver的操作函数</p> 
+   <p>1、操作函数概述</p> 
+   <p>pin controller描述符中包括了三类操作函数：pctlops是一些全局的控制函数，pmxops是复用引脚相关的操作函数，confops操作函数是用来配置引脚的特性（例如：pull-up/down）。这些callback函数都是和具体的底层pin controller的操作相关。</p> 
+   <p>本章节主要描述这些call back函数的逻辑，这些callback的调用时机不会在这里描述，那些内容请参考pin control subsystem的描述。</p> 
+   <p>2、struct pinctrl_ops中各个callback函数的具体的解释如下：</p> 
+   <p>（1）samsung_get_group_count</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_get_group_count(struct pinctrl_dev *pctldev)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);&nbsp;<br>&nbsp;&nbsp;&nbsp; return drvdata-&gt;nr_groups;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>该函数主要是用来获取指定pin control device的pin group的数目。逻辑很简单，通过pin control的class device的driver_data成员可以获得samsung pin control driver的私有数据（struct samsung_pinctrl_drv_data），可以nr_groups成员返回group的数目。</p> 
+   <p>（2）samsung_get_group_name</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static const char *samsung_get_group_name(struct pinctrl_dev *pctldev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned selector)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);&nbsp;<br>&nbsp;&nbsp;&nbsp; return drvdata-&gt;pin_groups[selector].name;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>该函数主要用来获取指定group selector的pin group信息。</p> 
+   <p>（3）samsung_get_group_pins</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_get_group_pins(struct pinctrl_dev *pctldev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned selector, const unsigned **pins, unsigned *num_pins)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);&nbsp;<br>&nbsp;&nbsp;&nbsp; *pins = drvdata-&gt;pin_groups[selector].pins;&nbsp;<br>&nbsp;&nbsp;&nbsp; *num_pins = drvdata-&gt;pin_groups[selector].num_pins;&nbsp;<br>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>该函数的主要功能是给定一个group selector（index），获取该pin group中pin的信息（该pin group包括多少个pin，每个pin的ID是什么） 。</p> 
+   <p>（4）samsung_dt_node_to_map</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_dt_node_to_map(struct pinctrl_dev *pctldev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct device_node *np, struct pinctrl_map **maps,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned *nmaps)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct device *dev = pctldev-&gt;dev;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct pinctrl_map *map;&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long *cfg = NULL;&nbsp;<br>&nbsp;&nbsp;&nbsp; char *gname, *fname;&nbsp;<br>&nbsp;&nbsp;&nbsp; int cfg_cnt = 0, map_cnt = 0, idx = 0;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* count the number of config options specfied in the node */&nbsp;<br>&nbsp;&nbsp;&nbsp; for (idx = 0; idx &lt; ARRAY_SIZE(pcfgs); idx++) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (of_find_property(np, pcfgs[idx].prop_cfg, NULL))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cfg_cnt++;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; /*&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; * Find out the number of map entries to create. All the config options&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; * can be accomadated into a single config map entry.&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; */&nbsp;<br>&nbsp;&nbsp;&nbsp; if (cfg_cnt)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; map_cnt = 1;&nbsp;<br>&nbsp;&nbsp;&nbsp; if (of_find_property(np, "samsung,pin-function", NULL))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; map_cnt++;&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!map_cnt) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dev_err(dev, "node %s does not have either config or function "&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "configurations\n", np-&gt;name);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* Allocate memory for pin-map entries */&nbsp;<br>&nbsp;&nbsp;&nbsp; map = kzalloc(sizeof(*map) * map_cnt, GFP_KERNEL);&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!map) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dev_err(dev, "could not alloc memory for pin-maps\n");&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -ENOMEM;&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp; *nmaps = 0;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /*&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; * Allocate memory for pin group name. The pin group name is derived&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; * from the node name from which these map entries are be created.&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; */&nbsp;<br>&nbsp;&nbsp;&nbsp; gname = kzalloc(strlen(np-&gt;name) + GSUFFIX_LEN, GFP_KERNEL);&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!gname) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dev_err(dev, "failed to alloc memory for group name\n");&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto free_map;&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp; sprintf(gname, "%s%s", np-&gt;name, GROUP_SUFFIX);</p> 
+    <p>&nbsp;&nbsp;&nbsp; /*&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; * don't have config options? then skip over to creating function&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; * map entries.&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; */&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!cfg_cnt)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto skip_cfgs;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* Allocate memory for config entries */&nbsp;<br>&nbsp;&nbsp;&nbsp; cfg = kzalloc(sizeof(*cfg) * cfg_cnt, GFP_KERNEL);&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!cfg) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dev_err(dev, "failed to alloc memory for configs\n");&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto free_gname;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* Prepare a list of config settings */&nbsp;<br>&nbsp;&nbsp;&nbsp; for (idx = 0, cfg_cnt = 0; idx &lt; ARRAY_SIZE(pcfgs); idx++) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; u32 value;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!of_property_read_u32(np, pcfgs[idx].prop_cfg, &amp;value))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cfg[cfg_cnt++] =&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PINCFG_PACK(pcfgs[idx].cfg_type, value);&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* create the config map entry */&nbsp;<br>&nbsp;&nbsp;&nbsp; map[*nmaps].data.configs.group_or_pin = gname;&nbsp;<br>&nbsp;&nbsp;&nbsp; map[*nmaps].data.configs.configs = cfg;&nbsp;<br>&nbsp;&nbsp;&nbsp; map[*nmaps].data.configs.num_configs = cfg_cnt;&nbsp;<br>&nbsp;&nbsp;&nbsp; map[*nmaps].type = PIN_MAP_TYPE_CONFIGS_GROUP;&nbsp;<br>&nbsp;&nbsp;&nbsp; *nmaps += 1;</p> 
+    <p>skip_cfgs:&nbsp;<br>&nbsp;&nbsp;&nbsp; /* create the function map entry */&nbsp;<br>&nbsp;&nbsp;&nbsp; if (of_find_property(np, "samsung,pin-function", NULL)) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; fname = kzalloc(strlen(np-&gt;name) + FSUFFIX_LEN,&nbsp;&nbsp;&nbsp; GFP_KERNEL);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!fname) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dev_err(dev, "failed to alloc memory for func name\n");&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto free_cfg;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sprintf(fname, "%s%s", np-&gt;name, FUNCTION_SUFFIX);</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; map[*nmaps].data.mux.group = gname;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; map[*nmaps].data.mux.function = fname;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; map[*nmaps].type = PIN_MAP_TYPE_MUX_GROUP;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *nmaps += 1;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; *maps = map;&nbsp;<br>&nbsp;&nbsp;&nbsp; return 0;</p> 
+    <p>free_cfg:&nbsp;<br>&nbsp;&nbsp;&nbsp; kfree(cfg);&nbsp;<br>free_gname:&nbsp;<br>&nbsp;&nbsp;&nbsp; kfree(gname);&nbsp;<br>free_map:&nbsp;<br>&nbsp;&nbsp;&nbsp; kfree(map);&nbsp;<br>&nbsp;&nbsp;&nbsp; return -ENOMEM;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>具体分析TODO</p> 
+   <p>（5）samsung_dt_free_map</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static void samsung_dt_free_map(struct pinctrl_dev *pctldev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct pinctrl_map *map, unsigned num_maps)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; int idx;</p> 
+    <p>&nbsp;&nbsp;&nbsp; for (idx = 0; idx &lt; num_maps; idx++) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (map[idx].type == PIN_MAP_TYPE_MUX_GROUP) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; kfree(map[idx].data.mux.function);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!idx)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; kfree(map[idx].data.mux.group);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; } else if (map-&gt;type == PIN_MAP_TYPE_CONFIGS_GROUP) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; kfree(map[idx].data.configs.configs);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!idx)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; kfree(map[idx].data.configs.group_or_pin);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp; };</p> 
+    <p>&nbsp;&nbsp;&nbsp; kfree(map);&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>具体分析TODO</p> 
+   <p>3、复用引脚相关的操作函数struct pinmux_ops的具体解释如下：</p> 
+   <p>（1）samsung_get_functions_count</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_get_functions_count(struct pinctrl_dev *pctldev)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);&nbsp;<br>&nbsp;&nbsp;&nbsp; return drvdata-&gt;nr_functions;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>该函数的主要功能是就是返回pin controller device支持的function的数目</p> 
+   <p><br>（2）samsung_pinmux_get_fname</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static const char *samsung_pinmux_get_fname(struct pinctrl_dev *pctldev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned selector)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);&nbsp;<br>&nbsp;&nbsp;&nbsp; return drvdata-&gt;pmx_functions[selector].name;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>该函数的主要功能是就是：给定一个function selector（index），获取指定function的name&nbsp;&nbsp;<br>&nbsp;&nbsp;<br>（3）samsung_pinmux_get_groups</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_pinmux_get_groups(struct pinctrl_dev *pctldev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned selector, const char * const **groups,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned * const num_groups)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);&nbsp;<br>&nbsp;&nbsp;&nbsp; *groups = drvdata-&gt;pmx_functions[selector].groups;&nbsp;<br>&nbsp;&nbsp;&nbsp; *num_groups = drvdata-&gt;pmx_functions[selector].num_groups;&nbsp;<br>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>该函数的主要功能是就是：给定一个function selector（index），获取指定function的pin groups信息&nbsp;<br>&nbsp;&nbsp;<br>（4）samsung_pinmux_enable和samsung_pinmux_disable</p> 
+   <p>这个两个callback函数都是通过samsung_pinmux_setup实现，该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static void samsung_pinmux_setup(struct pinctrl_dev *pctldev, unsigned selector,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned group, bool enable)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;&nbsp;<br>&nbsp;&nbsp;&nbsp; const unsigned int *pins;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_bank *bank;&nbsp;<br>&nbsp;&nbsp;&nbsp; void __iomem *reg;&nbsp;<br>&nbsp;&nbsp;&nbsp; u32 mask, shift, data, pin_offset, cnt;&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long flags;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);&nbsp;<br>&nbsp;&nbsp;&nbsp; pins = drvdata-&gt;pin_groups[group].pins;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /*&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; * for each pin in the pin group selected, program the correspoding pin&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; * pin function number in the config register.&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp; */&nbsp;<br>&nbsp;&nbsp;&nbsp; for (cnt = 0; cnt &lt; drvdata-&gt;pin_groups[group].num_pins; cnt++) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct samsung_pin_bank_type *type;</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pin_to_reg_bank(drvdata, pins[cnt] - drvdata-&gt;ctrl-&gt;base,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ®, &amp;pin_offset, &amp;bank);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type = bank-&gt;type;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mask = (1 &lt;&lt; type-&gt;fld_width[PINCFG_TYPE_FUNC]) - 1;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shift = pin_offset * type-&gt;fld_width[PINCFG_TYPE_FUNC];&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (shift &gt;= 32) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Some banks have two config registers */&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shift -= 32;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reg += 4;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; spin_lock_irqsave(&amp;bank-&gt;slock, flags);</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data = readl(reg + type-&gt;reg_offset[PINCFG_TYPE_FUNC]);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data &amp;= ~(mask &lt;&lt; shift);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (enable)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data |= drvdata-&gt;pin_groups[group].func &lt;&lt; shift;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; writel(data, reg + type-&gt;reg_offset[PINCFG_TYPE_FUNC]);</p> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; spin_unlock_irqrestore(&amp;bank-&gt;slock, flags);&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>该函数主要用来enable一个指定function。具体指定function的时候要给出function selector和pin group的selector 。具体的操作涉及很多底层的寄存器操作（TODO）。&nbsp;<br>&nbsp;&nbsp;<br>&nbsp;&nbsp;<br>（5）samsung_pinmux_gpio_set_direction</p> 
+   <p>该函数的代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_pinmux_gpio_set_direction(struct pinctrl_dev *pctldev,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct pinctrl_gpio_range *range, unsigned offset, bool input)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_bank_type *type;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_bank *bank;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;&nbsp;<br>&nbsp;&nbsp;&nbsp; void __iomem *reg;&nbsp;<br>&nbsp;&nbsp;&nbsp; u32 data, pin_offset, mask, shift;&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long flags;</p> 
+    <p>&nbsp;&nbsp;&nbsp; bank = gc_to_pin_bank(range-&gt;gc);&nbsp;<br>&nbsp;&nbsp;&nbsp; type = bank-&gt;type;&nbsp;<br>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);</p> 
+    <p>&nbsp;&nbsp;&nbsp; pin_offset = offset - bank-&gt;pin_base;&nbsp;<br>&nbsp;&nbsp;&nbsp; reg = drvdata-&gt;virt_base + bank-&gt;pctl_offset +&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; type-&gt;reg_offset[PINCFG_TYPE_FUNC];</p> 
+    <p>&nbsp;&nbsp;&nbsp; mask = (1 &lt;&lt; type-&gt;fld_width[PINCFG_TYPE_FUNC]) - 1;&nbsp;<br>&nbsp;&nbsp;&nbsp; shift = pin_offset * type-&gt;fld_width[PINCFG_TYPE_FUNC];&nbsp;<br>&nbsp;&nbsp;&nbsp; if (shift &gt;= 32) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Some banks have two config registers */&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shift -= 32;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reg += 4;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; spin_lock_irqsave(&amp;bank-&gt;slock, flags);</p> 
+    <p>&nbsp;&nbsp;&nbsp; data = readl(reg);&nbsp;<br>&nbsp;&nbsp;&nbsp; data &amp;= ~(mask &lt;&lt; shift);&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!input)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data |= FUNC_OUTPUT &lt;&lt; shift;&nbsp;<br>&nbsp;&nbsp;&nbsp; writel(data, reg);</p> 
+    <p>&nbsp;&nbsp;&nbsp; spin_unlock_irqrestore(&amp;bank-&gt;slock, flags);</p> 
+    <p>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>该函数用来设定GPIO的方向。&nbsp;<br>&nbsp;</p> 
+   <p>4、配置引脚的特性的struct pinconf_ops数据结构的各个成员定义如下：</p> 
+   <p>（1）samsung_pinconf_get&nbsp;<br>（2）samsung_pinconf_set&nbsp;<br>（3）samsung_pinconf_group_get&nbsp;<br>（4）samsung_pinconf_group_set</p> 
+   <p>（1）和（2）是对单个pin的配置进行读取或者设定，（3）和（4）是对pin group中的所有pin进行配置进行读取或者设定。这些函数的底层都是samsung_pinconf_rw，该函数代码如下：</p> 
+   <blockquote> 
+    <p>static int samsung_pinconf_rw(struct pinctrl_dev *pctldev, unsigned int pin,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned long *config, bool set)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pinctrl_drv_data *drvdata;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_bank_type *type;&nbsp;<br>&nbsp;&nbsp;&nbsp; struct samsung_pin_bank *bank;&nbsp;<br>&nbsp;&nbsp;&nbsp; void __iomem *reg_base;&nbsp;<br>&nbsp;&nbsp;&nbsp; enum pincfg_type cfg_type = PINCFG_UNPACK_TYPE(*config);&nbsp;<br>&nbsp;&nbsp;&nbsp; u32 data, width, pin_offset, mask, shift;&nbsp;<br>&nbsp;&nbsp;&nbsp; u32 cfg_value, cfg_reg;&nbsp;<br>&nbsp;&nbsp;&nbsp; unsigned long flags;</p> 
+    <p>&nbsp;&nbsp;&nbsp; drvdata = pinctrl_dev_get_drvdata(pctldev);&nbsp;<br>&nbsp;&nbsp;&nbsp; pin_to_reg_bank(drvdata, pin - drvdata-&gt;ctrl-&gt;base, ®_base,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;pin_offset, &amp;bank);&nbsp;<br>&nbsp;&nbsp;&nbsp; type = bank-&gt;type;</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (cfg_type &gt;= PINCFG_TYPE_NUM || !type-&gt;fld_width[cfg_type])&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;</p> 
+    <p>&nbsp;&nbsp;&nbsp; width = type-&gt;fld_width[cfg_type];&nbsp;<br>&nbsp;&nbsp;&nbsp; cfg_reg = type-&gt;reg_offset[cfg_type];</p> 
+    <p>&nbsp;&nbsp;&nbsp; spin_lock_irqsave(&amp;bank-&gt;slock, flags);</p> 
+    <p>&nbsp;&nbsp;&nbsp; mask = (1 &lt;&lt; width) - 1;&nbsp;<br>&nbsp;&nbsp;&nbsp; shift = pin_offset * width;&nbsp;<br>&nbsp;&nbsp;&nbsp; data = readl(reg_base + cfg_reg);</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (set) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cfg_value = PINCFG_UNPACK_VALUE(*config);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data &amp;= ~(mask &lt;&lt; shift);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data |= (cfg_value &lt;&lt; shift);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; writel(data, reg_base + cfg_reg);&nbsp;<br>&nbsp;&nbsp;&nbsp; } else {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data &gt;&gt;= shift;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; data &amp;= mask;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *config = PINCFG_PACK(cfg_type, data);&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; spin_unlock_irqrestore(&amp;bank-&gt;slock, flags);</p> 
+    <p>&nbsp;&nbsp;&nbsp; return 0;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>具体分析TODO</p> 
+   <p>&nbsp;</p> 
+   <p><em>原创文章，转发请注明出处。蜗窝科技</em>。<a href="http://www.wowotech.net/linux_kenrel/pin-controller-driver.html" rel="nofollow">http://www.wowotech.net/linux_kenrel/pin-controller-driver.html</a></p> 
+   <p>标签: <a href="http://www.wowotech.net/tag/driver" rel="nofollow">driver</a> <a href="http://www.wowotech.net/tag/pin" rel="nofollow">pin</a> <a href="http://www.wowotech.net/tag/controller" rel="nofollow">controller</a></p> 
+   <div class="nextlog">
+    «&nbsp;
+    <a href="http://www.wowotech.net/gpio_subsystem/pin-control-subsystem.html" rel="nofollow">linux内核中的GPIO系统之（2）：pin control subsystem</a>&nbsp;|&nbsp;
+    <a href="http://www.wowotech.net/gpio_subsystem/io-port-control.html" rel="nofollow">linux内核中的GPIO系统之（1）：软件框架</a>»
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

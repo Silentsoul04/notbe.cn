@@ -1,0 +1,1497 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核中内存cache的实现【转】 « NotBeCN</title>
+  <meta name="description" content="                 Linux内核中内存cache的实现           转自：http://blog.chinaunix.net/uid-127037-id-2919545.html           &nbsp;           本文档的Copyleft归yfydz所有，使用GPL发布...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/04/14/weixin_34378922_90130438.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核中内存cache的实现【转】</h1>
+    <p class="post-meta">Apr 14, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div>
+    <span style="font-family:'隶书';font-size:x-large;">Linux内核中内存cache的实现</span>
+   </div> 
+   <div style="text-align:left;">
+    <span style="font-family:'隶书';font-size:15px;">转自：<a href="http://blog.chinaunix.net/uid-127037-id-2919545.html" rel="nofollow">http://blog.chinaunix.net/uid-127037-id-2919545.html</a></span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    本文档的Copyleft归yfydz所有，使用GPL发布，可以自由拷贝，转载，转载时请保持文档的完整性，
+   </div> 
+   <div>
+    严禁用于任何商业用途。
+    <br>msn:&nbsp;
+    <a href="mailto:yfydz_no1@hotmail.com" rel="nofollow">yfydz_no1@hotmail.com</a>
+    <br>来源：
+    <a href="http://yfydz.cublog.cn/" rel="nofollow">http://yfydz.cublog.cn</a> 
+   </div> 
+   <div> 
+    <br>1. 前言
+   </div> 
+   <div> 
+    <br>kmem_cache是Linux内核提供的快速内存缓冲接口，这些内存块要求是大小相同的，因为分配出的内
+   </div> 
+   <div>
+    存在接口释放时并不真正释放，而是作为缓存保留，下一次请求分配时就可以直接使用，省去了各种
+   </div> 
+   <div>
+    内存块初始化或释放的操作，因此分配速度很快，通常用于大数量的内存块分配的情况，如inode节
+   </div> 
+   <div>
+    点，skbuff头, netfilter的连接等，其实kmalloc也是从kmem_cache中分配的，可通
+   </div> 
+   <div>
+    过/proc/slabinfo文件直接读取cache分配情况。
+   </div> 
+   <div>
+    以下Linux内核代码版本为2.6.19.2, 程序主要出自mm/slab.c文件, 2.4和2.6基本原理差不多,但具
+   </div> 
+   <div>
+    体实现中有了不少变化。
+   </div> 
+   <div> 
+    <br>2. slab和page
+   </div> 
+   <div> 
+    <br>在介绍kmem_cache之前需要先介绍page和slab这两个定义。众所周知，page是内核中内存基本管理单
+   </div> 
+   <div>
+    位，每个page的内存大小是固定的，对X86机器来说，是4K；slab则是kmem_cache的具体的内存空间
+   </div> 
+   <div>
+    形式，根据cache的对象的大小，每个slab可以有1个page到最多32(128/4)个page；如果cache对象比
+   </div> 
+   <div>
+    一个page的空间小，这个slab中会容纳多个对象以尽可能地利用空间。
+   </div> 
+   <div>
+    struct slab {
+    <br>// 链表
+    <br>&nbsp;struct list_head list;
+    <br>// 未用空间的偏移
+    <br>&nbsp;unsigned long colouroff;
+    <br>// 具体的内存缓冲区地址
+    <br>&nbsp;void *s_mem;&nbsp;&nbsp;/* including colour offset */
+    <br>// 每个slab中的正在使用的对象数量
+    <br>&nbsp;unsigned int inuse;&nbsp;/* num of objs active in slab */
+    <br>// 空闲对象
+    <br>&nbsp;kmem_bufctl_t free;
+    <br>&nbsp;unsigned short nodeid;
+    <br>};
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    3. 数据结构
+   </div> 
+   <div> 
+    <br>kmem_cache数据结构并没有定义在.h的头文件中，在头文件中只是该结构的一个类型定义，因为其他
+   </div> 
+   <div>
+    地方使用kmem_cache时完全不需要知道其内部结构，各接口函数完全封装结构中的信息，这是用C实
+   </div> 
+   <div>
+    现OO编程的常用方式。
+   </div> 
+   <div> 
+    <br>/* include/linux/slab.h */
+    <br>// 这里只是一个类型定义
+    <br>typedef struct kmem_cache kmem_cache_t;
+   </div> 
+   <div> 
+    <br>/* mm/slab.c */
+    <br>// 在C文件中进行完整的定义
+   </div> 
+   <div> 
+    <br>/*
+    <br>&nbsp;* struct array_cache
+    <br>&nbsp;*
+    <br>&nbsp;* Purpose:
+    <br>&nbsp;* - LIFO ordering, to hand out cache-warm objects from _alloc
+    <br>&nbsp;* - reduce the number of linked list operations
+    <br>&nbsp;* - reduce spinlock operations
+    <br>&nbsp;*
+    <br>&nbsp;* The limit is stored in the per-cpu structure to reduce the data cache
+    <br>&nbsp;* footprint.
+    <br>&nbsp;*
+    <br>&nbsp;*/
+    <br>// 这是每个CPU对应的cache数据
+    <br>struct array_cache {
+    <br>&nbsp;unsigned int avail;
+    <br>&nbsp;unsigned int limit;
+    <br>&nbsp;unsigned int batchcount;
+    <br>&nbsp;unsigned int touched;
+    <br>&nbsp;spinlock_t lock;
+    <br>&nbsp;void *entry[0];&nbsp;/*
+    <br>&nbsp;&nbsp;&nbsp; * Must have this definition in here for the proper
+    <br>&nbsp;&nbsp;&nbsp; * alignment of array_cache. Also simplifies accessing
+    <br>&nbsp;&nbsp;&nbsp; * the entries.
+    <br>&nbsp;&nbsp;&nbsp; * [0] is for gcc 2.95. It should really be [].
+    <br>&nbsp;&nbsp;&nbsp; */
+    <br>};
+   </div> 
+   <div> 
+    <br>/*
+    <br>&nbsp;* The slab lists for all objects.
+    <br>&nbsp;*/
+    <br>// 这是cache管理的slab的链表
+    <br>struct kmem_list3 {
+    <br>// 该链表中slab中既有正在使用的对象,也有空闲对象
+    <br>&nbsp;struct list_head slabs_partial;&nbsp;/* partial list first, better asm code */
+    <br>// 该链表中slab的对象都在使用中
+    <br>&nbsp;struct list_head slabs_full;
+    <br>// 该链表中slab的对象都是空闲的
+    <br>&nbsp;struct list_head slabs_free;
+    <br>// 空闲的对象数
+    <br>&nbsp;unsigned long free_objects;
+    <br>// 空闲的限值,超过就该释放掉一些了
+    <br>&nbsp;unsigned int free_limit;
+    <br>&nbsp;unsigned int colour_next;&nbsp;/* Per-node cache coloring */
+    <br>&nbsp;spinlock_t list_lock;
+    <br>&nbsp;struct array_cache *shared;&nbsp;/* shared per node */
+    <br>&nbsp;struct array_cache **alien;&nbsp;/* on other nodes */
+    <br>&nbsp;unsigned long next_reap;&nbsp;/* updated without locking */
+    <br>&nbsp;int free_touched;&nbsp;&nbsp;/* updated without locking */
+    <br>};
+   </div> 
+   <div> 
+    <br>struct kmem_cache {
+    <br>/* 1) per-cpu data, touched during every alloc/free */
+    <br>// 每个CPU对应的cache数组
+    <br>&nbsp;struct array_cache *array[NR_CPUS];
+    <br>/* 2) Cache tunables. Protected by cache_chain_mutex */
+    <br>// 没有空闲对象时为处理器一次批量分配的对象数量
+    <br>&nbsp;unsigned int batchcount;
+    <br>// 在将缓冲池中一半空闲对象释放到全局缓冲池前缓冲池中允许的空闲对象的数量
+    <br>&nbsp;unsigned int limit;
+    <br>&nbsp;unsigned int shared;
+    <br>//&nbsp;
+    <br>&nbsp;unsigned int buffer_size;
+    <br>/* 3) touched by every alloc &amp; free from the backend */
+    <br>// MAX_NUMNODES个cache节点链表,MAX_NUMNODES是编译内核时定义的
+    <br>&nbsp;struct kmem_list3 *nodelists[MAX_NUMNODES];
+   </div> 
+   <div>
+    &nbsp;unsigned int flags;&nbsp;&nbsp;/* constant flags */
+    <br>// 每个slab中的对象数
+    <br>&nbsp;unsigned int num;&nbsp;&nbsp;/* # of objs per slab */
+   </div> 
+   <div>
+    /* 4) cache_grow/shrink */
+    <br>&nbsp;/* order of pgs per slab (2^n) */
+    <br>// 表明在内存页中的slab块的大小, 如果对象大小小于4K,该值为1
+    <br>// 超过4K,该值为slab大小相对4K的倍数, 如对于32K, 该值为8
+    <br>&nbsp;unsigned int gfporder;
+   </div> 
+   <div>
+    &nbsp;/* force GFP flags, e.g. GFP_DMA */
+    <br>&nbsp;gfp_t gfpflags;
+   </div> 
+   <div>
+    &nbsp;size_t colour;&nbsp;&nbsp;&nbsp;/* cache colouring range */
+    <br>&nbsp;unsigned int colour_off;&nbsp;/* colour offset */
+    <br>&nbsp;struct kmem_cache *slabp_cache;
+    <br>&nbsp;unsigned int slab_size;
+    <br>&nbsp;unsigned int dflags;&nbsp;&nbsp;/* dynamic flags */
+   </div> 
+   <div>
+    &nbsp;/* constructor func */
+    <br>// cache构造函数
+    <br>&nbsp;void (*ctor) (void *, struct kmem_cache *, unsigned long);
+   </div> 
+   <div>
+    &nbsp;/* de-constructor func */
+    <br>// cache析构函数
+    <br>&nbsp;void (*dtor) (void *, struct kmem_cache *, unsigned long);
+   </div> 
+   <div>
+    /* 5) cache creation/removal */
+    <br>// cache的名称
+    <br>&nbsp;const char *name;
+    <br>// cache链表中的下一项
+    <br>&nbsp;struct list_head next;
+   </div> 
+   <div>
+    /* 6) statistics */
+    <br>#if STATS
+    <br>&nbsp;unsigned long num_active;
+    <br>&nbsp;unsigned long num_allocations;
+    <br>&nbsp;unsigned long high_mark;
+    <br>&nbsp;unsigned long grown;
+    <br>&nbsp;unsigned long reaped;
+    <br>&nbsp;unsigned long errors;
+    <br>&nbsp;unsigned long max_freeable;
+    <br>&nbsp;unsigned long node_allocs;
+    <br>&nbsp;unsigned long node_frees;
+    <br>&nbsp;unsigned long node_overflow;
+    <br>&nbsp;atomic_t allochit;
+    <br>&nbsp;atomic_t allocmiss;
+    <br>&nbsp;atomic_t freehit;
+    <br>&nbsp;atomic_t freemiss;
+    <br>#endif
+    <br>#if DEBUG
+    <br>&nbsp;/*
+    <br>&nbsp; * If debugging is enabled, then the allocator can add additional
+    <br>&nbsp; * fields and/or padding to every object. buffer_size contains the total
+    <br>&nbsp; * object size including these internal fields, the following two
+    <br>&nbsp; * variables contain the offset to the user object and its size.
+    <br>&nbsp; */
+    <br>&nbsp;int obj_offset;
+    <br>&nbsp;int obj_size;
+    <br>#endif
+    <br>};
+   </div> 
+   <div> 
+    <br>内核cache的管理链表本身也是一个cache, 因此定义了一个静态的cache结构作为这个cache链表的链
+   </div> 
+   <div>
+    表头:
+   </div> 
+   <div>
+    /* internal cache of cache description objs */
+    <br>static struct kmem_cache cache_cache = {
+    <br>&nbsp;.batchcount = 1,
+    <br>&nbsp;.limit = BOOT_CPUCACHE_ENTRIES,
+    <br>&nbsp;.shared = 1,
+    <br>&nbsp;.buffer_size = sizeof(struct kmem_cache),
+    <br>&nbsp;.name = "kmem_cache",
+    <br>#if DEBUG
+    <br>&nbsp;.obj_size = sizeof(struct kmem_cache),
+    <br>#endif
+    <br>};
+   </div> 
+   <div>
+    /proc/slabinfo就是这个cache链表的基本信息.
+   </div> 
+   <div> 
+    <br>关于cache, slab, page的关系可大致表示如下:
+   </div> 
+   <div> 
+    <br>&nbsp;&nbsp;&nbsp; cache &lt;-------------------&gt; cache &lt;---------------------&gt;cache
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; kmem_list3
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +--------------------------------------+
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; slab_full&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; slab_partial&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; slab_free
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; slab&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; slab&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; slab
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; page&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; page&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; page
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +-------------+&nbsp;&nbsp;&nbsp;&nbsp; +--------------+&nbsp;&nbsp;&nbsp;&nbsp; +-------------+
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp; |&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp; V&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; V
+    <br>&nbsp;&nbsp;&nbsp; object&nbsp; ...&nbsp; object&nbsp;&nbsp; object&nbsp; ...&nbsp; object object&nbsp; ...&nbsp; object
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    4. 操作函数
+   </div> 
+   <div> 
+    <br>4.1 基本用法
+   </div> 
+   <div> 
+    <br>为使用kmem_cache, 先要用kmem_cache_create函数创建cache, 如:
+   </div> 
+   <div>
+    static kmem_cache_t *ip_conntrack_cachep __read_mostly;
+   </div> 
+   <div>
+    &nbsp;ip_conntrack_cachep = kmem_cache_create("ip_conntrack",
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof(struct ip_conntrack), 0,
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, NULL, NULL);
+   </div> 
+   <div>
+    分配对象空间时使用kmem_cache_alloc函数, 如:
+   </div> 
+   <div>
+    &nbsp;conntrack = kmem_cache_alloc(ip_conntrack_cachep, GFP_ATOMIC);
+   </div> 
+   <div> 
+    <br>释放对象时kmem_cache_free函数, 如:
+   </div> 
+   <div>
+    &nbsp;kmem_cache_free(ip_conntrack_cachep, conntrack);
+   </div> 
+   <div> 
+    <br>模块结束,销毁cache时使用kmem_cache_destroy函数, 如:
+   </div> 
+   <div>
+    &nbsp;kmem_cache_destroy(ip_conntrack_cachep);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    4.2 创建cache: kmem_cache_create
+   </div> 
+   <div> 
+    <br>该函数创建kmem_cache结构，要提供该cache的名称,每个单元块的大小参数, 其他参数则可以为0或
+   </div> 
+   <div>
+    NULL。
+    <br>这个函数重点就是根据所需要的内存块大小确定合适的、对齐的slab块大小
+   </div> 
+   <div>
+    /* mm/slab.c */
+    <br>// name是该cache的名称
+    <br>// size是cahce中对象的大小, 一般情况下其他参数都可为0或NULL
+    <br>// align: 指定size要按align对齐
+    <br>struct kmem_cache *
+    <br>kmem_cache_create (const char *name, size_t size, size_t align,
+    <br>&nbsp;unsigned long flags,
+    <br>&nbsp;void (*ctor)(void*, struct kmem_cache *, unsigned long),
+    <br>&nbsp;void (*dtor)(void*, struct kmem_cache *, unsigned long))
+    <br>{
+    <br>&nbsp;size_t left_over, slab_size, ralign;
+    <br>&nbsp;struct kmem_cache *cachep = NULL, *pc;
+   </div> 
+   <div>
+    &nbsp;/*
+    <br>&nbsp; * Sanity checks... these are all serious usage bugs.
+    <br>&nbsp; */
+    <br>// cache名不能为空，不能在中断中分配，每个单元块不能太大，也不能太小
+    <br>// 如果定义了析构函数不能没有构造函数
+    <br>&nbsp;if (!name || in_interrupt() || (size &lt; BYTES_PER_WORD) ||
+    <br>&nbsp;&nbsp;&nbsp;&nbsp; (size &gt; (1 &lt;&lt; MAX_OBJ_ORDER) * PAGE_SIZE) || (dtor &amp;&amp; !ctor)) {
+    <br>&nbsp;&nbsp;printk(KERN_ERR "%s: Early error in slab %s\n", __FUNCTION__,
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;name);
+    <br>&nbsp;&nbsp;BUG();
+    <br>&nbsp;}
+   </div> 
+   <div>
+    &nbsp;/*
+    <br>&nbsp; * Prevent CPUs from coming and going.
+    <br>&nbsp; * lock_cpu_hotplug() nests outside cache_chain_mutex
+    <br>&nbsp; */
+    <br>&nbsp;lock_cpu_hotplug();
+   </div> 
+   <div>
+    // 锁住cache链表
+    <br>&nbsp;mutex_lock(&amp;cache_chain_mutex);
+   </div> 
+   <div>
+    // 循环cache链表,此为全局链表
+    <br>&nbsp;list_for_each_entry(pc, &amp;cache_chain, next) {
+    <br>&nbsp;&nbsp;mm_segment_t old_fs = get_fs();
+    <br>&nbsp;&nbsp;char tmp;
+    <br>&nbsp;&nbsp;int res;
+   </div> 
+   <div>
+    &nbsp;&nbsp;/*
+    <br>&nbsp;&nbsp; * This happens when the module gets unloaded and doesn't
+    <br>&nbsp;&nbsp; * destroy its slab cache and no-one else reuses the vmalloc
+    <br>&nbsp;&nbsp; * area of the module.&nbsp; Print a warning.
+    <br>&nbsp;&nbsp; */
+    <br>// 检查一下cache是否有效,可能会由于模块的释放却没清除掉
+    <br>&nbsp;&nbsp;set_fs(KERNEL_DS);
+    <br>&nbsp;&nbsp;res = __get_user(tmp, pc-&gt;name);
+    <br>&nbsp;&nbsp;set_fs(old_fs);
+    <br>&nbsp;&nbsp;if (res) {
+    <br>&nbsp;&nbsp;&nbsp;printk("SLAB: cache with size %d has lost its name\n",
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; pc-&gt;buffer_size);
+    <br>&nbsp;&nbsp;&nbsp;continue;
+    <br>&nbsp;&nbsp;}
+    <br>// 相同名称的cache已经有了,出错返回
+    <br>&nbsp;&nbsp;if (!strcmp(pc-&gt;name, name)) {
+    <br>&nbsp;&nbsp;&nbsp;printk("kmem_cache_create: duplicate cache %s\n", name);
+    <br>&nbsp;&nbsp;&nbsp;dump_stack();
+    <br>&nbsp;&nbsp;&nbsp;goto oops;
+    <br>&nbsp;&nbsp;}
+    <br>&nbsp;}
+   </div> 
+   <div>
+    // 可以忽略DEBUG中的代码
+    <br>#if DEBUG
+    <br>&nbsp;WARN_ON(strchr(name, ' '));&nbsp;/* It confuses parsers */
+    <br>&nbsp;if ((flags &amp; SLAB_DEBUG_INITIAL) &amp;&amp; !ctor) {
+    <br>&nbsp;&nbsp;/* No constructor, but inital state check requested */
+    <br>&nbsp;&nbsp;printk(KERN_ERR "%s: No con, but init state check "
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "requested - %s\n", __FUNCTION__, name);
+    <br>&nbsp;&nbsp;flags &amp;= ~SLAB_DEBUG_INITIAL;
+    <br>&nbsp;}
+    <br>#if FORCED_DEBUG
+    <br>&nbsp;/*
+    <br>&nbsp; * Enable redzoning and last user accounting, except for caches with
+    <br>&nbsp; * large objects, if the increased size would increase the object size
+    <br>&nbsp; * above the next power of two: caches with object sizes just above a
+    <br>&nbsp; * power of two have a significant amount of internal fragmentation.
+    <br>&nbsp; */
+    <br>&nbsp;if (size &lt; 4096 || fls(size - 1) == fls(size-1 + 3 * BYTES_PER_WORD))
+    <br>&nbsp;&nbsp;flags |= SLAB_RED_ZONE | SLAB_STORE_USER;
+    <br>&nbsp;if (!(flags &amp; SLAB_DESTROY_BY_RCU))
+    <br>&nbsp;&nbsp;flags |= SLAB_POISON;
+    <br>#endif
+    <br>&nbsp;if (flags &amp; SLAB_DESTROY_BY_RCU)
+    <br>&nbsp;&nbsp;BUG_ON(flags &amp; SLAB_POISON);
+    <br>#endif
+    <br>&nbsp;if (flags &amp; SLAB_DESTROY_BY_RCU)
+    <br>&nbsp;&nbsp;BUG_ON(dtor);
+   </div> 
+   <div>
+    &nbsp;/*
+    <br>&nbsp; * Always checks flags, a caller might be expecting debug support which
+    <br>&nbsp; * isn't available.
+    <br>&nbsp; */
+    <br>&nbsp;BUG_ON(flags &amp; ~CREATE_MASK);
+   </div> 
+   <div>
+    &nbsp;/*
+    <br>&nbsp; * Check that size is in terms of words.&nbsp; This is needed to avoid
+    <br>&nbsp; * unaligned accesses for some archs when redzoning is used, and makes
+    <br>&nbsp; * sure any on-slab bufctl's are also correctly aligned.
+    <br>&nbsp; */
+    <br>// 将对象长度先按BYTES_PER_WORD扩展对齐, 32位机为4字节对齐
+    <br>&nbsp;if (size &amp; (BYTES_PER_WORD - 1)) {
+    <br>&nbsp;&nbsp;size += (BYTES_PER_WORD - 1);
+    <br>&nbsp;&nbsp;size &amp;= ~(BYTES_PER_WORD - 1);
+    <br>&nbsp;}
+   </div> 
+   <div>
+    &nbsp;/* calculate the final buffer alignment: */
+    <br>// 以下根据函数标志计算实际对齐值
+    <br>&nbsp;/* 1) arch recommendation: can be overridden for debug */
+    <br>&nbsp;if (flags &amp; SLAB_HWCACHE_ALIGN) {
+    <br>// 要根据硬件CACHE进行字节对齐,对齐都是2的指数倍
+    <br>&nbsp;&nbsp;/*
+    <br>&nbsp;&nbsp; * Default alignment: as specified by the arch code.&nbsp; Except if
+    <br>&nbsp;&nbsp; * an object is really small, then squeeze multiple objects into
+    <br>&nbsp;&nbsp; * one cacheline.
+    <br>&nbsp;&nbsp; */
+    <br>&nbsp;&nbsp;ralign = cache_line_size();
+    <br>&nbsp;&nbsp;while (size &lt;= ralign / 2)
+    <br>&nbsp;&nbsp;&nbsp;ralign /= 2;
+    <br>&nbsp;} else {
+    <br>&nbsp;&nbsp;ralign = BYTES_PER_WORD;
+    <br>&nbsp;}
+   </div> 
+   <div>
+    &nbsp;/*
+    <br>&nbsp; * Redzoning and user store require word alignment. Note this will be
+    <br>&nbsp; * overridden by architecture or caller mandated alignment if either
+    <br>&nbsp; * is greater than BYTES_PER_WORD.
+    <br>&nbsp; */
+    <br>&nbsp;if (flags &amp; SLAB_RED_ZONE || flags &amp; SLAB_STORE_USER)
+    <br>&nbsp;&nbsp;ralign = BYTES_PER_WORD;
+   </div> 
+   <div>
+    &nbsp;/* 2) arch mandated alignment: disables debug if necessary */
+    <br>&nbsp;if (ralign &lt; ARCH_SLAB_MINALIGN) {
+    <br>&nbsp;&nbsp;ralign = ARCH_SLAB_MINALIGN;
+    <br>&nbsp;&nbsp;if (ralign &gt; BYTES_PER_WORD)
+    <br>&nbsp;&nbsp;&nbsp;flags &amp;= ~(SLAB_RED_ZONE | SLAB_STORE_USER);
+    <br>&nbsp;}
+    <br>&nbsp;/* 3) caller mandated alignment: disables debug if necessary */
+    <br>&nbsp;if (ralign &lt; align) {
+    <br>// 如果根据系统情况计算出的对齐值小于要求的对齐值,用参数里的对齐值
+    <br>&nbsp;&nbsp;ralign = align;
+    <br>&nbsp;&nbsp;if (ralign &gt; BYTES_PER_WORD)
+    <br>&nbsp;&nbsp;&nbsp;flags &amp;= ~(SLAB_RED_ZONE | SLAB_STORE_USER);
+    <br>&nbsp;}
+    <br>&nbsp;/*
+    <br>&nbsp; * 4) Store it.
+    <br>&nbsp; */
+    <br>// 真正的对齐值
+    <br>&nbsp;align = ralign;
+   </div> 
+   <div>
+    &nbsp;/* Get cache's description obj. */
+    <br>// 分配cache本身的内存空间,并清零,SLAB_KERNEL标志表明该操作可能会休眠
+    <br>&nbsp;cachep = kmem_cache_zalloc(&amp;cache_cache, SLAB_KERNEL);
+    <br>&nbsp;if (!cachep)
+    <br>&nbsp;&nbsp;goto oops;
+   </div> 
+   <div>
+    #if DEBUG
+    <br>&nbsp;cachep-&gt;obj_size = size;
+   </div> 
+   <div>
+    &nbsp;/*
+    <br>&nbsp; * Both debugging options require word-alignment which is calculated
+    <br>&nbsp; * into align above.
+    <br>&nbsp; */
+    <br>&nbsp;if (flags &amp; SLAB_RED_ZONE) {
+    <br>&nbsp;&nbsp;/* add space for red zone words */
+    <br>&nbsp;&nbsp;cachep-&gt;obj_offset += BYTES_PER_WORD;
+    <br>&nbsp;&nbsp;size += 2 * BYTES_PER_WORD;
+    <br>&nbsp;}
+    <br>&nbsp;if (flags &amp; SLAB_STORE_USER) {
+    <br>&nbsp;&nbsp;/* user store requires one word storage behind the end of
+    <br>&nbsp;&nbsp; * the real object.
+    <br>&nbsp;&nbsp; */
+    <br>&nbsp;&nbsp;size += BYTES_PER_WORD;
+    <br>&nbsp;}
+    <br>#if FORCED_DEBUG &amp;&amp; defined(CONFIG_DEBUG_PAGEALLOC)
+    <br>&nbsp;if (size &gt;= malloc_sizes[INDEX_L3 + 1].cs_size
+    <br>&nbsp;&nbsp;&nbsp;&nbsp; &amp;&amp; cachep-&gt;obj_size &gt; cache_line_size() &amp;&amp; size &lt; PAGE_SIZE) {
+    <br>&nbsp;&nbsp;cachep-&gt;obj_offset += PAGE_SIZE - size;
+    <br>&nbsp;&nbsp;size = PAGE_SIZE;
+    <br>&nbsp;}
+    <br>#endif
+    <br>#endif
+   </div> 
+   <div>
+    &nbsp;/*
+    <br>&nbsp; * Determine if the slab management is 'on' or 'off' slab.
+    <br>&nbsp; * (bootstrapping cannot cope with offslab caches so don't do
+    <br>&nbsp; * it too early on.)
+    <br>&nbsp; */
+    <br>&nbsp;if ((size &gt;= (PAGE_SIZE &gt;&gt; 3)) &amp;&amp; !slab_early_init)
+    <br>// 如果对象大小比较大,设置CFLGS_OFF_SLAB标志
+    <br>// (PAGE_SIZE &gt;&gt; 3)在X86下是512
+    <br>&nbsp;&nbsp;/*
+    <br>&nbsp;&nbsp; * Size is large, assume best to place the slab management obj
+    <br>&nbsp;&nbsp; * off-slab (should allow better packing of objs).
+    <br>&nbsp;&nbsp; */
+    <br>&nbsp;&nbsp;flags |= CFLGS_OFF_SLAB;
+   </div> 
+   <div>
+    // 根据算出的对齐长度重新对齐内存单元长度
+    <br>&nbsp;size = ALIGN(size, align);
+   </div> 
+   <div>
+    // 计算要分配size大小相对slab大小的阶数,返回每个slab的剩余空间数
+    <br>&nbsp;left_over = calculate_slab_order(cachep, size, align, flags);
+   </div> 
+   <div>
+    &nbsp;if (!cachep-&gt;num) {
+    <br>// cachep-&gt;num为每个slab中的对象数
+    <br>// 为0表示找不到合适的内存slab块大小
+    <br>&nbsp;&nbsp;printk("kmem_cache_create: couldn't create cache %s.\n", name);
+    <br>&nbsp;&nbsp;kmem_cache_free(&amp;cache_cache, cachep);
+    <br>&nbsp;&nbsp;cachep = NULL;
+    <br>&nbsp;&nbsp;goto oops;
+    <br>&nbsp;}
+    <br>// 对齐slab结构本身大小, 大小包括slab头(struct slab), 以及cachep-&gt;num个对象
+    <br>// 的控制量的大小, kmem_bufctl_t其实是一个无符合整数
+    <br>// typedef unsigned int kmem_bufctl_t
+    <br>&nbsp;slab_size = ALIGN(cachep-&gt;num * sizeof(kmem_bufctl_t)
+    <br>&nbsp;&nbsp;&nbsp;&nbsp; + sizeof(struct slab), align);
+   </div> 
+   <div>
+    &nbsp;/*
+    <br>&nbsp; * If the slab has been placed off-slab, and we have enough space then
+    <br>&nbsp; * move it on-slab. This is at the expense of any extra colouring.
+    <br>&nbsp; */
+    <br>// 有OFF_SLAB标志而且slab剩余空间比slab本身还大
+    <br>&nbsp;if (flags &amp; CFLGS_OFF_SLAB &amp;&amp; left_over &gt;= slab_size) {
+    <br>// 将slab参数移到剩余空间中
+    <br>&nbsp;&nbsp;flags &amp;= ~CFLGS_OFF_SLAB;
+    <br>&nbsp;&nbsp;left_over -= slab_size;
+    <br>&nbsp;}
+   </div> 
+   <div>
+    &nbsp;if (flags &amp; CFLGS_OFF_SLAB) {
+    <br>&nbsp;&nbsp;/* really off slab. No need for manual alignment */
+    <br>&nbsp;&nbsp;slab_size =
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cachep-&gt;num * sizeof(kmem_bufctl_t) + sizeof(struct slab);
+    <br>&nbsp;}
+   </div> 
+   <div>
+    // 填写cache块的基本信息
+    <br>// colour_off是根据硬件L1 CACHE元素大小来定
+    <br>// 是
+    <br>&nbsp;cachep-&gt;colour_off = cache_line_size();
+    <br>&nbsp;/* Offset must be a multiple of the alignment. */
+    <br>&nbsp;if (cachep-&gt;colour_off &lt; align)
+    <br>&nbsp;&nbsp;cachep-&gt;colour_off = align;
+    <br>// colour是指在剩余空间中能用的colour_off偏移值的数量
+    <br>// 表明能放几个整的L1 CACHE元素
+    <br>&nbsp;cachep-&gt;colour = left_over / cachep-&gt;colour_off;
+    <br>// slab控制部分大小
+    <br>&nbsp;cachep-&gt;slab_size = slab_size;
+    <br>&nbsp;cachep-&gt;flags = flags;
+    <br>&nbsp;cachep-&gt;gfpflags = 0;
+    <br>&nbsp;if (flags &amp; SLAB_CACHE_DMA)
+    <br>&nbsp;&nbsp;cachep-&gt;gfpflags |= GFP_DMA;
+    <br>// 实际内存缓冲区大小
+    <br>&nbsp;cachep-&gt;buffer_size = size;
+   </div> 
+   <div>
+    &nbsp;if (flags &amp; CFLGS_OFF_SLAB) {
+    <br>&nbsp;&nbsp;cachep-&gt;slabp_cache = kmem_find_general_cachep(slab_size, 0u);
+    <br>&nbsp;&nbsp;/*
+    <br>&nbsp;&nbsp; * This is a possibility for one of the malloc_sizes caches.
+    <br>&nbsp;&nbsp; * But since we go off slab only for object size greater than
+    <br>&nbsp;&nbsp; * PAGE_SIZE/8, and malloc_sizes gets created in ascending order,
+    <br>&nbsp;&nbsp; * this should not happen at all.
+    <br>&nbsp;&nbsp; * But leave a BUG_ON for some lucky dude.
+    <br>&nbsp;&nbsp; */
+    <br>&nbsp;&nbsp;BUG_ON(!cachep-&gt;slabp_cache);
+    <br>&nbsp;}
+    <br>&nbsp;cachep-&gt;ctor = ctor;
+    <br>&nbsp;cachep-&gt;dtor = dtor;
+    <br>&nbsp;cachep-&gt;name = name;
+    <br>// 建立每个CPU各自的cache数据
+    <br>&nbsp;if (setup_cpu_cache(cachep)) {
+    <br>&nbsp;&nbsp;__kmem_cache_destroy(cachep);
+    <br>&nbsp;&nbsp;cachep = NULL;
+    <br>&nbsp;&nbsp;goto oops;
+    <br>&nbsp;}
+   </div> 
+   <div>
+    &nbsp;/* cache setup completed, link it into the list */
+    <br>// 将新建的cache块挂接到cache链表
+    <br>&nbsp;list_add(&amp;cachep-&gt;next, &amp;cache_chain);
+    <br>oops:
+    <br>&nbsp;if (!cachep &amp;&amp; (flags &amp; SLAB_PANIC))
+    <br>&nbsp;&nbsp;panic("kmem_cache_create(): failed to create slab `%s'\n",
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; name);
+    <br>&nbsp;mutex_unlock(&amp;cache_chain_mutex);
+    <br>&nbsp;unlock_cpu_hotplug();
+    <br>&nbsp;return cachep;
+    <br>}
+    <br>// 该函数可在内核模块中访问
+    <br>EXPORT_SYMBOL(kmem_cache_create);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <br>4.3 分配单元kmem_cache_(z)alloc()
+   </div> 
+   <div> 
+    <br>有kmem_cache_alloc()和kmem_cache_zalloc()两个函数，后者只是增加将分配出的单元空间清零的
+   </div> 
+   <div>
+    操作。这两个函数返回分配好的cache单元空间
+   </div> 
+   <div>
+    /* mm/slab.c */
+   </div> 
+   <div>
+    /**
+    <br>&nbsp;* kmem_cache_alloc - Allocate an object
+    <br>&nbsp;* @cachep: The cache to allocate from.
+    <br>&nbsp;* @flags: See kmalloc().
+    <br>&nbsp;*
+    <br>&nbsp;* Allocate an object from this cache.&nbsp; The flags are only relevant
+    <br>&nbsp;* if the cache has no available objects.
+    <br>&nbsp;*/
+    <br>void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags)
+    <br>{
+    <br>&nbsp;return __cache_alloc(cachep, flags, __builtin_return_address(0));
+    <br>}
+    <br>EXPORT_SYMBOL(kmem_cache_alloc);
+   </div> 
+   <div>
+    /**
+    <br>&nbsp;* kmem_cache_zalloc - Allocate an object. The memory is set to zero.
+    <br>&nbsp;* @cache: The cache to allocate from.
+    <br>&nbsp;* @flags: See kmalloc().
+    <br>&nbsp;*
+    <br>&nbsp;* Allocate an object from this cache and set the allocated memory to zero.
+    <br>&nbsp;* The flags are only relevant if the cache has no available objects.
+    <br>&nbsp;*/
+    <br>void *kmem_cache_zalloc(struct kmem_cache *cache, gfp_t flags)
+    <br>{
+    <br>&nbsp;void *ret = __cache_alloc(cache, flags, __builtin_return_address(0));
+    <br>&nbsp;if (ret)
+    <br>&nbsp;&nbsp;memset(ret, 0, obj_size(cache));
+    <br>&nbsp;return ret;
+    <br>}
+    <br>EXPORT_SYMBOL(kmem_cache_zalloc);
+   </div> 
+   <div>
+    这两个函数核心都是调用__cahce_alloc函数来分配cache:
+   </div> 
+   <div>
+    // 两个下划线的cache_alloc
+    <br>// 在内核配置了CONFIG_NUMA时NUMA_BUILD为1，否则为0
+    <br>static __always_inline void *__cache_alloc(struct kmem_cache *cachep,
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;gfp_t flags, void *caller)
+    <br>{
+    <br>&nbsp;unsigned long save_flags;
+    <br>&nbsp;void *objp = NULL;
+   </div> 
+   <div>
+    &nbsp;cache_alloc_debugcheck_before(cachep, flags);
+   </div> 
+   <div>
+    &nbsp;local_irq_save(save_flags);
+   </div> 
+   <div>
+    &nbsp;if (unlikely(NUMA_BUILD &amp;&amp;
+    <br>&nbsp;&nbsp;&nbsp;current-&gt;flags &amp; (PF_SPREAD_SLAB | PF_MEMPOLICY)))
+    <br>// 进入此处的可能性比较小
+    <br>&nbsp;&nbsp;objp = alternate_node_alloc(cachep, flags);
+   </div> 
+   <div>
+    &nbsp;if (!objp)
+    <br>// 主要是进入该函数分配,这个是4下划线的cache_cache
+    <br>&nbsp;&nbsp;objp = ____cache_alloc(cachep, flags);
+    <br>&nbsp;/*
+    <br>&nbsp; * We may just have run out of memory on the local node.
+    <br>&nbsp; * __cache_alloc_node() knows how to locate memory on other nodes
+    <br>&nbsp; */
+    <br>&nbsp;&nbsp;if (NUMA_BUILD &amp;&amp; !objp)
+    <br>&nbsp;&nbsp;&nbsp;objp = __cache_alloc_node(cachep, flags, numa_node_id());
+    <br>&nbsp;local_irq_restore(save_flags);
+    <br>// 实际为objp=objp, 没啥操作
+    <br>&nbsp;objp = cache_alloc_debugcheck_after(cachep, flags, objp,
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; caller);
+    <br>&nbsp;prefetchw(objp);
+    <br>&nbsp;return objp;
+    <br>}
+   </div> 
+   <div> 
+    <br>// 重点还是这个四个下划线的cache_alloc
+    <br>static inline void *____cache_alloc(struct kmem_cache *cachep, gfp_t flags)
+    <br>{
+    <br>&nbsp;void *objp;
+    <br>&nbsp;struct array_cache *ac;
+   </div> 
+   <div>
+    &nbsp;check_irq_off();
+    <br>// 每个cpu对应的cache数组
+    <br>&nbsp;ac = cpu_cache_get(cachep);
+    <br>&nbsp;if (likely(ac-&gt;avail)) {
+    <br>// 当前cache单元空间中有元素,不用重新分配,将缓冲的cache返回
+    <br>&nbsp;&nbsp;STATS_INC_ALLOCHIT(cachep);
+    <br>&nbsp;&nbsp;ac-&gt;touched = 1;
+    <br>&nbsp;&nbsp;objp = ac-&gt;entry[--ac-&gt;avail];
+    <br>&nbsp;} else {
+    <br>// 否则新分配cache单元
+    <br>&nbsp;&nbsp;STATS_INC_ALLOCMISS(cachep);
+    <br>&nbsp;&nbsp;objp = cache_alloc_refill(cachep, flags);
+    <br>&nbsp;}
+    <br>&nbsp;return objp;
+    <br>}
+   </div> 
+   <div> 
+    <br>// 分配cache单元
+    <br>static void *cache_alloc_refill(struct kmem_cache *cachep, gfp_t flags)
+    <br>{
+    <br>&nbsp;int batchcount;
+    <br>&nbsp;struct kmem_list3 *l3;
+    <br>&nbsp;struct array_cache *ac;
+    <br>&nbsp;int node;
+   </div> 
+   <div>
+    // cpu到node值的转换
+    <br>&nbsp;node = numa_node_id();
+   </div> 
+   <div>
+    &nbsp;check_irq_off();
+    <br>// 每个cpu对应的cache数组
+    <br>&nbsp;ac = cpu_cache_get(cachep);
+    <br>retry:
+    <br>// 一次批量分配的数量, 分配是批量进行, 这样不用每次请求都分配操作一次
+    <br>&nbsp;batchcount = ac-&gt;batchcount;
+    <br>&nbsp;if (!ac-&gt;touched &amp;&amp; batchcount &gt; BATCHREFILL_LIMIT) {
+    <br>&nbsp;&nbsp;/*
+    <br>&nbsp;&nbsp; * If there was little recent activity on this cache, then
+    <br>&nbsp;&nbsp; * perform only a partial refill.&nbsp; Otherwise we could generate
+    <br>&nbsp;&nbsp; * refill bouncing.
+    <br>&nbsp;&nbsp; */
+    <br>&nbsp;&nbsp;batchcount = BATCHREFILL_LIMIT;
+    <br>&nbsp;}
+    <br>// 和CPU对应的具体list3链表
+    <br>&nbsp;l3 = cachep-&gt;nodelists[node];
+   </div> 
+   <div>
+    &nbsp;BUG_ON(ac-&gt;avail &gt; 0 || !l3);
+    <br>&nbsp;spin_lock(&amp;l3-&gt;list_lock);
+   </div> 
+   <div>
+    &nbsp;/* See if we can refill from the shared array */
+    <br>// 可从共享的数组中获取空间
+    <br>&nbsp;if (l3-&gt;shared &amp;&amp; transfer_objects(ac, l3-&gt;shared, batchcount))
+    <br>&nbsp;&nbsp;goto alloc_done;
+   </div> 
+   <div>
+    // 批量循环
+    <br>&nbsp;while (batchcount &gt; 0) {
+    <br>&nbsp;&nbsp;struct list_head *entry;
+    <br>&nbsp;&nbsp;struct slab *slabp;
+    <br>&nbsp;&nbsp;/* Get slab alloc is to come from. */
+    <br>// 从部分使用的slab链表中获取链表元素
+    <br>&nbsp;&nbsp;entry = l3-&gt;slabs_partial.next;
+   </div> 
+   <div>
+    &nbsp;&nbsp;if (entry == &amp;l3-&gt;slabs_partial) {
+    <br>// 已经到链表头,说明该部分使用的slab链表已经都用完了
+    <br>// 得从空闲slab链表中找空间了
+    <br>&nbsp;&nbsp;&nbsp;l3-&gt;free_touched = 1;
+    <br>&nbsp;&nbsp;&nbsp;entry = l3-&gt;slabs_free.next;
+    <br>&nbsp;&nbsp;&nbsp;if (entry == &amp;l3-&gt;slabs_free)
+    <br>// 空闲slab链表也用完了, 整个cache该增加了
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;goto must_grow;
+    <br>&nbsp;&nbsp;}
+    <br>// 获取可用的slab指针
+    <br>&nbsp;&nbsp;slabp = list_entry(entry, struct slab, list);
+    <br>&nbsp;&nbsp;check_slabp(cachep, slabp);
+    <br>&nbsp;&nbsp;check_spinlock_acquired(cachep);
+    <br>// 从该slab块中批量提取可用的对象数
+    <br>&nbsp;&nbsp;while (slabp-&gt;inuse &lt; cachep-&gt;num &amp;&amp; batchcount--) {
+    <br>&nbsp;&nbsp;&nbsp;STATS_INC_ALLOCED(cachep);
+    <br>&nbsp;&nbsp;&nbsp;STATS_INC_ACTIVE(cachep);
+    <br>&nbsp;&nbsp;&nbsp;STATS_SET_HIGH(cachep);
+    <br>// avail记录了实际分配出的对象数
+    <br>&nbsp;&nbsp;&nbsp;ac-&gt;entry[ac-&gt;avail++] = slab_get_obj(cachep, slabp,
+    <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; node);
+    <br>&nbsp;&nbsp;}
+    <br>&nbsp;&nbsp;check_slabp(cachep, slabp);
+   </div> 
+   <div>
+    &nbsp;&nbsp;/* move slabp to correct slabp list: */
+    <br>// 把该slab先从所在链表断开
+    <br>&nbsp;&nbsp;list_del(&amp;slabp-&gt;list);
+    <br>// 根据是否slab中的对象已经用完,将slab挂到全部使用链表或部分使用链表
+    <br>&nbsp;&nbsp;if (slabp-&gt;free == BUFCTL_END)
+    <br>&nbsp;&nbsp;&nbsp;list_add(&amp;slabp-&gt;list, &amp;l3-&gt;slabs_full);
+    <br>&nbsp;&nbsp;else
+    <br>&nbsp;&nbsp;&nbsp;list_add(&amp;slabp-&gt;list, &amp;l3-&gt;slabs_partial);
+    <br>&nbsp;}
+   </div> 
+   <div>
+    must_grow:
+    <br>// 已经分配了一些对象出去, 减少空闲对象数
+    <br>&nbsp;l3-&gt;free_objects -= ac-&gt;avail;
+    <br>alloc_done:
+    <br>&nbsp;spin_unlock(&amp;l3-&gt;list_lock);
+   </div> 
+   <div>
+    &nbsp;if (unlikely(!ac-&gt;avail)) {
+    <br>// avail为0, 表示没有可分配的对象了, cache必须增大了
+    <br>&nbsp;&nbsp;int x;
+    <br>// 增加cache中内存,增加slab数
+    <br>&nbsp;&nbsp;x = cache_grow(cachep, flags, node);
+   </div> 
+   <div>
+    &nbsp;&nbsp;/* cache_grow can reenable interrupts, then ac could change. */
+    <br>&nbsp;&nbsp;ac = cpu_cache_get(cachep);
+    <br>&nbsp;&nbsp;if (!x &amp;&amp; ac-&gt;avail == 0)&nbsp;/* no objects in sight? abort */
+    <br>&nbsp;&nbsp;&nbsp;return NULL;
+   </div> 
+   <div>
+    &nbsp;&nbsp;if (!ac-&gt;avail)&nbsp;&nbsp;/* objects refilled by interrupt? */
+    <br>&nbsp;&nbsp;&nbsp;goto retry;
+    <br>&nbsp;}
+    <br>&nbsp;ac-&gt;touched = 1;
+    <br>// 返回对象指针
+    <br>&nbsp;return ac-&gt;entry[--ac-&gt;avail];
+    <br>}
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    4.4 释放cache单元kmem_cache_free
+   </div> 
+   <div> 
+    <br>其实不是真正完全释放, 只是将对象空间添回cache的空闲slab链表中而已
+   </div> 
+   <div>
+    /**
+    <br>&nbsp;* kmem_cache_free - Deallocate an object
+    <br>&nbsp;* @cachep: The cache the allocation was from.
+    <br>&nbsp;* @objp: The previously allocated object.
+    <br>&nbsp;*
+    <br>&nbsp;* Free an object which was previously allocated from this
+    <br>&nbsp;* cache.
+    <br>&nbsp;*/
+    <br>// 其实只是__cache_free()的包裹函数
+    <br>void kmem_cache_free(struct kmem_cache *cachep, void *objp)
+    <br>{
+    <br>&nbsp;unsigned long flags;
+   </div> 
+   <div>
+    &nbsp;BUG_ON(virt_to_cache(objp) != cachep);
+   </div> 
+   <div>
+    &nbsp;local_irq_save(flags);
+    <br>&nbsp;__cache_free(cachep, objp);
+    <br>&nbsp;local_irq_restore(flags);
+    <br>}
+    <br>EXPORT_SYMBOL(kmem_cache_free);
+   </div> 
+   <div> 
+    <br>/*
+    <br>&nbsp;* Release an obj back to its cache. If the obj has a constructed state, it must
+    <br>&nbsp;* be in this state _before_ it is released.&nbsp; Called with disabled ints.
+    <br>&nbsp;*/
+    <br>static inline void __cache_free(struct kmem_cache *cachep, void *objp)
+    <br>{
+    <br>&nbsp;struct array_cache *ac = cpu_cache_get(cachep);
+   </div> 
+   <div>
+    &nbsp;check_irq_off();
+    <br>&nbsp;objp = cache_free_debugcheck(cachep, objp, __builtin_return_address(0));
+   </div> 
+   <div>
+    &nbsp;if (cache_free_alien(cachep, objp))
+    <br>&nbsp;&nbsp;return;
+   </div> 
+   <div>
+    &nbsp;if (likely(ac-&gt;avail &lt; ac-&gt;limit)) {
+    <br>// 空闲值小于限值
+    <br>&nbsp;&nbsp;STATS_INC_FREEHIT(cachep);
+    <br>// 只是简单将要释放的cache单元添加到空闲单元数组中
+    <br>// avail增加表示可用对象增加
+    <br>&nbsp;&nbsp;ac-&gt;entry[ac-&gt;avail++] = objp;
+    <br>&nbsp;&nbsp;return;
+    <br>&nbsp;} else {
+    <br>// 空闲数大于等于限值
+    <br>&nbsp;&nbsp;STATS_INC_FREEMISS(cachep);
+    <br>// 释放一些节点
+    <br>&nbsp;&nbsp;cache_flusharray(cachep, ac);
+    <br>// 再将要释放的cache单元添加到空闲单元数组中
+    <br>// avail增加表示可用对象增加
+    <br>&nbsp;&nbsp;ac-&gt;entry[ac-&gt;avail++] = objp;
+    <br>&nbsp;}
+    <br>}
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    4.5 摧毁cache结构
+   </div> 
+   <div> 
+    <br>这个一般是在模块退出函数中进行清理工作时调用的,如果已经编到内核了, 那这个函数基本不会被
+   </div> 
+   <div>
+    调用:
+   </div> 
+   <div>
+    /**
+    <br>&nbsp;* kmem_cache_destroy - delete a cache
+    <br>&nbsp;* @cachep: the cache to destroy
+    <br>&nbsp;*
+    <br>&nbsp;* Remove a struct kmem_cache object from the slab cache.
+    <br>&nbsp;*
+    <br>&nbsp;* It is expected this function will be called by a module when it is
+    <br>&nbsp;* unloaded.&nbsp; This will remove the cache completely, and avoid a duplicate
+    <br>&nbsp;* cache being allocated each time a module is loaded and unloaded, if the
+    <br>&nbsp;* module doesn't have persistent in-kernel storage across loads and unloads.
+    <br>&nbsp;*
+    <br>&nbsp;* The cache must be empty before calling this function.
+    <br>&nbsp;*
+    <br>&nbsp;* The caller must guarantee that noone will allocate memory from the cache
+    <br>&nbsp;* during the kmem_cache_destroy().
+    <br>&nbsp;*/
+    <br>void kmem_cache_destroy(struct kmem_cache *cachep)
+    <br>{
+    <br>&nbsp;BUG_ON(!cachep || in_interrupt());
+   </div> 
+   <div>
+    &nbsp;/* Don't let CPUs to come and go */
+    <br>&nbsp;lock_cpu_hotplug();
+   </div> 
+   <div>
+    &nbsp;/* Find the cache in the chain of caches. */
+    <br>&nbsp;mutex_lock(&amp;cache_chain_mutex);
+    <br>&nbsp;/*
+    <br>&nbsp; * the chain is never empty, cache_cache is never destroyed
+    <br>&nbsp; */
+    <br>// cache的第一个元素cache_cache是静态量,该链表永远不会空
+    <br>// 从cache链表中删除cache
+    <br>&nbsp;list_del(&amp;cachep-&gt;next);
+    <br>&nbsp;mutex_unlock(&amp;cache_chain_mutex);
+   </div> 
+   <div>
+    // 尽可能释放cache中的slab单元块
+    <br>&nbsp;if (__cache_shrink(cachep)) {
+    <br>&nbsp;&nbsp;slab_error(cachep, "Can't free all objects");
+    <br>&nbsp;&nbsp;mutex_lock(&amp;cache_chain_mutex);
+    <br>&nbsp;&nbsp;list_add(&amp;cachep-&gt;next, &amp;cache_chain);
+    <br>&nbsp;&nbsp;mutex_unlock(&amp;cache_chain_mutex);
+    <br>&nbsp;&nbsp;unlock_cpu_hotplug();
+    <br>&nbsp;&nbsp;return;
+    <br>&nbsp;}
+   </div> 
+   <div>
+    &nbsp;if (unlikely(cachep-&gt;flags &amp; SLAB_DESTROY_BY_RCU))
+    <br>&nbsp;&nbsp;synchronize_rcu();
+    <br>// 释放cache
+    <br>&nbsp;__kmem_cache_destroy(cachep);
+    <br>&nbsp;unlock_cpu_hotplug();
+    <br>}
+    <br>EXPORT_SYMBOL(kmem_cache_destroy);
+   </div> 
+   <div> 
+    <br>// 真正的摧毁cache函数
+    <br>static void __kmem_cache_destroy(struct kmem_cache *cachep)
+    <br>{
+    <br>&nbsp;int i;
+    <br>&nbsp;struct kmem_list3 *l3;
+   </div> 
+   <div>
+    // 释放cache中所有CPU的数组
+    <br>&nbsp;for_each_online_cpu(i)
+    <br>&nbsp;&nbsp;&nbsp;&nbsp; kfree(cachep-&gt;array[i]);
+   </div> 
+   <div>
+    &nbsp;/* NUMA: free the list3 structures */
+    <br>// 释放list3中的所有内存
+    <br>&nbsp;for_each_online_node(i) {
+    <br>&nbsp;&nbsp;l3 = cachep-&gt;nodelists[i];
+    <br>&nbsp;&nbsp;if (l3) {
+    <br>&nbsp;&nbsp;&nbsp;kfree(l3-&gt;shared);
+    <br>&nbsp;&nbsp;&nbsp;free_alien_cache(l3-&gt;alien);
+    <br>&nbsp;&nbsp;&nbsp;kfree(l3);
+    <br>&nbsp;&nbsp;}
+    <br>&nbsp;}
+    <br>// 释放cache本身
+    <br>&nbsp;kmem_cache_free(&amp;cache_cache, cachep);
+    <br>}
+   </div> 
+   <div> 
+    <br>4.6 缩减cache
+   </div> 
+   <div> 
+    <br>该函数尽可能地释放cache中的slab块, 当cache空闲空间太多时会释放掉一些内存供其他内核部分使
+   </div> 
+   <div>
+    用.
+   </div> 
+   <div> 
+    <br>/**
+    <br>&nbsp;* kmem_cache_shrink - Shrink a cache.
+    <br>&nbsp;* @cachep: The cache to shrink.
+    <br>&nbsp;*
+    <br>&nbsp;* Releases as many slabs as possible for a cache.
+    <br>&nbsp;* To help debugging, a zero exit status indicates all slabs were released.
+    <br>&nbsp;*/
+    <br>// 只是一个包裹函数
+    <br>int kmem_cache_shrink(struct kmem_cache *cachep)
+    <br>{
+    <br>&nbsp;BUG_ON(!cachep || in_interrupt());
+   </div> 
+   <div>
+    &nbsp;return __cache_shrink(cachep);
+    <br>}
+    <br>EXPORT_SYMBOL(kmem_cache_shrink);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    static int __cache_shrink(struct kmem_cache *cachep)
+    <br>{
+    <br>&nbsp;int ret = 0, i = 0;
+    <br>&nbsp;struct kmem_list3 *l3;
+    <br>// 释放cache中每个CPU对应的空间
+    <br>&nbsp;drain_cpu_caches(cachep);
+   </div> 
+   <div>
+    &nbsp;check_irq_on();
+    <br>&nbsp;for_each_online_node(i) {
+    <br>// 释放每个节点的list3
+    <br>&nbsp;&nbsp;l3 = cachep-&gt;nodelists[i];
+    <br>&nbsp;&nbsp;if (!l3)
+    <br>&nbsp;&nbsp;&nbsp;continue;
+    <br>// 将slab从slab_free中释放
+    <br>&nbsp;&nbsp;drain_freelist(cachep, l3, l3-&gt;free_objects);
+   </div> 
+   <div>
+    &nbsp;&nbsp;ret += !list_empty(&amp;l3-&gt;slabs_full) ||
+    <br>&nbsp;&nbsp;&nbsp;!list_empty(&amp;l3-&gt;slabs_partial);
+    <br>&nbsp;}
+    <br>&nbsp;return (ret ? 1 : 0);
+    <br>}
+   </div> 
+   <div> 
+    <br>static void drain_cpu_caches(struct kmem_cache *cachep)
+    <br>{
+    <br>&nbsp;struct kmem_list3 *l3;
+    <br>&nbsp;int node;
+   </div> 
+   <div>
+    &nbsp;on_each_cpu(do_drain, cachep, 1, 1);
+    <br>&nbsp;check_irq_on();
+   </div> 
+   <div>
+    &nbsp;for_each_online_node(node) {
+    <br>&nbsp;&nbsp;l3 = cachep-&gt;nodelists[node];
+    <br>&nbsp;&nbsp;if (l3 &amp;&amp; l3-&gt;alien)
+    <br>// 释放cache的list3的alien部分
+    <br>&nbsp;&nbsp;&nbsp;drain_alien_cache(cachep, l3-&gt;alien);
+    <br>&nbsp;}
+   </div> 
+   <div>
+    &nbsp;for_each_online_node(node) {
+    <br>&nbsp;&nbsp;l3 = cachep-&gt;nodelists[node];
+    <br>&nbsp;&nbsp;if (l3)
+    <br>// 释放list3的数组空间
+    <br>&nbsp;&nbsp;&nbsp;drain_array(cachep, l3, l3-&gt;shared, 1, node);
+    <br>&nbsp;}
+    <br>}
+   </div> 
+   <div>
+    /*
+    <br>&nbsp;* Remove slabs from the list of free slabs.
+    <br>&nbsp;* Specify the number of slabs to drain in tofree.
+    <br>&nbsp;*
+    <br>&nbsp;* Returns the actual number of slabs released.
+    <br>&nbsp;*/
+    <br>static int drain_freelist(struct kmem_cache *cache,
+    <br>&nbsp;&nbsp;&nbsp;struct kmem_list3 *l3, int tofree)
+    <br>{
+    <br>&nbsp;struct list_head *p;
+    <br>&nbsp;int nr_freed;
+    <br>&nbsp;struct slab *slabp;
+   </div> 
+   <div>
+    &nbsp;nr_freed = 0;
+    <br>// 从slabs_free链表释放
+    <br>&nbsp;while (nr_freed &lt; tofree &amp;&amp; !list_empty(&amp;l3-&gt;slabs_free)) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;spin_lock_irq(&amp;l3-&gt;list_lock);
+    <br>&nbsp;&nbsp;p = l3-&gt;slabs_free.prev;
+    <br>&nbsp;&nbsp;if (p == &amp;l3-&gt;slabs_free) {
+    <br>&nbsp;&nbsp;&nbsp;spin_unlock_irq(&amp;l3-&gt;list_lock);
+    <br>&nbsp;&nbsp;&nbsp;goto out;
+    <br>&nbsp;&nbsp;}
+    <br>// 获取slab
+    <br>&nbsp;&nbsp;slabp = list_entry(p, struct slab, list);
+    <br>#if DEBUG
+    <br>&nbsp;&nbsp;BUG_ON(slabp-&gt;inuse);
+    <br>#endif
+    <br>// 将slab从链表中删除
+    <br>&nbsp;&nbsp;list_del(&amp;slabp-&gt;list);
+    <br>&nbsp;&nbsp;/*
+    <br>&nbsp;&nbsp; * Safe to drop the lock. The slab is no longer linked
+    <br>&nbsp;&nbsp; * to the cache.
+    <br>&nbsp;&nbsp; */
+    <br>// 空闲对象数减少一个slab中的对象数
+    <br>&nbsp;&nbsp;l3-&gt;free_objects -= cache-&gt;num;
+    <br>&nbsp;&nbsp;spin_unlock_irq(&amp;l3-&gt;list_lock);
+    <br>// 释放slab
+    <br>&nbsp;&nbsp;slab_destroy(cache, slabp);
+    <br>&nbsp;&nbsp;nr_freed++;
+    <br>&nbsp;}
+    <br>out:
+    <br>&nbsp;return nr_freed;
+    <br>}
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    4.7&nbsp; kmalloc和kfree
+   </div> 
+   <div>
+    kmalloc也是通过cache来实现的, 只不过每此kmalloc的大小不同, 因此是从不同的cache中分配:
+   </div> 
+   <div>
+    /* include/linux/slab.h */
+   </div> 
+   <div>
+    // 注意kmalloc是在头文件中定义的
+    <br>static inline void *kmalloc(size_t size, gfp_t flags)
+    <br>{
+    <br>&nbsp;if (__builtin_constant_p(size)) {
+    <br>// 以下是找一个对象大小刚好大于等于size的cache
+    <br>&nbsp;&nbsp;int i = 0;
+    <br>#define CACHE(x) \
+    <br>&nbsp;&nbsp;if (size &lt;= x) \
+    <br>&nbsp;&nbsp;&nbsp;goto found; \
+    <br>&nbsp;&nbsp;else \
+    <br>&nbsp;&nbsp;&nbsp;i++;
+    <br>#include "kmalloc_sizes.h"
+    <br>#undef CACHE
+    <br>&nbsp;&nbsp;{
+    <br>&nbsp;&nbsp;&nbsp;extern void __you_cannot_kmalloc_that_much(void);
+    <br>&nbsp;&nbsp;&nbsp;__you_cannot_kmalloc_that_much();
+    <br>&nbsp;&nbsp;}
+    <br>found:
+    <br>// 实际还是通过kmem_cache_alloc来分配内存空间, 因此也是cache
+    <br>&nbsp;&nbsp;return kmem_cache_alloc((flags &amp; GFP_DMA) ?
+    <br>&nbsp;&nbsp;&nbsp;malloc_sizes[i].cs_dmacachep :
+    <br>&nbsp;&nbsp;&nbsp;malloc_sizes[i].cs_cachep, flags);
+    <br>&nbsp;}
+    <br>// 通过该函数最后也是由__cache_alloc()函数来分配空间
+    <br>&nbsp;return __kmalloc(size, flags);
+    <br>}
+   </div> 
+   <div> 
+    <br>// 这是kmalloc_sizes.h文件内容, 实际就是定义CACHE中可用的对象大小
+    <br>// 普通情况下最大是128K, 也就是kmalloc能分配的最大内存量
+   </div> 
+   <div>
+    #if (PAGE_SIZE == 4096)
+    <br>&nbsp;CACHE(32)
+    <br>#endif
+    <br>&nbsp;CACHE(64)
+    <br>#if L1_CACHE_BYTES &lt; 64
+    <br>&nbsp;CACHE(96)
+    <br>#endif
+    <br>&nbsp;CACHE(128)
+    <br>#if L1_CACHE_BYTES &lt; 128
+    <br>&nbsp;CACHE(192)
+    <br>#endif
+    <br>&nbsp;CACHE(256)
+    <br>&nbsp;CACHE(512)
+    <br>&nbsp;CACHE(1024)
+    <br>&nbsp;CACHE(2048)
+    <br>&nbsp;CACHE(4096)
+    <br>&nbsp;CACHE(8192)
+    <br>&nbsp;CACHE(16384)
+    <br>&nbsp;CACHE(32768)
+    <br>&nbsp;CACHE(65536)
+    <br>&nbsp;CACHE(131072)
+    <br>#if (NR_CPUS &gt; 512) || (MAX_NUMNODES &gt; 256) || !defined(CONFIG_MMU)
+    <br>&nbsp;CACHE(262144)
+    <br>#endif
+    <br>#ifndef CONFIG_MMU
+    <br>&nbsp;CACHE(524288)
+    <br>&nbsp;CACHE(1048576)
+    <br>#ifdef CONFIG_LARGE_ALLOCS
+    <br>&nbsp;CACHE(2097152)
+    <br>&nbsp;CACHE(4194304)
+    <br>&nbsp;CACHE(8388608)
+    <br>&nbsp;CACHE(16777216)
+    <br>&nbsp;CACHE(33554432)
+    <br>#endif /* CONFIG_LARGE_ALLOCS */
+    <br>#endif /* CONFIG_MMU
+    <br>/* mm/slab.c */
+   </div> 
+   <div>
+    // kfree实际也是调用__cache_free来释放空间
+    <br>void kfree(const void *objp)
+    <br>{
+    <br>&nbsp;struct kmem_cache *c;
+    <br>&nbsp;unsigned long flags;
+   </div> 
+   <div>
+    &nbsp;if (unlikely(!objp))
+    <br>&nbsp;&nbsp;return;
+    <br>&nbsp;local_irq_save(flags);
+    <br>&nbsp;kfree_debugcheck(objp);
+    <br>&nbsp;c = virt_to_cache(objp);
+    <br>&nbsp;debug_check_no_locks_freed(objp, obj_size(c));
+    <br>&nbsp;__cache_free(c, (void *)objp);
+    <br>&nbsp;local_irq_restore(flags);
+    <br>}
+    <br>EXPORT_SYMBOL(kfree);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    5. 结论
+   </div> 
+   <div> 
+    <br>cache的使用使得在频繁增加删除对象的处理效率得到提高, 这也就是为什么普通情况下
+   </div> 
+   <div>
+    从/proc/meminfo中看Linux的空闲内存不多的原因,因为很多内存都是cache的,没有真正释放。
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

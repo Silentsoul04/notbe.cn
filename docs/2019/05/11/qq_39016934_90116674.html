@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>MySQL之select语句的执行过程 « NotBeCN</title>
+  <meta name="description" content="                  select语句的执行过程   select * from T where ID = 10   MySQL的基本架构：   MySQL可以分为以下两个部分        server层      存储引擎       存储引擎   存储引擎负责数据的存储和提取。其架构模式时插件...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/11/qq_39016934_90116674.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">MySQL之select语句的执行过程</h1>
+    <p class="post-meta">May 11, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-light"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <h1><a id="select_0"></a>select语句的执行过程</h1> 
+  <pre><code class="prism language-mysql">select * from T where ID = 10
+</code></pre> 
+  <h2><a id="MySQL_6"></a>MySQL的基本架构：</h2> 
+  <p>MySQL可以分为以下两个部分</p> 
+  <ul> 
+   <li> <p>server层</p> </li> 
+   <li> <p>存储引擎</p> </li> 
+  </ul> 
+  <h3><a id="_14"></a>存储引擎</h3> 
+  <p>存储引擎负责数据的存储和提取。其架构模式时插件式的，支持InnoDB、MyISAM、Memory等多个存储引擎。现在最常使用的存储引擎是InnoDB，它从MySQL5.5.5版本开始成为了默认的存储引擎。</p> 
+  <p>也就是说，执行create table 建表时，若不指定引擎类型，默认使用的是InnoDB。也可以在create table 语句中使用engine=memory来指定使用内存引擎创建表。不同的存储引擎的表数据存取方式不同，支持的功能也不同。</p> 
+  <p>不同的存储引擎公用一个server层，也就是从连接器到执行器的部分。</p> 
+  <h3><a id="server_22"></a>server层</h3> 
+  <p>server层中包括了以下几个模块</p> 
+  <ul> 
+   <li> <p>连接器</p> </li> 
+   <li> <p>查询缓存</p> </li> 
+   <li> <p>分析器</p> </li> 
+   <li> <p>优化器</p> </li> 
+   <li> <p>执行器</p> <p>server层还包含了MySQL大多数核心服务功能，以及所有的内置函数（日期、时间、数学和加密函数等），所有的跨存储引擎的功能都在这里实现，比如存储过程、触发器和视图等。</p> </li> 
+  </ul> 
+  <h4><a id="_38"></a>连接器</h4> 
+  <h5><a id="_40"></a>功能：</h5> 
+  <p>负责与客户端建立连接、获取权限、维持和管理连接。</p> 
+  <h5><a id="_44"></a>连接命令：</h5> 
+  <pre><code class="prism language-mysql">mysql -h$ip -p$port -u$user -p
+</code></pre> 
+  <p>输入命令后，需要在交互对话里面输入密码。密码也可以直接跟在-p后面写在命令行中，但这样可能会导致密码泄露。</p> 
+  <p>连接命令中的mysql是客户端工具，用来与服务端建立连接。在完成经典的TCP握手后，连接器开始使用输入的用户名和密码认证身份。</p> 
+  <ul> 
+   <li> <p>如果用户名和密码不对，就会收到一个"Access denied for user"的错误，然后客服端程序结束运行。</p> </li> 
+   <li> <p>如果用户名密码认证通过，连接器会到权限表里面查出当前用户的权限。之后，这个连接里面的权限判断逻辑，都将依赖于此时读到的权限。</p> <p>这就意味着，一个用户成功建立连接后，即使管理员账号对这个用户的权限进行修改，也不会影响已经存在的连接权限。修改完成后，只有再新建的连接才会使用新的权限设置。</p> </li> 
+  </ul> 
+  <p>连接完成后，如果没有后续的动作，这个连接就处于空闲状态，可以使用 show processlist命令查询系统中已存在的连接。</p> 
+  <p>客户端如果太长时间没动作，连接器就是自动将它断开。这个时间是由参数wait_timeout控制的，默认值是8个小时。</p> 
+  <p>如果连接被断开之后，客户端再次发送请求，会得到一个错误“Lost connection to MySQL server during query”。这个时候如果要继续操作，就需要重连，然后再执行请求。</p> 
+  <h5><a id="_66"></a>长连接与短连接</h5> 
+  <p>数据库里面，长连接是指连接成功后，如果客户端持续有请求，则一直使用同一个连接。短连接则是指每次执行完很少的几次查询就断开连接，下次查询在重新建立一个。</p> 
+  <p>建立连接的过程通常是比较复杂的，所以建议尽量使用长连接。</p> 
+  <h5><a id="MySQL_72"></a>MySQL异常重启</h5> 
+  <p>但是全部使用长连接后，有时候MySQL占用内存涨得特别快，这是因为MySQL在执行过程中临时使用的内存是管理在连接对象里面的。这些资源会在连接断开的时候才释放。所以如果长连接累积下来，可能导致内存占用太大，被系统强行杀掉（OOM），从现象看就是MySQL异常重启了。</p> 
+  <h5><a id="_76"></a>解决方法</h5> 
+  <ul> 
+   <li> <p>定期断开长连接。使用一段时间，或者程序里面判断执行过一个占用内存的大查询后，断开连接，之后要查询在重连</p> </li> 
+   <li> <p>如果使用的是MySQL5.7或更高版本，可以在每次执行一个比较大的操作后，通过执行mysql_reset_connection来重新初始化连接资源。这个过程不需要重连和重新做权限验证，但是会将连接恢复到刚刚创建的状态。</p> </li> 
+  </ul> 
+  <h4><a id="_82"></a>查询缓存</h4> 
+  <p>连接建立完成后，就可以执行select语句了。执行逻辑就会来到第二步：查询缓存。</p> 
+  <p>MySQL拿到一个查询请求后，会先到查询缓存看看之前是不是执行过这条语句。之前执行过的语句及其结果可能会以key-value对的形式，被直接缓存在内存中。key是查询的语句，value是查询的结果。如果你的查询能够直接在这个缓存中找到key，那么这个value就会被直接返回给客户端。</p> 
+  <p>如果语句在不在查询缓存中，就会继续后面的执行阶段。执行完成后，执行结果会被存入查询缓存中。可以看到，如果查询命中缓存，MySQL不需要执行后面的复杂操作，就可以直接返回结果，这个效率会很高。</p> 
+  <p>但是大多数情况下建议不要使用查询缓存，因为查询缓存往往弊大于利。</p> 
+  <p>需要注意的是，MySQL8.0版本直接将查询缓存的整块功能删掉了，也就是说说8.0开始彻底没有这个功能了。</p> 
+  <h4><a id="_94"></a>分析器</h4> 
+  <p>如果没有命中查询缓存，就要开始真正执行语句了。</p> 
+  <h5><a id="_98"></a>词法分析</h5> 
+  <p>分析器先会做“词法分析”。你输入的是由多个字符串和空格组成的一条SQL语句，MySQL需要识别出里面的字符串分别是什么，代表什么。</p> 
+  <p>MySQL从你输入的select这个关键字识别出来这是一个查询语句。它也要把字符串“T”识别成“表名T”，把字符串“ID”识别成“列ID”。</p> 
+  <h5><a id="_104"></a>语法分析</h5> 
+  <p>做完这些识别以后，就要做“语法分析”。根据词法分析的结果，语法分析器会根据语法规则，判断你输入的这个SQL语句是否满足MySQL语法。</p> 
+  <p>如果你的语句不对，就会收到“You have an error in your SQL syntax“ 的错误提醒。</p> 
+  <p>一般语法错误会提示第一个出现错误的位置，所以要关注的紧接着“use near ”的内容。</p> 
+  <h4><a id="_112"></a>优化器</h4> 
+  <p>经过了分析器，MySQL就知道你要做什么了。在开始执行之前，还要经过优化器的处理。</p> 
+  <h5><a id="_116"></a>作用</h5> 
+  <p>优化器是在表里面有多个索引的时候，决定使用哪个索引；或者在一个语句有躲表关联（join）的时候，决定各个表的连接顺序。</p> 
+  <p>如果执行下面这样的语句。这个语句执行两个表的join：</p> 
+  <pre><code class="prism language-myql">mysql&gt; select * from t1 join t2 using(ID)  where t1.c=10 and t2.d=20;
+</code></pre> 
+  <ul> 
+   <li>即可以先从表t1里面取出c=10的记录的ID值，再根据ID值关联到表t2，再判断t2里面d的值是否等于20.</li> 
+   <li>也可以先从t2里面取出d=20的记录的ID值，再根据ID值关联到t1，再判断t1里面c的值是否等于10.</li> 
+  </ul> 
+  <p>这两种执行方法的逻辑结果是一样的，但是执行的效率会有不同，而优化器的作用就是决定选择使用哪一个方案。</p> 
+  <p>优化器阶段完成后，这个语句的执行方案就确定下来了，然后进入执行器阶段。</p> 
+  <h4><a id="_133"></a>执行器</h4> 
+  <p>MySQL通过分析器知道了你要做什么，通过优化器知道了该怎么做，于是就进入了执行器阶段，开始执行语句。</p> 
+  <p>开始执行的时候，要先判断一下你对这个表T有没有执行查询的权限，如果没有，就会返回没有权限的错误。如果有权限，就打开表继续执行。打开表的时候，执行器就会根据表的引擎定义，去使用这个引擎提供的接口。</p> 
+  <p>比如例子中的表T中，ID字段没有索引，那么执行器的执行流程是这样的：</p> 
+  <ol> 
+   <li>调用InnoDB引擎接口取这个表的第一行，判断ID值是不是10，如果不是则跳过，如果是则将这行存在结果集中；</li> 
+   <li>调用引擎接口取下一行，重复相同的判断逻辑，直到取到这个表的最后一行。</li> 
+   <li>执行器将上述遍历过程中所有 满足条件的行组成的记录集作为结果集返回给客户端。</li> 
+  </ol> 
+  <p>至此，这个语句就执行完成了。</p> 
+  <p>对于有索引的表，执行的逻辑也差不多。第一次调用的是“取满足条件的第一行”这个接口，之后循环取“满足条件的下一行”这个接口，这些接口都是引擎中已经定义好的。</p> 
+  <h3><a id="_149"></a>小结</h3> 
+  <p>以上介绍了MySQL的逻辑架构，希望读者对一个SQL语句完整执行流程的各个阶段有一个初步的印象。</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

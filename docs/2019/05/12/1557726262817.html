@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>遇到了一个关于自增业务的分析 « NotBeCN</title>
+  <meta name="description" content="         业务背景   我目前在物流行业工作，上周遇到一个小需求，大致概况如下：   1、实现一个创建用户的功能，用户分为快递用户和快运用户   2、用户名快递用户为kd为前缀，快运用户以ky为前缀，后面跟上一个递增的数字，以0开始   3、用户名进入创建页面自动获取不能够手动输入，然后需填写其他信息然后...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/1557726262817.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">遇到了一个关于自增业务的分析</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <h1>业务背景</h1> 
+  <p>我目前在物流行业工作，上周遇到一个小需求，大致概况如下：</p> 
+  <p>1、实现一个创建用户的功能，用户分为快递用户和快运用户</p> 
+  <p>2、用户名快递用户为kd为前缀，快运用户以ky为前缀，后面跟上一个递增的数字，以0开始</p> 
+  <p>3、用户名进入创建页面自动获取不能够手动输入，然后需填写其他信息然后再创建，其中有一个选项为选择快递或者快运用户，默认为快递。</p> 
+  <p>&nbsp;</p> 
+  <p>需求大致如上，看起来很简单，于是我开发设计很快就写完了，第一版实现思路为</p> 
+  <p>首先进入页面需要获得一个快递的用户名，因此需要要一个接口getMaxNumUserName用于获取当前数据库中快递用户的最大值，然后我再service层逻辑中数字加1返回然后拼接字符串即可。</p> 
+  <p>获取当前数据库后缀最大值我采用的是直接用sql的方法</p> 
+  <pre class="has">
+<code class="language-sql">select t.username from user t where t.username like "kd%" order by id desc;</code></pre> 
+  <p>这样我返回一个例如kd2的字符串，然后我再代码中可以截取到2这个数字，然后加1拼接层kd3返回给前端即可。</p> 
+  <p>然后填写信息后插入前再进行一次类似乐观锁的操作防止其他线程已经添加了kd3这个用户名。</p> 
+  <pre class="has">
+<code class="language-java">User user = userDao.findUserByUserName(userName);
+if(user==null){
+    //insert
+}else{
+    //abort
+}</code></pre> 
+  <p>之后开开心心的进行设计讨论，最终被项目组的前辈否决了这个实现方案。而建议采用一种中间表的方式，具体原因也没细说，就直接否认这种方案不行。</p> 
+  <p>那么为什么这样不行？</p> 
+  <h2>&nbsp;</h2> 
+  <p>首先看我们获取用户名的操作的sql</p> 
+  <pre class="has">
+<code class="language-sql">select t.username from user t where t.username like "kd%" order by id desc limit 1;</code></pre> 
+  <p>我们看看这个句sql的执行流程</p> 
+  <ol>
+   <li>初始化sort_buffer，放入username字段；</li> 
+   <li>找到第一个满足username like&nbsp;'kd'&nbsp;条件的主键id</li> 
+   <li>到主键id索引取出整行，取username值，存入sort_buffer中；</li> 
+   <li>从username中取下一个记录的主键id；</li> 
+   <li>重复步骤3、4直到数据遍历完成</li> 
+   <li>对sort_buffer中的数据按照字段id做快速排序；</li> 
+   <li>按照排序结果取第一行返回结果</li> 
+  </ol>
+  <p>这有里需要进行一次全表扫描和一次id的排序，当数据量一上来的时候对性能的消耗是很大的。</p> 
+  <p>于是想到，那么给username加一个索引？这样的话就不需要进行全表扫描了。</p> 
+  <p>没错，这样的话的确是优化了一次查询操作，但是还有一些问题，比如当数据量非常大的时候就sort_buffer可能空间可能不够就不得不使用磁盘临时文件来辅助排序，外部排序一般是使用归并排序算法，可以这么简单理解，<strong>MySQL将需要排序的数据分成12份，每一份单独排序后存在这些临时文件中。然后把这12个有序文件再合并成一个有序的大文件。</strong></p> 
+  <p>总的来说还是性能问题，当数据一上来的时候获取用户名会变得很慢。</p> 
+  <p>&nbsp;</p> 
+  <p>那么我们看看利用中间表是如何操作的。</p> 
+  <p>首先我们创建一张中间表sequenceEntity，主要有如下字段</p> 
+  <table align="left" border="1" cellpadding="1" cellspacing="1" style="width:500px;">
+   <tbody>
+    <tr>
+     <td style="width:140px;">字段名</td> 
+     <td style="width:358px;">解释</td> 
+    </tr>
+    <tr>
+     <td style="width:140px;">type</td> 
+     <td style="width:358px;">sequence类型</td> 
+    </tr>
+    <tr>
+     <td style="width:140px;">patten</td> 
+     <td style="width:358px;">自定义模板</td> 
+    </tr>
+    <tr>
+     <td style="width:140px;">next_id</td> 
+     <td style="width:358px;">下一个序列</td> 
+    </tr>
+    <tr>
+     <td style="width:140px;">lock_version</td> 
+     <td style="width:358px;">乐观锁</td> 
+    </tr>
+   </tbody>
+  </table>
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+  <p>这里的next_id保持的是对应type类型的下一个id的值，这样的话我们只需要根据type查找一次就行了，sql如下</p> 
+  <pre class="has">
+<code class="language-sql">select t.* from sequence_entity t where t.type = 'kd' for update</code></pre> 
+  <p>由于sequence_entity的数据量不会随着用户的增加而增加，这条sql的性能是极佳的。只需要根据类型查找一次数据库然后得到nextId并加上行锁，即使有并发执行的时候也会被堵塞不会造成重复用户名的产生。</p> 
+  <p>&nbsp;</p> 
+  <p>我们可以根据patten字段来自定义一个我们需要获取的用户名</p> 
+  <p>比如patten我规定[CONST]后面的字符串为前缀，[SEQ]表示序列，开发者可以根据自己的喜好自定义格式，然后根据+ 来拼接</p> 
+  <p>这样自定义好规则之后可以在代码里对patten进行解析</p> 
+  <pre class="has">
+<code class="language-java"> private String format(String pattern, Long id) {
+        pattern = pattern.trim();
+        StringBuffer formatSf = new StringBuffer();
+        String[] values = pattern.split("\\+");
+        for (String value : values) {
+            if (value.startsWith("[CONST]")) {
+                value = value.substring("[CONST]".length());
+            } else if (value.startsWith("[SEQ]")) {
+                NumberFormat numFormat = new DecimalFormat(value.substring("[SEQ]".length()));
+                value = numFormat.format(id);
+            }
+
+            formatSf.append(value);
+        }
+        return formatSf.toString();
+
+    }</code></pre> 
+  <p>&nbsp;</p> 
+  <p>这样的话整体流程为</p> 
+  <p>1、进入新增页面后，默认传type为kd给后台</p> 
+  <p>2、根据type获取下一个id</p> 
+  <p>3、根据我们定义的patten解析出kd+id的字符串返回</p> 
+  <p>4、编辑页面填充其他字段，保存</p> 
+  <p>&nbsp;</p> 
+  <p>这样的sql只进行了一次查询操作，并没有涉及到排序以及大数据量的全表扫描，并且在扩展性方面也特别好，这次是用户名自增，如果下次来了一个其他需求要求别的自增的话，只需要在sequenceEntity表中添加一个字段即可。</p> 
+  <p>&nbsp;</p> 
+  <h1>遗留的一个问题</h1> 
+  <p>我又想到了另一个关于并发的问题</p> 
+  <p>1、A和B同时点击创建用户界面，选上快递用户，他们得到的用户都为kd3。</p> 
+  <p>2、在进行插入前，A进行数据库校验后发现数据库没有kd3，然后进行下一步</p> 
+  <p>3、在同时，B也进行了数据库校验，此时A还没有完成数据库的插入操作，此时B也发现数据库没有kd3，于是也准备插入。</p> 
+  <p>4、这时候A和B完美的避开了彼此之间的插入，导致了数据库有两条kd3的数据</p> 
+  <p>&nbsp;</p> 
+  <p>在实际的业务中用户的创建都是由一个人批量创建的，因此是不存在并发的问题的，所以这个问题感觉会作为一个隐患在业务上可以避免。</p> 
+  <p>如果要解决这个问题上我只能想到在数据库层面给用户名加一个唯一性约束，或者在插入过程中加一把锁，不知道是否有其他更好的方法。欢迎各位前辈进行指导</p> 
+  <p>&nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

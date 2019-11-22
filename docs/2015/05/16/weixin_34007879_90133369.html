@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核驱动--mmap设备方法【原创】 « NotBeCN</title>
+  <meta name="description" content="             mmap系统调用（功能）    void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset)    内存映射函数mmap , 负责把文件内容映射到进程的虚拟内存空间，通过对这段内存的读取和修改，...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/05/16/weixin_34007879_90133369.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核驱动--mmap设备方法【原创】</h1>
+    <p class="post-meta">May 16, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p><span style="color:#ff0000;">mmap系统调用（功能）</span></p> 
+   <p>void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset)</p> 
+   <p>内存映射函数mmap , 负责把文件内容映射到进程的虚拟内存空间，通过对这段内存的读取和修改，来实现对文件的读取和修改，而不需要再调用read, write等操作。</p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_71d910f5f2cc868f22e5211ae0e518fe.png" alt="" width="619" height="423"></p> 
+   <p>addr:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 指定映射的起始地址，通常设为NULL, 由系统指定。</p> 
+   <p>len:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 映射到内存的文件长度</p> 
+   <p>prot:&nbsp; &nbsp;&nbsp;&nbsp; 映射区的保护方式， 可以是：</p> 
+   <p>PROT_EXEC:&nbsp; 映射区可被执行</p> 
+   <p>PROT_READ:&nbsp; 映射区可被读取</p> 
+   <p>PROT_WRITE: 映射区可被写入</p> 
+   <p>flags:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 映射区的特性，可以是：</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAP_SHARED:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 写入映射区的数据会复制回文件，且允许其他映射该文件的进程共享</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; MAP_PRIVATE:</p> 
+   <p>对映射区的写入操作会产生一个映射区的复制（copy-on-write）, 对此区域所做的修改不会写回原文件。</p> 
+   <p>fd:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 由open返回的文件描述符，代表要映射的文件</p> 
+   <p>offset:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 以文件开始处的偏移量，必须是分页大小的整数倍，通常为0，表示从文件开头映射</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p><span style="color:#ff0000;">解除映射</span></p> 
+   <p>int munmap(void *start, size_t length)</p> 
+   <p>功能：</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 取消参数start所指向的映射内存，参数length表示欲取消的内存大小</p> 
+   <p>返回值：</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 解除成功返回0，否则返回-1，错误原因存于errno中。</p> 
+   <p><span style="color:#ff0000;">注意：</span></p> 
+   <p>mmap&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 不影响原文件的长度，如果写入的长度超出了原文件的长度，那么就只能写入原文件的长度大小的数据内容</p> 
+   <p>代码：</p> 
+   <p>#include &lt;stdio.h&gt;</p> 
+   <p>&nbsp;#include &lt;string.h&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+   <p>&nbsp;#include &lt;sys/types.h&gt;</p> 
+   <p>&nbsp;#include &lt;sys/stat.h&gt;</p> 
+   <p>&nbsp;#include &lt;fcntl.h&gt;</p> 
+   <p>&nbsp;#include &lt;unistd.h&gt;</p> 
+   <p>&nbsp;#include &lt;sys/mman.h&gt;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;int main(void)</p> 
+   <p>-{</p> 
+   <p>|&nbsp; &nbsp;&nbsp;int fd;</p> 
+   <p>|&nbsp;&nbsp;&nbsp; char *start=NULL;</p> 
+   <p>|&nbsp;&nbsp;&nbsp; char buf[100];</p> 
+   <p>|</p> 
+   <p>|&nbsp;&nbsp;&nbsp; fd = open("t.txt", O_RDWR | O_CREAT);</p> 
+   <p>|&nbsp;&nbsp;&nbsp; start = mmap(NULL, 100, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);</p> 
+   <p>|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+   <p>|&nbsp;&nbsp;&nbsp; strcpy(buf, start);</p> 
+   <p>|&nbsp;&nbsp;&nbsp; printf("buf is %s\r\n", buf);</p> 
+   <p>|</p> 
+   <p>|&nbsp;&nbsp;&nbsp; strcpy(start, "sky is hello");</p> 
+   <p>|&nbsp;&nbsp;&nbsp; munmap(start, 100);</p> 
+   <p>|&nbsp;&nbsp;&nbsp; close(fd);</p> 
+   <p>|</p> 
+   <p>|&nbsp;&nbsp;&nbsp; return 0;</p> 
+   <p>|}</p> 
+   <p>&nbsp;</p> 
+   <p><span style="color:#ff0000;">虚拟内存区域</span></p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp; 虚拟内存区域是进程的虚拟地址空间中的一个同质区间，即具有同样特性的连续地址</p> 
+   <p>范围。一个进程的内存映像由下面几部分组成：程序代码、数据、BSS和栈区域，以及内存</p> 
+   <p>映射的区域。</p> 
+   <p>一个进程的内存区域可以通过 /proc/pid/maps来查看</p> 
+   <p>例如：cat&nbsp;&nbsp; /proc/6/maps&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>每一行的域为：</p> 
+   <p>Start_end perm offset major:minor inode</p> 
+   <p>Start: 该区域起始虚拟地址</p> 
+   <p>End：该区域结束虚拟地址</p> 
+   <p>Perm：读、写和执行权限；表示对这个区域，允许进程做什么。这个域的最后一个字符要么是p表示私有的，要么是s表示共享的</p> 
+   <p>Offset: 被映射部分在文件中的起始地址</p> 
+   <p>Major、minor: 主次设备号</p> 
+   <p>Inode: 索引结点</p> 
+   <p>Linux内核使用结构vm_area_struct</p> 
+   <p>(&lt;linux/mm_types.h&gt;)来描述虚拟内存区域，其中几个主要成员如下：</p> 
+   <p>unsigned long vm_start&nbsp;&nbsp; 虚拟内存区域起始地址</p> 
+   <p>unsigned long vm_end&nbsp;&nbsp;&nbsp; 虚拟内存区域结束地址</p> 
+   <p>unsigned long vm_flags&nbsp;&nbsp;&nbsp; 该区域的标记。如：VM_IO和VM_RESERVED。</p> 
+   <p>VM_IO将该VMA标记为内存映射的IO区域，VM_IO会阻止系统将该区域包含在进程的存放转存（core dump）中, VM_RESERVED 标志内存区域不能被换出。</p> 
+   <p>&nbsp;</p> 
+   <p><span style="color:#ff0000;">mmap设备操作</span></p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 映射一个设备是指把用户空间的一段地址关联到设备内存上。当程序读写这段用户空间的地址时，它实际上是在访问设备。</p> 
+   <p>内存管理单元去关联的，通过页式管理关联的，具体如何关联的去了解linux内存管理吧。</p> 
+   <p><span style="color:#ff0000;">mmap设备方法需要完成什么功能？</span></p> 
+   <p>Mmap方法是file_oprations结构的成员，在mmap系统调用发出时被调用。在此之前，内核已经完成了很多工作。Mmap设备方法所需要做的就是建立虚拟地址到物理地址的页表。</p> 
+   <p>int &nbsp;(*mmap) (struct file*, struct vm_area_struct *)</p> 
+   <p><span style="color:#ff0000;">mmap如何完成页表的建立？</span></p> 
+   <p>方法有二：</p> 
+   <p>1、&nbsp; 使用remap_pfn_range一次建立所有页表；</p> 
+   <p>2、&nbsp; 使用nopage&nbsp; VMA方法每次建立一个页表</p> 
+   <p>&nbsp;</p> 
+   <p>构造页表的工作可由remap_pfn_range函数完成，原型如下：</p> 
+   <p>int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn, unsigned long size, pgprot_t prot)</p> 
+   <p>vma:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 虚拟内存区域指针</p> 
+   <p>virt_addr:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 虚拟地址的起始值</p> 
+   <p>pfn: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 要映射的物理地址所在的物理页帧号，可将物理地址&gt;&gt;PAGE_SHIFT得到,这个宏定义是12，就是除以4KB</p> 
+   <p>size： &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 要映射的区域的大小</p> 
+   <p>prot：&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; VMA的保护属性</p> 
+   <p>&nbsp;</p> 
+   <p>例子：</p> 
+   <p>int memdev_mmap(struct file *filp, struct vm_area_struct *vma)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //设置保护属性</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma-&gt;vm_flags |= VM_IO;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vma-&gt;vm_flags |= VM_RESERVED;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (remap_pfm_range(vma, vma-&gt;vma-start, virt_to_phys(dev-&gt;data)&gt;&gt;PAGE_SHIFT,</p> 
+   <p>size, vma-&gt;vm_page_prot))</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return –EAGAIN;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 0;</p> 
+   <p>}</p> 
+   <p>Dev-data是虚拟地址，就要用virt_to_phys转换为物理地址，如果是物理地址，那就不用转化了。</p> 
+   <p>这样就实现了mmap的设备操作</p> 
+   <div>
+    欢迎交流
+   </div> 
+   <div>
+    如有转载请注明出处
+   </div> 
+   <div> 
+    <p>新浪博客：http://blog.sina.com.cn/u/2049150530<br>博客园：http://www.cnblogs.com/sky-heaven/<br>知乎：http://www.zhihu.com/people/zhang-bing-hua</p> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

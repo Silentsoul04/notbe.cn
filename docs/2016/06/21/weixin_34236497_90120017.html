@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux中tty框架与uart框架之间的调用关系剖析【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://developer.51cto.com/art/201209/357501.htm    之前本人在"从串口驱动的移植看linux2.6内核中的驱动模型 platform device &amp; platform driver"一文中已经写到了移植的设备是如何通过p...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/06/21/weixin_34236497_90120017.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux中tty框架与uart框架之间的调用关系剖析【转】</h1>
+    <p class="post-meta">Jun 21, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://developer.51cto.com/art/201209/357501.htm" rel="nofollow">http://developer.51cto.com/art/201209/357501.htm</a></p> 
+   <p>之前本人在"<a href="http://blog.csdn.net/bonnshore/article/details/7979705" rel="nofollow">从串口驱动的移植看linux2.6内核中的驱动模型 platform device &amp; platform driver</a>"一文中已经写到了移植的设备是如何通过platform总线来与对应的驱动挂载。</p> 
+   <p>在这期间有一个问题困扰着我，那就是来自用户空间的针对uart设备的操作意图是如何通过tty框架逐层调用到uart层的core驱动，进而又是如何调用到真实对应于设备的设备驱动的，本文中的对应设备驱动就是8250驱动，最近我想将这方面的内容搞清楚。</p> 
+   <p>在说明这一方面问题之前我们先要大致了解两个基本的框架结构，tty框架和uart框架。</p> 
+   <p><strong>首先看看tty框架：</strong></p> 
+   <p>在linux系统中，tty表示各种终端。终端通常都跟硬件相对应。比如对应于输入设备键盘鼠标，输出设备显示器的控制终端和串口终端。</p> 
+   <p>下面这张图是一张很经典的图了，很清楚的展现了tty框架的层次结构，大家先看图，下面给大家解释。</p> 
+   <p><img class="fit-image" src="https://yqfile.alicdn.com/img_631392660d00b300299cced57137392b.jpg" alt=""></p> 
+   <p>最上面的用户空间会有很多对底层硬件（在本文中就是8250uart设备）的操作，像read，write等。用户空间主要是通过设备文件同tty_core交互，tty_core根据用空间操作的类型再选择跟line discipline和tty_driver也就是serial_core交互，例如设置硬件的ioctl指令就直接交给serial_core处理。Read和write操作就会交给line discipline处理。Line discipline是线路规程的意思。正如它的名字一样，它表示的是这条终端”线程”的输入与输出规范设置，主要用来进行输入/输出数据的预处理。处理之后，就会将数据交给serial_core，最后serial_core会调用8250.c的操作。</p> 
+   <p>下图是同一样一副经典的uart框架图，将uart重要的结构封装的很清楚，大家且看。</p> 
+   <p><img class="fit-image" src="https://yqfile.alicdn.com/img_bfb283d08788c68610ac3ef8a6c29528.jpg" alt="" width="498"></p> 
+   <p>一个uart_driver通常会注册一段设备号.即在用户空间会看到uart_driver对应有多个设备节点。例如:</p> 
+   <p>/dev/ttyS0&nbsp; /dev/ttyS1&nbsp;每个设备节点是对应一个具体硬件的,这样就可做到对多个硬件设备的统一管理，而每个设备文件应该对应一个uart_port，也就是说:uart_device要和多个uart_port关系起来。并且每个uart_port对应一个circ_buf（用来接收数据）,所以 uart_port必须要和这个缓存区关系起来。</p> 
+   <p><strong>1 自底向上</strong></p> 
+   <p>接下来我们就来看看对设备的操作是怎样进行起来的，不过在此之前我们有必要从底层的uart驱动注册时开始说起，这样到后面才能更清晰。</p> 
+   <p>这里我们讨论的是8250驱动，在驱动起来的时候调用了uart_register_driver(&amp;serial8250_reg);函数将参数serial8250_reg注册进了tty层。具体代码如下所示：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">int&nbsp;uart_register_driver(struct&nbsp;uart_driver&nbsp;*drv)&nbsp;</span></li> 
+   </ol>
+   <ol>
+    <li class="alt">{ &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;tty_driver&nbsp;*normal&nbsp;=&nbsp;NULL; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">int&nbsp;i,&nbsp;retval; &nbsp;</span> </li> 
+    <li>&nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;BUG_ON(drv-&gt;state); &nbsp;</li> 
+    <li>&nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">/* &nbsp;</span> </li> 
+    <li><span class="comment">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;Maybe&nbsp;we&nbsp;should&nbsp;be&nbsp;using&nbsp;a&nbsp;slab&nbsp;cache&nbsp;for&nbsp;this,&nbsp;especially&nbsp;if&nbsp; &nbsp;</span></li> 
+    <li class="alt"><span class="comment">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;we&nbsp;have&nbsp;a&nbsp;large&nbsp;number&nbsp;of&nbsp;ports&nbsp;to&nbsp;handle. &nbsp;</span></li> 
+    <li><span class="comment">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/&nbsp;</span></li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;drv-&gt;state&nbsp;=&nbsp;kzalloc(sizeof(struct&nbsp;uart_state)&nbsp;*&nbsp;drv-&gt;nr,&nbsp;GFP_KERNEL); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;retval&nbsp;=&nbsp;-ENOMEM; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(!drv-&gt;state) &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">goto&nbsp;out; &nbsp;</span> </li> 
+    <li class="alt">&nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;normal&nbsp;&nbsp;=&nbsp;alloc_tty_driver(drv-&gt;nr); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(!normal) &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">goto&nbsp;out; &nbsp;</span> </li> 
+    <li class="alt">&nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;drv-&gt;tty_driver&nbsp;=&nbsp;normal; &nbsp;</li> 
+    <li class="alt">&nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;owner&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;drv-&gt;owner; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;driver_name&nbsp;=&nbsp;drv-&gt;driver_name; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;drv-&gt;dev_name; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;major&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;drv-&gt;major; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;minor_start&nbsp;=&nbsp;drv-&gt;minor; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;type&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;TTY_DRIVER_TYPE_SERIAL; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;subtype&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;SERIAL_TYPE_NORMAL; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;init_termios&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_std_termios; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;init_termios.c_cflag&nbsp;=&nbsp;B9600&nbsp;|&nbsp;CS8&nbsp;|&nbsp;CREAD&nbsp;|&nbsp;HUPCL&nbsp;|&nbsp;CLOCAL; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;init_termios.c_ispeed&nbsp;=&nbsp;normal-&gt;init_termios.c_ospeed&nbsp;=&nbsp;<span class="number">9600; &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;flags&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;TTY_DRIVER_REAL_RAW&nbsp;|&nbsp;TTY_DRIVER_DYNAMIC_DEV; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;normal-&gt;driver_state&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;drv;&nbsp;&nbsp;<span class="comment">//&nbsp;here&nbsp;is&nbsp;important&nbsp;for&nbsp;me,&nbsp;ref&nbsp;uart_open&nbsp;function&nbsp;in&nbsp;this&nbsp;file&nbsp; &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;tty_set_operations(normal,&nbsp;&amp;uart_ops); &nbsp;</li> 
+    <li class="alt">&nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">/* &nbsp;</span> </li> 
+    <li class="alt"><span class="comment">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;Initialise&nbsp;the&nbsp;UART&nbsp;state(s).&nbsp; &nbsp;</span></li> 
+    <li><span class="comment">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/&nbsp;</span></li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">for&nbsp;(i&nbsp;=&nbsp;<span class="number">0;&nbsp;i&nbsp;&lt;&nbsp;drv-&gt;nr;&nbsp;i++)&nbsp;{ &nbsp;</span></span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;uart_state&nbsp;*state&nbsp;=&nbsp;drv-&gt;state&nbsp;+&nbsp;i; &nbsp;</li> 
+    <li class="alt">&nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;state-&gt;close_delay&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;<span class="number">500;&nbsp;&nbsp;&nbsp;<span class="comment">/*&nbsp;.5&nbsp;seconds&nbsp;*/&nbsp;</span></span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;state-&gt;closing_wait&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;<span class="number">30000;&nbsp;<span class="comment">/*&nbsp;30&nbsp;seconds&nbsp;*/&nbsp;</span></span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mutex_init(&amp;state-&gt;mutex); &nbsp;</li> 
+    <li class="alt">&nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tty_port_init(&amp;state-&gt;info.port); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;init_waitqueue_head(&amp;state-&gt;info.delta_msr_wait); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tasklet_init(&amp;state-&gt;info.tlet,&nbsp;uart_tasklet_action, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(unsigned&nbsp;<span class="keyword">long)state); &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li class="alt">&nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;retval&nbsp;=&nbsp;tty_register_driver(normal); &nbsp;</li> 
+    <li class="alt">&nbsp;out: &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(retval&nbsp;&lt;&nbsp;<span class="number">0)&nbsp;{ &nbsp;</span></span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;put_tty_driver(normal); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;kfree(drv-&gt;state); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">return&nbsp;retval; &nbsp;</span> </li> 
+    <li class="alt">}&nbsp;</li> 
+   </ol>
+   <p>从上面代码可以看出，uart_driver中很多数据结构其实就是tty_driver中的，将数据转换为tty_driver之后,注册tty_driver。然后初始化uart_driver-&gt;state的存储空间。<br>这里有两个地方我们需要特别关注：</p> 
+   <p><strong>第一个是</strong></p> 
+   <ol>
+    <li class="alt">normal-&gt;driver_state&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;drv;&nbsp;&nbsp;</li> 
+   </ol>
+   <p>为什么说重要呢，因为真实这一句将参数的ops关系都赋给了serial_core层。也就是说在后面serial_core会根据uart_ops关系找到我们的8250.c中所对应的操作，而我们参数中的ops是在哪被赋值的呢？这个一定是会在8250.c中不会错，所以我定位到了8250.c中的serial8250_ops结构体，初始化如下：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">static&nbsp;struct&nbsp;uart_ops&nbsp;serial8250_pops&nbsp;=&nbsp;{ &nbsp;</span></li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.tx_empty&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_tx_empty, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.set_mctrl&nbsp;&nbsp;=&nbsp;serial8250_set_mctrl, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.get_mctrl&nbsp;&nbsp;=&nbsp;serial8250_get_mctrl, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.stop_tx&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_stop_tx, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.start_tx&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_start_tx, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.stop_rx&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_stop_rx, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.enable_ms&nbsp;&nbsp;=&nbsp;serial8250_enable_ms, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.break_ctl&nbsp;&nbsp;=&nbsp;serial8250_break_ctl, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.startup&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_startup, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.shutdown&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_shutdown, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.set_termios&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_set_termios, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.pm&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_pm, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.type&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_type, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.release_port&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_release_port, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.request_port&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_request_port, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.config_port&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_config_port, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.verify_port&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;serial8250_verify_port, &nbsp;</li> 
+    <li class="alt">#ifdef&nbsp;CONFIG_CONSOLE_POLL &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.poll_get_char&nbsp;=&nbsp;serial8250_get_poll_char, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.poll_put_char&nbsp;=&nbsp;serial8250_put_poll_char, &nbsp;</li> 
+    <li>#endif &nbsp;</li> 
+    <li class="alt">};&nbsp;</li> 
+   </ol>
+   <p>这样一来只要将serial8250_ops结构体成员的值赋给我们uart_dirver就可以了，那么这个过程在哪呢？就是在uart_add_one_port()函数中，这个函数是从serial8250_init-&gt;serial8250_register_ports()-&gt;uart_add_one_port()逐步调用过来的，这一步就将port和uart_driver联系起来了。</p> 
+   <p><strong>第二个需要关注的地方：</strong></p> 
+   <ol>
+    <li class="alt">tty_set_operations(normal,&nbsp;&amp;uart_ops);&nbsp;</li> 
+   </ol>
+   <p>此句之所以值得关注是因为.在这里将tty_driver的操作集统一设为了uart_ops.这样就使得从用户空间下来的操作可以找到正确的serial_core的操作函数，uart_ops是在serial_core.c中的：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">static&nbsp;<span class="keyword">const&nbsp;struct&nbsp;tty_operations&nbsp;uart_ops&nbsp;=&nbsp;{ &nbsp;</span></span></li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.open&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_open, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.close&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_close, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.write&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_write, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.put_char&nbsp;&nbsp;&nbsp;=&nbsp;uart_put_char, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.flush_chars&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_flush_chars, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.write_room&nbsp;=&nbsp;uart_write_room, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.chars_in_buffer=&nbsp;uart_chars_in_buffer, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.flush_buffer&nbsp;&nbsp;&nbsp;=&nbsp;uart_flush_buffer, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.ioctl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_ioctl, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.throttle&nbsp;&nbsp;&nbsp;=&nbsp;uart_throttle, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.unthrottle&nbsp;=&nbsp;uart_unthrottle, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.send_xchar&nbsp;=&nbsp;uart_send_xchar, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.set_termios&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_set_termios, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.set_ldisc&nbsp;&nbsp;=&nbsp;uart_set_ldisc, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.stop&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_stop, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.start&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_start, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.hangup&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;uart_hangup, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.break_ctl&nbsp;&nbsp;=&nbsp;uart_break_ctl, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.wait_until_sent=&nbsp;uart_wait_until_sent, &nbsp;</li> 
+    <li class="alt">#ifdef&nbsp;CONFIG_PROC_FS &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.read_proc&nbsp;&nbsp;=&nbsp;uart_read_proc, &nbsp;</li> 
+    <li class="alt">#endif &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.tiocmget&nbsp;&nbsp;&nbsp;=&nbsp;uart_tiocmget, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.tiocmset&nbsp;&nbsp;&nbsp;=&nbsp;uart_tiocmset, &nbsp;</li> 
+    <li>#ifdef&nbsp;CONFIG_CONSOLE_POLL &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.poll_init&nbsp;&nbsp;=&nbsp;uart_poll_init, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.poll_get_char&nbsp;&nbsp;=&nbsp;uart_poll_get_char, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.poll_put_char&nbsp;&nbsp;=&nbsp;uart_poll_put_char, &nbsp;</li> 
+    <li>#endif &nbsp;</li> 
+    <li class="alt">};&nbsp;</li> 
+   </ol>
+   <p>这样就保证了调用关系的通畅。</p> 
+   <p><strong>2 自顶向下</strong></p> 
+   <p>说完了从底层注册时所需要注意的地方，现在我们来看看正常的从上到下的调用关系。tty_core是所有tty类型的驱动的顶层构架，向用户应用层提供了统一的接口，应用层的read/write等调用首先会到达这里。此层由内核实现，代码主要分布在drivers/char目录下的n_tty.c，tty_io.c等文件中，下面的代码：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">static&nbsp;<span class="keyword">const&nbsp;struct&nbsp;file_operations&nbsp;tty_fops&nbsp;=&nbsp;{ &nbsp;</span></span></li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.llseek&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;no_llseek, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.read&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_read, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.write&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_write, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.poll&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_poll, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.unlocked_ioctl&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_ioctl, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.compat_ioctl&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_compat_ioctl, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.open&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_open, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;.release&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_release, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;.fasync&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;tty_fasync, &nbsp;</li> 
+    <li class="alt">};&nbsp;</li> 
+   </ol>
+   <p>就是定义了此层调用函数的结构体，在uart_register_driver()函数中我们调用了每个tty类型的驱动注册时都会调用的tty_register_driver函数，代码如下：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">int&nbsp;tty_register_driver(struct&nbsp;tty_driver&nbsp;*&nbsp;driver) &nbsp;</span></li> 
+    <li>{ &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;cdev_init(&amp;driver-&gt;cdev,&nbsp;&amp;tty_fops); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li>}&nbsp;</li> 
+   </ol>
+   <p>我们可以看到，此句就已经将指针调用关系赋给了cdev，以用于完成调用。在前面我们已经说过了，Read和write操作就会交给line discipline处理，我们在下面的代码可以看出调用的就是线路规程的函数：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">static&nbsp;ssize_t&nbsp;tty_read(struct&nbsp;file&nbsp;*file,&nbsp;<span class="keyword">char&nbsp;__user&nbsp;*buf,&nbsp;size_t&nbsp;count, &nbsp;</span></span></li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;loff_t&nbsp;*ppos) &nbsp;</li> 
+    <li class="alt">{ &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;ld&nbsp;=&nbsp;tty_ldisc_ref_wait(tty); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(ld-&gt;ops-&gt;read) &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i&nbsp;=&nbsp;(ld-&gt;ops-&gt;read)(tty,&nbsp;file,&nbsp;buf,&nbsp;count); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">//调用到了ldisc层（线路规程）的read函数 &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">else&nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i&nbsp;=&nbsp;-EIO; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;tty_ldisc_deref(ld); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li class="alt">} &nbsp;</li> 
+    <li><span class="keyword">static&nbsp;ssize_t&nbsp;tty_write(struct&nbsp;file&nbsp;*file,&nbsp;<span class="keyword">const&nbsp;<span class="keyword">char&nbsp;__user&nbsp;*buf, &nbsp;</span></span></span></li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;size_t&nbsp;count,&nbsp;loff_t&nbsp;*ppos) &nbsp;</li> 
+    <li>{ &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;ld&nbsp;=&nbsp;tty_ldisc_ref_wait(tty); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(!ld-&gt;ops-&gt;write) &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ret&nbsp;=&nbsp;-EIO; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">else&nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ret&nbsp;=&nbsp;do_tty_write(ld-&gt;ops-&gt;write,&nbsp;tty,&nbsp;file,&nbsp;buf,&nbsp;count); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;tty_ldisc_deref(ld); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">return&nbsp;ret; &nbsp;</span> </li> 
+    <li class="alt">} &nbsp;</li> 
+    <li><span class="keyword">static&nbsp;inline&nbsp;ssize_t&nbsp;do_tty_write( &nbsp;</span></li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;ssize_t&nbsp;(*write)(struct&nbsp;tty_struct&nbsp;*,&nbsp;struct&nbsp;file&nbsp;*,&nbsp;<span class="keyword">const&nbsp;unsigned&nbsp;<span class="keyword">char&nbsp;*,&nbsp;size_t), &nbsp;</span></span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;tty_struct&nbsp;*tty, &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;file&nbsp;*file, &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">const&nbsp;<span class="keyword">char&nbsp;__user&nbsp;*buf, &nbsp;</span></span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;size_t&nbsp;count) &nbsp;</li> 
+    <li>{ &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">for&nbsp;(;;)&nbsp;{ &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;size_t&nbsp;size&nbsp;=&nbsp;count; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(size&nbsp;&gt;&nbsp;chunk) &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;size&nbsp;=&nbsp;chunk; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ret&nbsp;=&nbsp;-EFAULT; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(copy_from_user(tty-&gt;write_buf,&nbsp;buf,&nbsp;size)) &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ret&nbsp;=&nbsp;write(tty,&nbsp;file,&nbsp;tty-&gt;write_buf,&nbsp;size); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">//调用到了ldisc层的write函数 &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(ret&nbsp;&lt;=&nbsp;<span class="number">0) &nbsp;</span></span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li>}&nbsp;</li> 
+   </ol>
+   <p>那我们就去看看线路规程调用的是又是谁，代码目录在drivers/char/n_tty.c文件中，下面的代码是线路规程中的write函数：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">static&nbsp;ssize_t&nbsp;n_tty_write(struct&nbsp;tty_struct&nbsp;*tty,&nbsp;struct&nbsp;file&nbsp;*file, &nbsp;</span></li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">const&nbsp;unsigned&nbsp;<span class="keyword">char&nbsp;*buf,&nbsp;size_t&nbsp;nr) &nbsp;</span></span> </li> 
+    <li class="alt">{ &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;add_wait_queue(&amp;tty-&gt;write_wait,&nbsp;&amp;wait);<span class="comment">//将当前进程放到等待队列中 &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">while&nbsp;(<span class="number">1)&nbsp;{ &nbsp;</span></span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;set_current_state(TASK_INTERRUPTIBLE); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(signal_pending(current))&nbsp;{ &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;retval&nbsp;=&nbsp;-ERESTARTSYS; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">//进入此处继续执行的原因可能是被信号打断，而不是条件得到了满足。 &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">//只有条件得到了满足，我们才会继续，否则，直接返回！ &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(tty_hung_up_p(file)&nbsp;||&nbsp;(tty-&gt;link&nbsp;&amp;&amp;&nbsp;!tty-&gt;link-&gt;count))&nbsp;{ &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;retval&nbsp;=&nbsp;-EIO; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(O_OPOST(tty)&nbsp;&amp;&amp;&nbsp;!(test_bit(TTY_HW_COOK_OUT,&nbsp;&amp;tty-&gt;flags)))&nbsp;{ &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">while&nbsp;(nr&nbsp;&gt;&nbsp;<span class="number">0)&nbsp;{ &nbsp;</span></span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ssize_t&nbsp;num&nbsp;=&nbsp;process_output_block(tty,&nbsp;b,&nbsp;nr); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(num&nbsp;&lt;&nbsp;<span class="number">0)&nbsp;{ &nbsp;</span></span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(num&nbsp;==&nbsp;-EAGAIN) &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;retval&nbsp;=&nbsp;num; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">goto&nbsp;break_out; &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;+=&nbsp;num; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;nr&nbsp;-=&nbsp;num; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(nr&nbsp;==&nbsp;<span class="number">0) &nbsp;</span></span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;c&nbsp;=&nbsp;*b; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(process_output(c,&nbsp;tty)&nbsp;&lt;&nbsp;<span class="number">0) &nbsp;</span></span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b++;&nbsp;nr--; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(tty-&gt;ops-&gt;flush_chars) &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tty-&gt;ops-&gt;flush_chars(tty); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}&nbsp;<span class="keyword">else&nbsp;{ &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">while&nbsp;(nr&nbsp;&gt;&nbsp;<span class="number">0)&nbsp;{ &nbsp;</span></span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;c&nbsp;=&nbsp;tty-&gt;ops-&gt;write(tty,&nbsp;b,&nbsp;nr); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">//调用到具体的驱动中的write函数 &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(c&nbsp;&lt;&nbsp;<span class="number">0)&nbsp;{ &nbsp;</span></span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;retval&nbsp;=&nbsp;c; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">goto&nbsp;break_out; &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(!c) &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;+=&nbsp;c; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;nr&nbsp;-=&nbsp;c; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(!nr) &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">//全部写入，返回 &nbsp;</span> </li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">if&nbsp;(file-&gt;f_flags&nbsp;&amp;&nbsp;O_NONBLOCK)&nbsp;{ &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;retval&nbsp;=&nbsp;-EAGAIN; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">break; &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">/*&nbsp; &nbsp;</span> </li> 
+    <li><span class="comment">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;假如是以非阻塞的方式打开的，那么也直接返回。否则，让出cpu，等条件满足以后再继续执行。 &nbsp;</span></li> 
+    <li class="alt"><span class="comment">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;</span></li> 
+    <li>&nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;schedule();<span class="comment">//执行到这里，当前进程才会真正让出cpu！！！ &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li class="alt">break_out: &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;__set_current_state(TASK_RUNNING); &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;remove_wait_queue(&amp;tty-&gt;write_wait,&nbsp;&amp;wait); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li class="alt">}&nbsp;</li> 
+   </ol>
+   <p>在上面我们可以看到此句：</p> 
+   <ol>
+    <li class="alt">c&nbsp;=&nbsp;tty-&gt;ops-&gt;write(tty,&nbsp;b,&nbsp;nr);&nbsp;</li> 
+   </ol>
+   <p>此句很明显告诉我们这是调用了serial_core的write()函数，可是这些调用关系指针是在哪赋值的，刚开始我也是郁闷了一段时间，不过好在我最后还是找到了一些蛛丝马迹。其实就是在tty_core进行open的时候悄悄把tty-&gt;ops指针给赋值了。具体的代码就在driver/char/tty_io.c中，调用关系如下所示：</p> 
+   <p>tty_open -&gt; tty_init_dev -&gt; initialize_tty_struct，initialize_tty_struct()函数的代码在下面：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">void&nbsp;initialize_tty_struct(struct&nbsp;tty_struct&nbsp;*tty, &nbsp;</span></li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;tty_driver&nbsp;*driver,&nbsp;<span class="keyword">int&nbsp;idx) &nbsp;</span> </li> 
+    <li class="alt">{ &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;tty-&gt;ops&nbsp;=&nbsp;driver-&gt;ops; &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;... &nbsp;</li> 
+    <li class="alt">}&nbsp;</li> 
+   </ol>
+   <p>可以看到啦，这里就将serial_core层的操作调用关系指针值付给了tty_core层，这样tty-&gt;ops-&gt;write()其实调用到了具体的驱动的write函数，在这里就是我们前面说到的8250驱动中的write函数没问题了。从这就可以看出其实在操作指针值得层层传递上open操作还是功不可没的，这么讲不仅仅是因为上面的赋值过程，还有下面这个，在open操作调用到serial_core层的时候有下面的代码：</p> 
+   <ol>
+    <li class="alt"><span class="keyword">static&nbsp;<span class="keyword">int&nbsp;uart_open(struct&nbsp;tty_struct&nbsp;*tty,&nbsp;struct&nbsp;file&nbsp;*filp) &nbsp;</span></span></li> 
+    <li>{ &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;uart_driver&nbsp;*drv&nbsp;=&nbsp;(struct&nbsp;uart_driver&nbsp;*)tty-&gt;driver-&gt;driver_state;&nbsp;<span class="comment">//&nbsp;here&nbsp;just&nbsp;tell&nbsp;me&nbsp;why&nbsp;uart_open&nbsp;can&nbsp;call&nbsp;8250 &nbsp;</span> </li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;struct&nbsp;uart_state&nbsp;*state; &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">int&nbsp;retval,&nbsp;line&nbsp;=&nbsp;tty-&gt;index; &nbsp;</span> </li> 
+    <li>&nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;…… &nbsp;</li> 
+    <li>&nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;uart_update_termios(state); &nbsp;</li> 
+    <li>&nbsp;&nbsp;&nbsp;&nbsp;} &nbsp;</li> 
+    <li class="alt">&nbsp;</li> 
+    <li>&nbsp;fail: &nbsp;</li> 
+    <li class="alt">&nbsp;&nbsp;&nbsp;&nbsp;<span class="keyword">return&nbsp;retval; &nbsp;</span> </li> 
+    <li>}&nbsp;</li> 
+   </ol>
+   <p>在此函数的第一句我们就看到了似曾相识的东西了，没错就是我们在uart_register_driver()的时候所做的一些事情，那时我们是放进去，现在是拿出来而已。</p> 
+   <p>这样一来，我们先从底层向上层分析上来后，又由顶层向底层分析下去，两头总算是接上头了，我很高兴，不是因为我花了近两个小时的时间终于写完了这篇博客，而是我是第一次通过这篇博客的写作过程弄清楚了这个有点小复杂的环节，当然有谬误的地方还是希望大家能慷慨指出。</p> 
+   <p>分享知识，共同进步~</p> 
+   <p>&nbsp;</p> 
+   <p>原文链接：<a href="http://blog.csdn.net/bonnshore/article/details/7996730" rel="nofollow">http://blog.csdn.net/bonnshore/article/details/7996730</a></p> 
+   <p>【编辑推荐】</p> 
+   <div>
+    <ol>
+     <li><a href="http://developer.51cto.com/art/201209/355963.htm" rel="nofollow">夏雪：蜀汉成败与架构思考</a></li> 
+     <li><a href="http://developer.51cto.com/art/201209/356607.htm" rel="nofollow">将 Linux 作为一个科学计算平台进行探索</a></li> 
+     <li><a href="http://developer.51cto.com/art/201209/357087.htm" rel="nofollow">Linux 灾难恢复</a></li> 
+     <li><a href="http://developer.51cto.com/art/201209/357313.htm" rel="nofollow">互联网创业的准备：架构</a></li> 
+     <li><a href="http://developer.51cto.com/art/201209/357381.htm" rel="nofollow">#微架构设计#快速表态存储设计</a></li> 
+    </ol>
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

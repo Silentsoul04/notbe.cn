@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>cnn、rnn及lstm的numpy实现 « NotBeCN</title>
+  <meta name="description" content="         rnn的实现原理参考：   https://zybuluo.com/hanbingtao/note/541458   rnn.py:   #!/usr/bin/env python# -*- coding: UTF-8 -*-import numpy as npfrom cnn import e...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/weixin_38241876_90137686.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">cnn、rnn及lstm的numpy实现</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>rnn的实现原理参考：</p> 
+  <p><a href="https://zybuluo.com/hanbingtao/note/541458" rel="nofollow">https://zybuluo.com/hanbingtao/note/541458</a></p> 
+  <p>rnn.py:</p> 
+  <pre class="has">
+<code>#!/usr/bin/env python
+# -*- coding: UTF-8 -*-
+
+
+import numpy as np
+from cnn import element_wise_op
+from activators import ReluActivator, IdentityActivator
+from functools import reduce
+
+
+class RecurrentLayer(object):
+    def __init__(self, input_width, state_width,
+                 activator, learning_rate):
+        self.input_width = input_width
+        self.state_width = state_width
+        self.activator = activator
+        self.learning_rate = learning_rate
+        self.times = 0  # 当前时刻初始化为t0
+        self.state_list = []  # 保存各个时刻的state
+        self.state_list.append(np.zeros(
+            (state_width, 1)))  # 初始化s0
+        self.U = np.random.uniform(-1e-4, 1e-4,
+                                   (state_width, input_width))  # 初始化U
+        self.W = np.random.uniform(-1e-4, 1e-4,
+                                   (state_width, state_width))  # 初始化W
+
+    def forward(self, input_array):
+        '''
+        根据『式2』进行前向计算
+        '''
+        self.times += 1
+        state = (np.dot(self.U, input_array) +
+                 np.dot(self.W, self.state_list[-1]))
+        element_wise_op(state, self.activator.forward)
+        self.state_list.append(state)
+
+    def backward(self, sensitivity_array,
+                 activator):
+        '''
+        实现BPTT算法
+        '''
+        self.calc_delta(sensitivity_array, activator)
+        self.calc_gradient()
+
+    def update(self):
+        '''
+        按照梯度下降，更新权重
+        '''
+        self.W -= self.learning_rate * self.gradient
+
+    def calc_delta(self, sensitivity_array, activator):
+        self.delta_list = []  # 用来保存各个时刻的误差项
+        for i in range(self.times):
+            self.delta_list.append(np.zeros(
+                (self.state_width, 1)))
+        self.delta_list.append(sensitivity_array)
+        # 迭代计算每个时刻的误差项
+        for k in range(self.times - 1, 0, -1):
+            self.calc_delta_k(k, activator)
+
+    def calc_delta_k(self, k, activator):
+        '''
+        根据k+1时刻的delta计算k时刻的delta
+        '''
+        state = self.state_list[k + 1].copy()
+        element_wise_op(self.state_list[k + 1],
+                        activator.backward)
+        self.delta_list[k] = np.dot(
+            np.dot(self.delta_list[k + 1].T, self.W),
+            np.diag(state[:, 0])).T
+
+    def calc_gradient(self):
+        self.gradient_list = []  # 保存各个时刻的权重梯度
+        for t in range(self.times + 1):
+            self.gradient_list.append(np.zeros(
+                (self.state_width, self.state_width)))
+        for t in range(self.times, 0, -1):
+            self.calc_gradient_t(t)
+        # 实际的梯度是各个时刻梯度之和
+        self.gradient = reduce(
+            lambda a, b: a + b, self.gradient_list,
+            self.gradient_list[0])  # [0]被初始化为0且没有被修改过
+
+    def calc_gradient_t(self, t):
+        '''
+        计算每个时刻t权重的梯度
+        '''
+        gradient = np.dot(self.delta_list[t],
+                          self.state_list[t - 1].T)
+        self.gradient_list[t] = gradient
+
+    def reset_state(self):
+        self.times = 0  # 当前时刻初始化为t0
+        self.state_list = []  # 保存各个时刻的state
+        self.state_list.append(np.zeros(
+            (self.state_width, 1)))  # 初始化s0
+
+
+def data_set():
+    x = [np.array([[1], [2], [3]]),
+         np.array([[2], [3], [4]])]
+    d = np.array([[1], [2]])
+    return x, d
+
+
+def gradient_check():
+    '''
+    梯度检查
+    '''
+    # 设计一个误差函数，取所有节点输出项之和
+    error_function = lambda o: o.sum()
+
+    rl = RecurrentLayer(3, 2, IdentityActivator(), 1e-3)
+
+    # 计算forward值
+    x, d = data_set()
+    rl.forward(x[0])
+    rl.forward(x[1])
+
+    # 求取sensitivity map
+    sensitivity_array = np.ones(rl.state_list[-1].shape,
+                                dtype=np.float64)
+    # 计算梯度
+    rl.backward(sensitivity_array, IdentityActivator())
+
+    # 检查梯度
+    epsilon = 10e-4
+    for i in range(rl.W.shape[0]):
+        for j in range(rl.W.shape[1]):
+            rl.W[i, j] += epsilon
+            rl.reset_state()
+            rl.forward(x[0])
+            rl.forward(x[1])
+            err1 = error_function(rl.state_list[-1])
+            rl.W[i, j] -= 2 * epsilon
+            rl.reset_state()
+            rl.forward(x[0])
+            rl.forward(x[1])
+            err2 = error_function(rl.state_list[-1])
+            expect_grad = (err1 - err2) / (2 * epsilon)
+            rl.W[i, j] += epsilon
+            print
+            ('weights(%d,%d): expected - actural %f - %f' % (
+                i, j, expect_grad, rl.gradient[i, j]))
+
+
+def test():
+    l = RecurrentLayer(3, 2, ReluActivator(), 1e-3)
+    x, d = data_set()
+    l.forward(x[0])
+    l.forward(x[1])
+    l.backward(d, ReluActivator())
+    return l
+
+
+
+if __name__ == "__main__":
+    print(test())
+</code></pre> 
+  <pre class="has">
+<code class="language-html">activators.py:</code></pre> 
+  <pre class="has">
+<code>#!/usr/bin/env python
+# -*- coding: UTF-8 -*-
+
+
+import numpy as np
+
+
+class ReluActivator(object):
+    def forward(self, weighted_input):
+        #return weighted_input
+        return max(0, weighted_input)
+
+    def backward(self, output):
+        return 1 if output &gt; 0 else 0
+
+
+class IdentityActivator(object):
+    def forward(self, weighted_input):
+        return weighted_input
+
+    def backward(self, output):
+        return 1
+
+
+class SigmoidActivator(object):
+    def forward(self, weighted_input):
+        return 1.0 / (1.0 + np.exp(-weighted_input))
+
+    def backward(self, output):
+        return output * (1 - output)
+
+
+class TanhActivator(object):
+    def forward(self, weighted_input):
+        return 2.0 / (1.0 + np.exp(-2 * weighted_input)) - 1.0
+
+    def backward(self, output):
+        return 1 - output * output
+</code></pre> 
+  <p>CNN具体参考：</p> 
+  <p><a href="https://www.zybuluo.com/hanbingtao/note/485480" rel="nofollow">https://www.zybuluo.com/hanbingtao/note/485480</a></p> 
+  <p>cnn.py:</p> 
+  <pre class="has">
+<code>#!/usr/bin/env python
+# -*- coding: UTF-8 -*-
+
+
+import numpy as np
+from activators import ReluActivator, IdentityActivator
+
+
+# 获取卷积区域
+def get_patch(input_array, i, j, filter_width,
+              filter_height, stride):
+    '''
+    从输入数组中获取本次卷积的区域，
+    自动适配输入为2D和3D的情况
+    '''
+    start_i = i * stride
+    start_j = j * stride
+    if input_array.ndim == 2:
+        return input_array[
+               start_i: start_i + filter_height,
+               start_j: start_j + filter_width]
+    elif input_array.ndim == 3:
+        return input_array[:,
+               start_i: start_i + filter_height,
+               start_j: start_j + filter_width]
+
+
+# 获取一个2D区域的最大值所在的索引
+def get_max_index(array):
+    max_i = 0
+    max_j = 0
+    max_value = array[0, 0]
+    for i in range(array.shape[0]):
+        for j in range(array.shape[1]):
+            if array[i, j] &gt; max_value:
+                max_value = array[i, j]
+                max_i, max_j = i, j
+    return max_i, max_j
+
+
+# 计算卷积
+def conv(input_array,
+         kernel_array,
+         output_array,
+         stride, bias):
+    '''
+    计算卷积，自动适配输入为2D和3D的情况
+    '''
+    channel_number = input_array.ndim
+    output_width = output_array.shape[1]
+    output_height = output_array.shape[0]
+    kernel_width = kernel_array.shape[-1]
+    kernel_height = kernel_array.shape[-2]
+    for i in range(output_height):
+        for j in range(output_width):
+            output_array[i][j] = (
+                                         get_patch(input_array, i, j, kernel_width,
+                                                   kernel_height, stride) * kernel_array
+                                 ).sum() + bias
+
+
+# 为数组增加Zero padding
+def padding(input_array, zp):
+    '''
+    为数组增加Zero padding，自动适配输入为2D和3D的情况
+    '''
+    if zp == 0:
+        return input_array
+    else:
+        if input_array.ndim == 3:
+            input_width = input_array.shape[2]
+            input_height = input_array.shape[1]
+            input_depth = input_array.shape[0]
+            padded_array = np.zeros((
+                input_depth,
+                input_height + 2 * zp,
+                input_width + 2 * zp))
+            padded_array[:,
+            zp: zp + input_height,
+            zp: zp + input_width] = input_array
+            return padded_array
+        elif input_array.ndim == 2:
+            input_width = input_array.shape[1]
+            input_height = input_array.shape[0]
+            padded_array = np.zeros((
+                input_height + 2 * zp,
+                input_width + 2 * zp))
+            padded_array[zp: zp + input_height,
+            zp: zp + input_width] = input_array
+            return padded_array
+
+
+# 对numpy数组进行element wise操作
+def element_wise_op(array, op):
+    for i in np.nditer(array,
+                       op_flags=['readwrite']):
+        i[...] = op(i)
+
+
+class Filter(object):
+    def __init__(self, width, height, depth):
+        self.weights = np.random.uniform(-1e-4, 1e-4,
+                                         (depth, height, width))
+        self.bias = 0
+        self.weights_grad = np.zeros(
+            self.weights.shape)
+        self.bias_grad = 0
+
+    def __repr__(self):
+        return ('filter weights:\n%s\nbias:\n%s' % (
+            repr(self.weights), repr(self.bias)))
+
+    def get_weights(self):
+        return self.weights
+
+    def get_bias(self):
+        return self.bias
+
+    def update(self, learning_rate):
+        self.weights -= learning_rate * self.weights_grad
+        self.bias -= learning_rate * self.bias_grad
+
+
+class ConvLayer(object):
+    def __init__(self, input_width, input_height,
+                 channel_number, filter_width,
+                 filter_height, filter_number,
+                 zero_padding, stride, activator,
+                 learning_rate):
+        self.input_width = input_width
+        self.input_height = input_height
+        self.channel_number = channel_number
+        self.filter_width = filter_width
+        self.filter_height = filter_height
+        self.filter_number = filter_number
+        self.zero_padding = zero_padding
+        self.stride = stride
+        self.output_width = \
+            ConvLayer.calculate_output_size(
+                self.input_width, filter_width, zero_padding,
+                stride)
+        self.output_height = \
+            ConvLayer.calculate_output_size(
+                self.input_height, filter_height, zero_padding,
+                stride)
+        self.output_array = np.zeros((self.filter_number,
+                                      self.output_height, self.output_width))
+        self.filters = []
+        for i in range(filter_number):
+            self.filters.append(Filter(filter_width,
+                                       filter_height, self.channel_number))
+        self.activator = activator
+        self.learning_rate = learning_rate
+
+    def forward(self, input_array):
+        '''
+        计算卷积层的输出
+        输出结果保存在self.output_array
+        '''
+        self.input_array = input_array
+        self.padded_input_array = padding(input_array,
+                                          self.zero_padding)
+        for f in range(self.filter_number):
+            filter = self.filters[f]
+            conv(self.padded_input_array,
+                 filter.get_weights(), self.output_array[f],
+                 self.stride, filter.get_bias())
+        element_wise_op(self.output_array,
+                        self.activator.forward)
+
+    def backward(self, input_array, sensitivity_array,
+                 activator):
+        '''
+        计算传递给前一层的误差项，以及计算每个权重的梯度
+        前一层的误差项保存在self.delta_array
+        梯度保存在Filter对象的weights_grad
+        '''
+        self.forward(input_array)
+        self.bp_sensitivity_map(sensitivity_array,
+                                activator)
+        self.bp_gradient(sensitivity_array)
+
+    def update(self):
+        '''
+        按照梯度下降，更新权重
+        '''
+        for filter in self.filters:
+            filter.update(self.learning_rate)
+
+    def bp_sensitivity_map(self, sensitivity_array,
+                           activator):
+        '''
+        计算传递到上一层的sensitivity map
+        sensitivity_array: 本层的sensitivity map
+        activator: 上一层的激活函数
+        '''
+        # 处理卷积步长，对原始sensitivity map进行扩展
+        expanded_array = self.expand_sensitivity_map(
+            sensitivity_array)
+        # full卷积，对sensitivitiy map进行zero padding
+        # 虽然原始输入的zero padding单元也会获得残差
+        # 但这个残差不需要继续向上传递，因此就不计算了
+        expanded_width = expanded_array.shape[2]
+        zp = (self.input_width +
+              self.filter_width - 1 - expanded_width) / 2
+        padded_array = padding(expanded_array, zp)
+        # 初始化delta_array，用于保存传递到上一层的
+        # sensitivity map
+        self.delta_array = self.create_delta_array()
+        # 对于具有多个filter的卷积层来说，最终传递到上一层的
+        # sensitivity map相当于所有的filter的
+        # sensitivity map之和
+        for f in range(self.filter_number):
+            filter = self.filters[f]
+            # 将filter权重翻转180度
+            flipped_weights = np.array(map(
+                lambda i: np.rot90(i, 2),
+                filter.get_weights()))
+            # 计算与一个filter对应的delta_array
+            delta_array = self.create_delta_array()
+            for d in range(delta_array.shape[0]):
+                conv(padded_array[f], flipped_weights[d],
+                     delta_array[d], 1, 0)
+            self.delta_array += delta_array
+        # 将计算结果与激活函数的偏导数做element-wise乘法操作
+        derivative_array = np.array(self.input_array)
+        element_wise_op(derivative_array,
+                        activator.backward)
+        self.delta_array *= derivative_array
+
+    def bp_gradient(self, sensitivity_array):
+        # 处理卷积步长，对原始sensitivity map进行扩展
+        expanded_array = self.expand_sensitivity_map(
+            sensitivity_array)
+        for f in range(self.filter_number):
+            # 计算每个权重的梯度
+            filter = self.filters[f]
+            for d in range(filter.weights.shape[0]):
+                conv(self.padded_input_array[d],
+                     expanded_array[f],
+                     filter.weights_grad[d], 1, 0)
+            # 计算偏置项的梯度
+            filter.bias_grad = expanded_array[f].sum()
+
+    def expand_sensitivity_map(self, sensitivity_array):
+        depth = sensitivity_array.shape[0]
+        # 确定扩展后sensitivity map的大小
+        # 计算stride为1时sensitivity map的大小
+        expanded_width = (self.input_width -
+                          self.filter_width + 2 * self.zero_padding + 1)
+        expanded_height = (self.input_height -
+                           self.filter_height + 2 * self.zero_padding + 1)
+        # 构建新的sensitivity_map
+        expand_array = np.zeros((depth, expanded_height,
+                                 expanded_width))
+        # 从原始sensitivity map拷贝误差值
+        for i in range(self.output_height):
+            for j in range(self.output_width):
+                i_pos = i * self.stride
+                j_pos = j * self.stride
+                expand_array[:, i_pos, j_pos] = \
+                    sensitivity_array[:, i, j]
+        return expand_array
+
+    def create_delta_array(self):
+        return np.zeros((self.channel_number,
+                         self.input_height, self.input_width))
+
+    @staticmethod
+    def calculate_output_size(input_size,
+                              filter_size, zero_padding, stride):
+        return (input_size - filter_size +
+                2 * zero_padding) / stride + 1
+
+
+class MaxPoolingLayer(object):
+    def __init__(self, input_width, input_height,
+                 channel_number, filter_width,
+                 filter_height, stride):
+        self.input_width = input_width
+        self.input_height = input_height
+        self.channel_number = channel_number
+        self.filter_width = filter_width
+        self.filter_height = filter_height
+        self.stride = stride
+        self.output_width = (input_width -
+                             filter_width) / self.stride + 1
+        self.output_height = (input_height -
+                              filter_height) / self.stride + 1
+        self.output_array = np.zeros((self.channel_number,
+                                      self.output_height, self.output_width))
+
+    def forward(self, input_array):
+        for d in range(self.channel_number):
+            for i in range(self.output_height):
+                for j in range(self.output_width):
+                    self.output_array[d, i, j] = (
+                        get_patch(input_array[d], i, j,
+                                  self.filter_width,
+                                  self.filter_height,
+                                  self.stride).max())
+
+    def backward(self, input_array, sensitivity_array):
+        self.delta_array = np.zeros(input_array.shape)
+        for d in range(self.channel_number):
+            for i in range(self.output_height):
+                for j in range(self.output_width):
+                    patch_array = get_patch(
+                        input_array[d], i, j,
+                        self.filter_width,
+                        self.filter_height,
+                        self.stride)
+                    k, l = get_max_index(patch_array)
+                    self.delta_array[d,
+                                     i * self.stride + k,
+                                     j * self.stride + l] = \
+                        sensitivity_array[d, i, j]
+
+
+def init_test():
+    a = np.array(
+        [[[0, 1, 1, 0, 2],
+          [2, 2, 2, 2, 1],
+          [1, 0, 0, 2, 0],
+          [0, 1, 1, 0, 0],
+          [1, 2, 0, 0, 2]],
+         [[1, 0, 2, 2, 0],
+          [0, 0, 0, 2, 0],
+          [1, 2, 1, 2, 1],
+          [1, 0, 0, 0, 0],
+          [1, 2, 1, 1, 1]],
+         [[2, 1, 2, 0, 0],
+          [1, 0, 0, 1, 0],
+          [0, 2, 1, 0, 1],
+          [0, 1, 2, 2, 2],
+          [2, 1, 0, 0, 1]]])
+    b = np.array(
+        [[[0, 1, 1],
+          [2, 2, 2],
+          [1, 0, 0]],
+         [[1, 0, 2],
+          [0, 0, 0],
+          [1, 2, 1]]])
+    cl = ConvLayer(5, 5, 3, 3, 3, 2, 1, 2, IdentityActivator(), 0.001)
+    cl.filters[0].weights = np.array(
+        [[[-1, 1, 0],
+          [0, 1, 0],
+          [0, 1, 1]],
+         [[-1, -1, 0],
+          [0, 0, 0],
+          [0, -1, 0]],
+         [[0, 0, -1],
+          [0, 1, 0],
+          [1, -1, -1]]], dtype=np.float64)
+    cl.filters[0].bias = 1
+    cl.filters[1].weights = np.array(
+        [[[1, 1, -1],
+          [-1, -1, 1],
+          [0, -1, 1]],
+         [[0, 1, 0],
+          [-1, 0, -1],
+          [-1, 1, 0]],
+         [[-1, 0, 0],
+          [-1, 0, 1],
+          [-1, 0, 0]]], dtype=np.float64)
+    return a, b, cl
+
+
+def test():
+    a, b, cl = init_test()
+    cl.forward(a)
+    print (cl.output_array)
+
+
+def test_bp():
+    a, b, cl = init_test()
+    cl.backward(a, b, IdentityActivator())
+    cl.update()
+    print(cl.filters[0])
+
+    print(cl.filters[1])
+
+
+
+def gradient_check():
+    '''
+    梯度检查
+    '''
+    # 设计一个误差函数，取所有节点输出项之和
+    error_function = lambda o: o.sum()
+
+    # 计算forward值
+    a, b, cl = init_test()
+    cl.forward(a)
+
+    # 求取sensitivity map
+    sensitivity_array = np.ones(cl.output_array.shape,
+                                dtype=np.float64)
+    # 计算梯度
+    cl.backward(a, sensitivity_array,
+                IdentityActivator())
+    # 检查梯度
+    epsilon = 10e-4
+    for d in range(cl.filters[0].weights_grad.shape[0]):
+        for i in range(cl.filters[0].weights_grad.shape[1]):
+            for j in range(cl.filters[0].weights_grad.shape[2]):
+                cl.filters[0].weights[d, i, j] += epsilon
+                cl.forward(a)
+                err1 = error_function(cl.output_array)
+                cl.filters[0].weights[d, i, j] -= 2 * epsilon
+                cl.forward(a)
+                err2 = error_function(cl.output_array)
+                expect_grad = (err1 - err2) / (2 * epsilon)
+                cl.filters[0].weights[d, i, j] += epsilon
+                print ('weights(%d,%d,%d): expected - actural %f - %f' % (
+                    d, i, j, expect_grad, cl.filters[0].weights_grad[d, i, j]))
+
+
+def init_pool_test():
+    a = np.array(
+        [[[1, 1, 2, 4],
+          [5, 6, 7, 8],
+          [3, 2, 1, 0],
+          [1, 2, 3, 4]],
+         [[0, 1, 2, 3],
+          [4, 5, 6, 7],
+          [8, 9, 0, 1],
+          [3, 4, 5, 6]]], dtype=np.float64)
+
+    b = np.array(
+        [[[1, 2],
+          [2, 4]],
+         [[3, 5],
+          [8, 2]]], dtype=np.float64)
+
+    mpl = MaxPoolingLayer(4, 4, 2, 2, 2, 2)
+
+    return a, b, mpl
+
+
+def test_pool():
+    a, b, mpl = init_pool_test()
+    mpl.forward(a)
+    print
+    ('input array:\n%s\noutput array:\n%s' % (a,
+                                             mpl.output_array))
+
+
+def test_pool_bp():
+    a, b, mpl = init_pool_test()
+    mpl.backward(a, b)
+    print
+    ('input array:\n%s\nsensitivity array:\n%s\ndelta array:\n%s' % (
+        a, b, mpl.delta_array))
+</code></pre> 
+  <p>lstm原理具体参考：</p> 
+  <p><a href="https://zybuluo.com/hanbingtao/note/626300" rel="nofollow">https://zybuluo.com/hanbingtao/note/626300</a></p> 
+  <p>lstm.py:</p> 
+  <pre class="has">
+<code>#!/usr/bin/env python
+# -*- coding: UTF-8 -*-
+
+
+import numpy as np
+from activators import IdentityActivator
+
+class TreeNode(object):
+    def __init__(self, data, children=[], children_data=[]):
+        self.parent = None
+        self.children = children
+        self.children_data = children_data
+        self.data = data
+        for child in children:
+            child.parent = self
+
+
+# 递归神经网络实现
+class RecursiveLayer(object):
+    def __init__(self, node_width, child_count,
+                 activator, learning_rate):
+        '''
+        递归神经网络构造函数
+        node_width: 表示每个节点的向量的维度
+        child_count: 每个父节点有几个子节点
+        activator: 激活函数对象
+        learning_rate: 梯度下降算法学习率
+        '''
+        self.node_width = node_width
+        self.child_count = child_count
+        self.activator = activator
+        self.learning_rate = learning_rate
+        # 权重数组W
+        self.W = np.random.uniform(-1e-4, 1e-4,
+                                   (node_width, node_width * child_count))
+        # 偏置项b
+        self.b = np.zeros((node_width, 1))
+        # 递归神经网络生成的树的根节点
+        self.root = None
+
+    def forward(self, *children):
+        '''
+        前向计算
+        '''
+        children_data = self.concatenate(children)
+        parent_data = self.activator.forward(
+            np.dot(self.W, children_data) + self.b
+        )
+        self.root = TreeNode(parent_data, children
+                             , children_data)
+
+    def backward(self, parent_delta):
+        '''
+        BPTS反向传播算法
+        '''
+        self.calc_delta(parent_delta, self.root)
+        self.W_grad, self.b_grad = self.calc_gradient(self.root)
+
+    def update(self):
+        '''
+        使用SGD算法更新权重
+        '''
+        self.W -= self.learning_rate * self.W_grad
+        self.b -= self.learning_rate * self.b_grad
+
+    def reset_state(self):
+        self.root = None
+
+    def concatenate(self, tree_nodes):
+        '''
+        将各个树节点中的数据拼接成一个长向量
+        '''
+        concat = np.zeros((0, 1))
+        for node in tree_nodes:
+            concat = np.concatenate((concat, node.data))
+        return concat
+
+    def calc_delta(self, parent_delta, parent):
+        '''
+        计算每个节点的delta
+        '''
+        parent.delta = parent_delta
+        if parent.children:
+            # 根据式2计算每个子节点的delta
+            children_delta = np.dot(self.W.T, parent_delta) * (
+                self.activator.backward(parent.children_data)
+            )
+            # slices = [(子节点编号，子节点delta起始位置，子节点delta结束位置)]
+            slices = [(i, i * self.node_width,
+                       (i + 1) * self.node_width)
+                      for i in range(self.child_count)]
+            # 针对每个子节点，递归调用calc_delta函数
+            for s in slices:
+                self.calc_delta(children_delta[s[1]:s[2]],
+                                parent.children[s[0]])
+
+    def calc_gradient(self, parent):
+        '''
+        计算每个节点权重的梯度，并将它们求和，得到最终的梯度
+        '''
+        W_grad = np.zeros((self.node_width,
+                           self.node_width * self.child_count))
+        b_grad = np.zeros((self.node_width, 1))
+        if not parent.children:
+            return W_grad, b_grad
+        parent.W_grad = np.dot(parent.delta, parent.children_data.T)
+        parent.b_grad = parent.delta
+        W_grad += parent.W_grad
+        b_grad += parent.b_grad
+        for child in parent.children:
+            W, b = self.calc_gradient(child)
+            W_grad += W
+            b_grad += b
+        return W_grad, b_grad
+
+    def dump(self, **kwArgs):
+        print ('root.data: %s' % self.root.data)
+        print ('root.children_data: %s' % self.root.children_data)
+        if 'dump_grad' in kwArgs:
+            print ('W_grad: %s' % self.W_grad)
+            print ('b_grad: %s' % self.b_grad)
+
+
+def data_set():
+    children = [
+        TreeNode(np.array([[1], [2]])),
+        TreeNode(np.array([[3], [4]])),
+        TreeNode(np.array([[5], [6]]))
+    ]
+    d = np.array([[0.5], [0.8]])
+    return children, d
+
+
+def gradient_check():
+    '''
+    梯度检查
+    '''
+    # 设计一个误差函数，取所有节点输出项之和
+    error_function = lambda o: o.sum()
+
+    rnn = RecursiveLayer(2, 2, IdentityActivator(), 1e-3)
+
+    # 计算forward值
+    x, d = data_set()
+    rnn.forward(x[0], x[1])
+    rnn.forward(rnn.root, x[2])
+
+    # 求取sensitivity map
+    sensitivity_array = np.ones((rnn.node_width, 1),
+                                dtype=np.float64)
+    # 计算梯度
+    rnn.backward(sensitivity_array)
+
+    # 检查梯度
+    epsilon = 10e-4
+    for i in range(rnn.W.shape[0]):
+        for j in range(rnn.W.shape[1]):
+            rnn.W[i, j] += epsilon
+            rnn.reset_state()
+            rnn.forward(x[0], x[1])
+            rnn.forward(rnn.root, x[2])
+            err1 = error_function(rnn.root.data)
+            rnn.W[i, j] -= 2 * epsilon
+            rnn.reset_state()
+            rnn.forward(x[0], x[1])
+            rnn.forward(rnn.root, x[2])
+            err2 = error_function(rnn.root.data)
+            expect_grad = (err1 - err2) / (2 * epsilon)
+            rnn.W[i, j] += epsilon
+            print
+            ('weights(%d,%d): expected - actural %.4e - %.4e' % (
+                i, j, expect_grad, rnn.W_grad[i, j]))
+    return rnn
+
+
+def test():
+    children, d = data_set()
+    rnn = RecursiveLayer(2, 2, IdentityActivator(), 1e-3)
+    rnn.forward(children[0], children[1])
+    rnn.dump()
+    rnn.forward(rnn.root, children[2])
+    rnn.dump()
+    rnn.backward(d)
+    rnn.dump(dump_grad='true')
+    return rnn
+
+if __name__ == '__main__':
+    test()</code></pre> 
+  <p>&nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

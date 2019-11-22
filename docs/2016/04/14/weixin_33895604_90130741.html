@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>内核抢占实现(preempt) 【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/uid-12461657-id-3353217.html    一、什么叫抢占所谓抢占，说白了就是进程切换。linux的用户空间，进程A在执行中，来(硬？)中断打断A，从中断处理程序返回时，如果有更高优先级进程B在排队的话，那么执...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/04/14/weixin_33895604_90130741.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">内核抢占实现(preempt) 【转】</h1>
+    <p class="post-meta">Apr 14, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p><span style="color:#0000f0;font-size:large;"><strong>转自：<a href="http://blog.chinaunix.net/uid-12461657-id-3353217.html" rel="nofollow">http://blog.chinaunix.net/uid-12461657-id-3353217.html</a></strong></span></p> 
+   <p><span style="color:#0000f0;font-size:large;"><strong>一、什么叫抢占</strong></span><br>所谓抢占，说白了就是进程切换。<br>linux的用户空间，进程A在执行中，来(硬？)中断打断A，从中断处理程序返回时，如果有更高优先级进程B在排队的话，那么执行进程B。 用户空间下进程总是可抢占的<br><a href="https://yqfile.alicdn.com/img_a1dd30040593c82fa0ba427bbb1bd684.jpg" rel="nofollow"><img src="https://yqfile.alicdn.com/img_a1dd30040593c82fa0ba427bbb1bd684.jpg" alt="" width="401" height="243"></a><br><br>在linux的内核空间就不一定了，linux 2.4是不可抢占的，实时性就会降低，如下面这个样子：<br><a href="https://yqfile.alicdn.com/img_4a6ded5970189beaee6b3fe9a0e68218.jpg" rel="nofollow"><img src="https://yqfile.alicdn.com/img_4a6ded5970189beaee6b3fe9a0e68218.jpg" alt="" width="423" height="245"></a><br><span style="color:#0000f0;font-size:x-large;"><strong><br><span style="font-size:large;">二、抢占的API</span></strong></span><br>preempt_enable()&nbsp; 开启抢占<br>preempt_disable() 禁止抢占<br><br>内核中每个进程数据结构里有一个计数器preempt_count<br>抢占的开启与禁止，操作当前进程的preempt_count<br>内核在进行进程调度的时候，只要prempt_count为0，内核就可以进行抢占。<br>&nbsp;&nbsp;&nbsp; struct thread_info {<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct task_struct *task; /* main task structure */<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ............//省略<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp; cpu;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* cpu we're on */<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#f00000;">&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp; preempt_count;&nbsp;&nbsp;&nbsp; /* 0 =&gt; preemptable,&nbsp; &lt;0 =&gt; BUG */</span><br>&nbsp;&nbsp;&nbsp; };<br><br>&nbsp;&nbsp;&nbsp; #define&nbsp;<span style="color:#0000f0;"><strong>preempt_enable() \</strong></span><br>&nbsp;&nbsp;&nbsp; do { \<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; preempt_enable_no_resched(); \<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; barrier(); \<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; preempt_check_resched(); \<br>&nbsp;&nbsp;&nbsp; } while (0)<br><br>&nbsp;&nbsp;&nbsp; #define&nbsp;<strong><span style="color:#0000f0;">preempt_disable() \</span></strong><br>&nbsp;&nbsp;&nbsp; do { \<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; inc_preempt_count(); \<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; barrier(); \<br>&nbsp;&nbsp;&nbsp; } while (0)<br><br>&nbsp;&nbsp;&nbsp; #define&nbsp;<span style="color:#0000f0;"><strong>preempt_enable_no_resched() \</strong></span><br>&nbsp;&nbsp;&nbsp; do { \<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; barrier(); \<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dec_preempt_count(); \<br>&nbsp;&nbsp;&nbsp; } while (0)<br><br>&nbsp;&nbsp;&nbsp; #define inc_preempt_count() add_preempt_count(1)<br>&nbsp;&nbsp;&nbsp; #define dec_preempt_count() sub_preempt_count(1)<br>&nbsp;&nbsp;&nbsp; #define add_preempt_count(val) do { preempt_count() += (val); } while (0)<br>&nbsp;&nbsp;&nbsp; #define sub_preempt_count(val) do { preempt_count() -= (val); } while (0)<br>&nbsp;&nbsp;&nbsp; #define preempt_count() (current_thread_info()-&gt;preempt_count)<br><br><span style="color:#0000f0;font-size:x-large;"><strong>三、发生抢占的时机</strong></span><br>linux进程调度的核心函数是&nbsp;<span style="color:#0000f0;font-size:large;"><strong>schedule()</strong></span>,进程调度就是在这里做的。<br>schedule的调用分为主动调用和被动调用。<br>主动调用是指内核显示的直接去调用shedule()，如当前进程调用了可休眠函数，里面会调用schedule<br>被动调用是指在系统调用、中断处理或异常处理结束之后，由相应的回调函数调用schedule<br>判断完当前进程是否可抢占，才会接着去调用schedule()<br><br>只看了看中断返回时schedule被动调用的情况<br>至于主动调用的地方就太多了，什么进程结束，pause等等，没耐心看了。。。<br><br><span style="color:#0000f0;font-size:large;"><strong>3.1 从中断返回时</strong></span><br><br>首先是从中断处理程序<span style="color:#0000f0;"><strong>do_IRQ()</strong></span>返回后，会调用<span style="color:#0000f0;"><strong>ret_from_except()</strong></span>&nbsp;(看<a href="http://blog.chinaunix.net/space.php?uid=24148050&amp;do=blog&amp;id=106796" rel="nofollow">《PowerPC中断相关知识》</a>)<br>ret_from_except()里要先check一下，判定前面被中断的执行体是运行在用户空间还是内核空间,<br>在决定返回到用户空间或内核空间<br><br>用户空间的话：（现在知道为什么用户空间程序总是可抢占了吧）&nbsp;<br>ret_from_except&nbsp;<br>&nbsp;&nbsp; --&gt; user_exc_return&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --&gt; do_work&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --&gt; 调用 do_signal 和 schedule<br><br>内核空间的话：（编译内核时要打开可抢占选项才行）<br>ret_form_except&nbsp;<br>&nbsp;&nbsp;&nbsp; --&gt; resume_kernel&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --&gt; preempt_schedule_irq&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; --&gt; schedule<br><br></p> 
+   <p>.globl ret_from_except<br>ret_from_except:<br>LOAD_MSR_KERNEL(r10,MSR_KERNEL)&nbsp; //将MSR_KERNEL常量设置到MSR,以禁止外部中断<br>SYNC&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //Some chip revs have problems here...<br>MTMSRD(r10)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //disable interrupts<br><br>lwz r3,_MSR(r1)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //读栈中的MSR[PR]，Returning to user mode?<br>andi. r0,r3,MSR_PR<br>beq resume_kernel<br><br>user_exc_return:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; //r10 contains MSR_KERNEL here<br>rlwinm r9,r1,0,0,(31-THREAD_SHIFT) //Check current_thread_info()-&gt;flags<br>lwz r9,TI_FLAGS(r9)<br>andi. r0,r9,(_TIF_SIGPENDING|_TIF_RESTORE_SIGMASK|_TIF_NEED_RESCHED)<br>bne do_work<br>restore_user:<br><br>#ifdef CONFIG_PREEMPT<br>b restore<br><br>resume_kernel:<br>rlwinm r9,r1,0,0,(31-THREAD_SHIFT) /* check current_thread_info-&gt;preempt_count */<br>lwz r0,TI_PREEMPT(r9)<br>cmpwi 0,r0,0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* if non-zero, just restore regs and return */<br>bne restore<br>lwz r0,TI_FLAGS(r9)<br>andi. r0,r0,_TIF_NEED_RESCHED<br>beq+ restore<br>andi. r0,r3,MSR_EE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* interrupts off? */<br>beq restore&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* don't schedule if so */<br>1: bl preempt_schedule_irq<br>rlwinm r9,r1,0,0,(31-THREAD_SHIFT)<br>lwz r3,TI_FLAGS(r9)<br>andi. r0,r3,_TIF_NEED_RESCHED<br>bne- 1b<br>#else<br>resume_kernel:<br>#endif /* CONFIG_PREEMPT */<br>////////////////////////////////////////////////////////////////////////////////////<br>do_work:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* r10 contains MSR_KERNEL here */<br>&nbsp;&nbsp;&nbsp; andi.&nbsp;&nbsp; r0,r9,_TIF_NEED_RESCHED<br>&nbsp;&nbsp;&nbsp; beq do_user_signal<br><br>do_resched:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* r10 contains MSR_KERNEL here */<br>&nbsp;&nbsp;&nbsp; ori r10,r10,MSR_EE<br>&nbsp;&nbsp;&nbsp; SYNC<br>&nbsp;&nbsp;&nbsp; MTMSRD(r10)&nbsp;&nbsp;&nbsp;&nbsp; /* hard-enable interrupts */<br>&nbsp;&nbsp;&nbsp; bl&nbsp; schedule<br>recheck:<br>&nbsp;&nbsp;&nbsp; LOAD_MSR_KERNEL(r10,MSR_KERNEL)<br>&nbsp;&nbsp;&nbsp; SYNC<br>&nbsp;&nbsp;&nbsp; MTMSRD(r10)&nbsp;&nbsp;&nbsp;&nbsp; /* disable interrupts */<br>&nbsp;&nbsp;&nbsp; rlwinm&nbsp; r9,r1,0,0,(31-THREAD_SHIFT)<br>&nbsp;&nbsp;&nbsp; lwz r9,TI_FLAGS(r9)<br>&nbsp;&nbsp;&nbsp; andi.&nbsp;&nbsp; r0,r9,_TIF_NEED_RESCHED<br>&nbsp;&nbsp;&nbsp; bne-&nbsp;&nbsp;&nbsp; do_reschedandi.&nbsp;&nbsp; r0,r9,_TIF_SIGPENDING<br>&nbsp;&nbsp;&nbsp; beq restore_user<br>do_user_signal:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* r10 contains MSR_KERNEL here */<br><br><br>asmlinkage void __sched preempt_schedule_irq(void){<br>&nbsp;&nbsp;&nbsp; struct thread_info *ti = current_thread_info();<br>&nbsp;&nbsp;&nbsp; BUG_ON(ti-&gt;preempt_count || !irqs_disabled());<br>&nbsp;&nbsp;&nbsp; do {<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; add_preempt_count(PREEMPT_ACTIVE);<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_irq_enable();<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; schedule();<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_irq_disable();<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sub_preempt_count(PREEMPT_ACTIVE);<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; barrier();<br>&nbsp;&nbsp;&nbsp; } while (unlikely(test_thread_flag(TIF_NEED_RESCHED)));<br>}<br><br>asmlinkage void __sched preempt_schedule(void){<br>&nbsp;&nbsp;&nbsp; struct thread_info *ti = current_thread_info();<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#f00000;">//preempt_cout非0的话，就不调用schedule</span><br>&nbsp;&nbsp;&nbsp; if (likely(<strong><span style="color:#f00000;">ti-&gt;preempt_count</span></strong>&nbsp;|| irqs_disabled()))<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;<br><br>&nbsp;&nbsp;&nbsp; do {<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; add_preempt_count(PREEMPT_ACTIVE);<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; schedule();<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sub_preempt_count(PREEMPT_ACTIVE);<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; barrier();<br>&nbsp;&nbsp;&nbsp; } while (unlikely(test_thread_flag(TIF_NEED_RESCHED)));<br>}<br><span style="color:#f000f0;">#########################################################################################</span>;<br>&nbsp;内核中的执行路径主要有：<br>&nbsp;1&nbsp; 用户进程的内核态，此时有进程context，主要是代表进程在执行系统调用等。<br>&nbsp;&nbsp;&nbsp; 还包括，内核中自己的进程,如 ksoftirqd 等等<br>&nbsp;2&nbsp; 中断或者异常或者自陷等，从概念上说，此时没有进程context，不能进行context switch。<br>&nbsp;3&nbsp; bottom_half，从概念上说，此时也没有进程context。<br>&nbsp;4&nbsp; 同时，相同的执行路径还可能在其他的CPU上运行。<br><br>Linux2.6中网络代码中的preempt_enable/disable移到softirqd调用的地方原因是这样的.<br>一、部分softirq是isr处理之后调用的,<br>&nbsp;&nbsp;&nbsp; 对于这部分代码,由于是在底半处理中运行,必须是是在运行进程系统调用之前返回的.<br>&nbsp;&nbsp;&nbsp; 所以实际上preempt_disable(); preempt_enable();代码对于他们来说是没有意义的.<br>二、部分softirq是在ksoftirqd的内核线程运行的,<br>&nbsp;&nbsp;&nbsp; 因为这个相当于运行在进程的内核空间,由于软中断都是对中断上半部的继续,<br>&nbsp;&nbsp;&nbsp; 所以这些工作都需要尽快的完成.所以在softirqd运行的时候,禁止了preempt,<br>&nbsp;&nbsp;&nbsp; 这样就可以保证softirq运行完之后才会调度下一个进程,因为softirq里面的所有函数都不会睡眠.</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

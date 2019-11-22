@@ -1,0 +1,1199 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux kernel中断子系统之（五）：驱动申请中断API【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.wowotech.net/linux_kenrel/request_threaded_irq.html    一、前言    本文主要的议题是作为一个普通的驱动工程师，在撰写自己负责的驱动的时候，如何向Linux Kernel中的中断子系统注册中断处理函数？为...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/05/24/weixin_33858336_90134093.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux kernel中断子系统之（五）：驱动申请中断API【转】</h1>
+    <p class="post-meta">May 24, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html" rel="nofollow">http://www.wowotech.net/linux_kenrel/request_threaded_irq.html</a></p> 
+   <p>一、前言</p> 
+   <p>本文主要的议题是作为一个普通的驱动工程师，在撰写自己负责的驱动的时候，如何向Linux Kernel中的中断子系统注册中断处理函数？为了理解注册中断的接口，必须了解一些中断线程化（threaded interrupt handler）的基础知识，这些在第二章描述。第三章主要描述了驱动申请 interrupt line接口API request_threaded_irq的规格。第四章是进入request_threaded_irq的实现细节，分析整个代码的执行过程。</p> 
+   <p>&nbsp;</p> 
+   <p>二、和中断相关的linux实时性分析以及中断线程化的背景介绍</p> 
+   <p>1、非抢占式linux内核的实时性</p> 
+   <p>在遥远的过去，linux2.4之前的内核是不支持抢占特性的，具体可以参考下图：</p> 
+   <p><a href="http://www.wowotech.net/content/uploadfile/201409/e31cc1446eefc8742e5f01648fadba8a20140922103324.gif" rel="nofollow"><img title="sxw" src="https://yqfile.alicdn.com/img_60f93988ffdb5c363f964fcd381d7f7d.gif" alt="sxw" width="670" height="771"></a></p> 
+   <p>事情的开始源自高优先级任务（橘色block）由于要等待外部事件（例如网络数据）而进入睡眠，调度器调度了某个低优先级的任务（紫色block）执行。该低优先级任务欢畅的执行，直到触发了一次系统调用（例如通过read()文件接口读取磁盘上的文件等）而进入了内核态。仍然是熟悉的配方，仍然是熟悉的味道，低优先级任务正在执行不会变化，只不过从user space切换到了kernel space。外部事件总是在你不想让它来的时候到来，T0时刻，高优先级任务等待的那个中断事件发生了。</p> 
+   <p>中断虽然发生了，但软件不一定立刻响应，可能由于在内核态执行的某些操作不希望被外部事件打断而主动关闭了中断（或是关闭了CPU的中断，或者MASK了该IRQ number），这时候，中断信号没有立刻得到响应，软件仍然在内核态执行低优先级任务系统调用的代码。在T1时刻，内核态代码由于退出临界区而打开中断（注意：上图中的比例是不协调的，一般而言，linux kernel不会有那么长的关中断时间，上面主要是为了表示清楚，同理，从中断触发到具体中断服务程序的执行也没有那么长，都是为了表述清楚），中断一旦打开，立刻跳转到了异常向量地址，interrupt handler抢占了低优先级任务的执行，进入中断上下文（虽然这时候的current task是低优先级任务，但是中断上下文和它没有任何关系）。</p> 
+   <p>从CPU开始处理中断到具体中断服务程序被执行还需要一个分发的过程。这个期间系统要做的主要操作包括确定HW interrupt ID，确定IRQ Number，ack或者mask中断，调用中断服务程序等。T0到T2之间的delay被称为中断延迟（Interrupt Latency），主要包括两部分，一部分是HW造成的delay（硬件的中断系统识别外部的中断事件并signal到CPU），另外一部分是软件原因（内核代码中由于要保护临界区而关闭中断引起的）。</p> 
+   <p>该中断的服务程序执行完毕（在其执行过程中，T3时刻，会唤醒高优先级任务，让它从sleep状态进入runable状态），返回低优先级任务的系统调用现场，这时候并不存在一个抢占点，低优先级任务要完成系统调用之后，在返回用户空间的时候才出现抢占点。漫长的等待之后，T4时刻，调度器调度高优先级任务执行。有一个术语叫做任务响应时间（Task Response Time）用来描述T3到T4之间的delay。</p> 
+   <p>&nbsp;</p> 
+   <p>2、抢占式linux内核的实时性</p> 
+   <p>2.6内核和2.4内核显著的不同是提供了一个CONFIG_PREEMPT的选项，打开该选项后，linux kernel就支持了内核代码的抢占（当然不能在临界区），其行为如下：</p> 
+   <p><a href="http://www.wowotech.net/content/uploadfile/201409/ed95106e2c04e02b2ba84fe038d70f2220140922103327.gif" rel="nofollow"><img title="pre" src="https://yqfile.alicdn.com/img_01437c4fcb1874fc0268170e6a28cf58.gif" alt="pre" width="671" height="610"></a></p> 
+   <p>T0到T3的操作都是和上一节的描述一样的，不同的地方是在T4。对于2.4内核，只有返回用户空间的时候才有抢占点出现，但是对于抢占式内核而言，即便是从中断上下文返回内核空间的进程上下文，只要内核代码不在临界区内，就可以发生调度，让最高优先级的任务调度执行。</p> 
+   <p>在非抢占式linux内核中，一个任务的内核态是不可以被其他进程抢占的。这里并不是说kernel space不可以被抢占，只是说进程通过系统调用陷入到内核的时候，不可以被其他的进程抢占。实际上，中断上下文当然可以抢占进程上下文（无论是内核态还是用户态），更进一步，中断上下文是拥有至高无上的权限，它甚至可以抢占其他的中断上下文。引入抢占式内核后，系统的平均任务响应时间会缩短，但是，实时性更关注的是：无论在任何的负载情况下，任务响应时间是确定的。因此，更需要关注的是worst-case的任务响应时间。这里有两个因素会影响worst case latency：</p> 
+   <p>（1）为了同步，内核中总有些代码需要持有自旋锁资源，或者显式的调用preempt_disable来禁止抢占，这时候不允许抢占</p> 
+   <p>（2）中断上下文（并非只是中断handler，还包括softirq、timer、tasklet）总是可以抢占进程上下文</p> 
+   <p>因此，即便是打开了PREEMPT的选项，实际上linux系统的任务响应时间仍然是不确定的。一方面内核代码的临界区非常多，我们需要找到，系统中持有锁，或者禁止抢占的最大的时间片。另外一方面，在上图的T4中，能顺利的调度高优先级任务并非易事，这时候可能有触发的软中断，也可能有新来的中断，也可能某些driver的tasklet要执行，只有在没有任何bottom half的任务要执行的时候，调度器才会启动调度。</p> 
+   <p>3、进一步提高linux内核的实时性</p> 
+   <p>通过上一个小节的描述，相信大家都确信中断对linux 实时性的最大的敌人。那么怎么破？我曾经接触过一款RTOS，它的中断handler非常简单，就是发送一个inter-task message到该driver thread，对任何的一个驱动都是如此处理。这样，每个中断上下文都变得非常简短，而且每个中断都是一致的。在这样的设计中，外设中断的处理线程化了，然后，系统设计师要仔细的为每个系统中的task分配优先级，确保整个系统的实时性。</p> 
+   <p>在Linux kernel中，一个外设的中断处理被分成top half和bottom half，top half进行最关键，最基本的处理，而比较耗时的操作被放到bottom half（softirq、tasklet）中延迟执行。虽然bottom half被延迟执行，但始终都是先于进程执行的。为何不让这些耗时的bottom half和普通进程公平竞争呢？因此，linux kernel借鉴了RTOS的某些特性，对那些耗时的驱动interrupt handler进行线程化处理，在内核的抢占点上，让线程（无论是内核线程还是用户空间创建的线程，还是驱动的interrupt thread）在一个舞台上竞争CPU。</p> 
+   <p>&nbsp;</p> 
+   <p>三、request_threaded_irq的接口规格</p> 
+   <p>1、输入参数描述</p> 
+   <table class="ke-zeroborder" style="width:700px;" border="0">
+    <tbody>
+     <tr>
+      <td valign="top">输入参数</td> 
+      <td valign="top">描述</td> 
+     </tr>
+     <tr>
+      <td valign="top">irq</td> 
+      <td valign="top">要注册handler的那个IRQ number。这里要注册的handler包括两个，一个是传统意义的中断handler，我们称之primary handler，另外一个是threaded interrupt handler</td> 
+     </tr>
+     <tr>
+      <td valign="top">handler</td> 
+      <td valign="top">primary handler。需要注意的是primary handler和threaded interrupt handler不能同时为空，否则会出错</td> 
+     </tr>
+     <tr>
+      <td valign="top">thread_fn</td> 
+      <td valign="top">threaded interrupt handler。如果该参数不是NULL，那么系统会创建一个kernel thread，调用的function就是thread_fn</td> 
+     </tr>
+     <tr>
+      <td valign="top">irqflags</td> 
+      <td valign="top">参见本章第三节</td> 
+     </tr>
+     <tr>
+      <td valign="top">devname</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">dev_id</td> 
+      <td valign="top">参见第四章，第一节中的描述。</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>2、输出参数描述</p> 
+   <p>0表示成功执行，负数表示各种错误原因。</p> 
+   <p>3、Interrupt type flags</p> 
+   <table class="ke-zeroborder" style="width:700px;" border="0">
+    <tbody>
+     <tr>
+      <td valign="top">flag定义</td> 
+      <td valign="top">描述</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_TRIGGER_XXX</td> 
+      <td valign="top">描述该interrupt line触发类型的flag</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_DISABLED</td> 
+      <td valign="top">首先要说明的是这是一个废弃的flag，在新的内核中，该flag没有任何的作用了。具体可以参考：<a title="http://lwn.net/Articles/380931/" href="http://lwn.net/Articles/380931/" rel="nofollow">Disabling IRQF_DISABLED</a>&nbsp;<br>旧的内核（2.6.35版本之前）认为有两种interrupt handler：slow handler和fast handle。在request irq的时候，对于fast handler，需要传递IRQF_DISABLED的参数，确保其中断处理过程中是关闭CPU的中断，因为是fast handler，执行很快，即便是关闭CPU中断不会影响系统的性能。但是，并不是每一种外设中断的handler都是那么快（例如磁盘），因此就有 slow handler的概念，说明其在中断处理过程中会耗时比较长。对于这种情况，在执行interrupt handler的时候不能关闭CPU中断，否则对系统的performance会有影响。&nbsp;<br>新的内核已经不区分slow handler和fast handle，都是fast handler，都是需要关闭CPU中断的，那些需要后续处理的内容推到threaded interrupt handler中去执行。</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_SHARED</td> 
+      <td valign="top"> <p>这是flag用来描述一个interrupt line是否允许在多个设备中共享。如果中断控制器可以支持足够多的interrupt source，那么在两个外设间共享一个interrupt request line是不推荐的，毕竟有一些额外的开销（发生中断的时候要逐个询问是不是你的中断，软件上就是遍历action list），因此外设的irq handler中最好是一开始就启动判断，看看是否是自己的中断，如果不是，返回IRQ_NONE,表示这个中断不归我管。 早期PC时代，使用8259中断控制器，级联的8259最多支持15个外部中断，但是PC外设那么多，因此需要irq share。现在，ARM平台上的系统设计很少会采用外设共享IRQ方式，毕竟一般ARM SOC提供的有中断功能的GPIO非常的多，足够用的。 当然，如果确实需要两个外设共享IRQ，那也只能如此设计了。对于HW，中断控制器的一个interrupt source的引脚要接到两个外设的interrupt request line上，怎么接？直接连接可以吗？当然不行，对于低电平触发的情况，我们可以考虑用与门连接中断控制器和外设。</p> </td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_PROBE_SHARED</td> 
+      <td valign="top">IRQF_SHARED用来表示该interrupt action descriptor是允许和其他device共享一个interrupt line（IRQ number），但是实际上是否能够share还是需要其他条件：例如触发方式必须相同。有些驱动程序可能有这样的调用场景：我只是想scan一个irq table，看看哪一个是OK的，这时候，如果即便是不能和其他的驱动程序share这个interrupt line，我也没有关系，我就是想scan看看情况。这时候，caller其实可以预见sharing mismatche的发生，因此，不需要内核打印“Flags mismatch irq……“这样冗余的信息</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_PERCPU</td> 
+      <td valign="top">在SMP的架构下，中断有两种mode，一种中断是在所有processor之间共享的，也就是global的，一旦中断产生，interrupt controller可以把这个中断送达多个处理器。当然，在具体实现的时候不会同时将中断送达多个CPU，一般是软件和硬件协同处理，将中断送达一个CPU处理。但是一段时间内产生的中断可以平均（或者按照既定的策略）分配到一组CPU上。这种interrupt mode下，interrupt controller针对该中断的operational register是global的，所有的CPU看到的都是一套寄存器，一旦一个CPU ack了该中断，那么其他的CPU看到的该interupt source的状态也是已经ack的状态。&nbsp;<br>和global对应的就是per cpu interrupt了，对于这种interrupt，不是processor之间共享的，而是特定属于一个CPU的。例如GIC中interrupt ID等于30的中断就是per cpu的（这个中断event被用于各个CPU的local timer），这个中断号虽然只有一个，但是，实际上控制该interrupt ID的寄存器有n组（如果系统中有n个processor），每个CPU看到的是不同的控制寄存器。在具体实现中，这些寄存器组有两种形态，一种是banked，所有CPU操作同样的寄存器地址，硬件系统会根据访问的cpu定向到不同的寄存器，另外一种是non banked，也就是说，对于该interrupt source，每个cpu都有自己独特的访问地址。</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_NOBALANCING</td> 
+      <td valign="top">这也是和multi-processor相关的一个flag。对于那些可以在多个CPU之间共享的中断，具体送达哪一个processor是有策略的，我们可以在多个CPU之间进行平衡。如果你不想让你的中断参与到irq balancing的过程中那么就设定这个flag</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_IRQPOLL</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_ONESHOT</td> 
+      <td valign="top">one shot本身的意思的只有一次的，结合到中断这个场景，则表示中断是一次性触发的，不能嵌套。对于primary handler，当然是不会嵌套，但是对于threaded interrupt handler，我们有两种选择，一种是mask该interrupt source，另外一种是unmask该interrupt source。一旦mask住该interrupt source，那么该interrupt source的中断在整个threaded interrupt handler处理过程中都是不会再次触发的，也就是one shot了。这种handler不需要考虑重入问题。&nbsp;<br>具体是否要设定one shot的flag是和硬件系统有关的，我们举一个例子，比如电池驱动，电池里面有一个电量计，是使用HDQ协议进行通信的，电池驱动会注册一个threaded interrupt handler，在这个handler中，会通过HDQ协议和电量计进行通信。对于这个handler，通过HDQ进行通信是需要一个完整的HDQ交互过程，如果中间被打断，整个通信过程会出问题，因此，这个handler就必须是one shot的。</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_NO_SUSPEND</td> 
+      <td valign="top">这个flag比较好理解，就是说在系统suspend的时候，不用disable这个中断，如果disable，可能会导致系统不能正常的resume。</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_FORCE_RESUME</td> 
+      <td valign="top">在系统resume的过程中，强制必须进行enable的动作，即便是设定了IRQF_NO_SUSPEND这个flag。这是和特定的硬件行为相关的。</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_NO_THREAD</td> 
+      <td valign="top">有些low level的interrupt是不能线程化的（例如系统timer的中断），这个flag就是起这个作用的。另外，有些级联的interrupt controller对应的IRQ也是不能线程化的（例如secondary GIC对应的IRQ），它的线程化可能会影响一大批附属于该interrupt controller的外设的中断响应延迟。</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_EARLY_RESUME</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+     <tr>
+      <td valign="top">IRQF_TIMER</td> 
+      <td valign="top">&nbsp;</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p>四、request_threaded_irq代码分析</p> 
+   <p>1、request_threaded_irq主流程</p> 
+   <blockquote> 
+    <p>int request_threaded_irq(unsigned int irq, irq_handler_t handler,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_handler_t thread_fn, unsigned long irqflags,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; const char *devname, void *dev_id)&nbsp;<br>{&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp; if ((irqflags &amp; IRQF_SHARED) &amp;&amp; !dev_id)－－－－－－－－－（1）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;</p> 
+    <p>&nbsp;&nbsp;&nbsp; desc = irq_to_desc(irq); －－－－－－－－－－－－－－－－－（2）&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!desc)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (!irq_settings_can_request(desc) || －－－－－－－－－－－－（3）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON(irq_settings_is_per_cpu_devid(desc)))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (!handler) { －－－－－－－－－－－－－－－－－－－－－－（4）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!thread_fn)&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return -EINVAL;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; handler = irq_default_primary_handler;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>&nbsp;&nbsp;&nbsp; action = kzalloc(sizeof(struct irqaction), GFP_KERNEL);</p> 
+    <p>&nbsp;&nbsp;&nbsp; action-&gt;handler = handler;&nbsp;<br>&nbsp;&nbsp;&nbsp; action-&gt;thread_fn = thread_fn;&nbsp;<br>&nbsp;&nbsp;&nbsp; action-&gt;flags = irqflags;&nbsp;<br>&nbsp;&nbsp;&nbsp; action-&gt;name = devname;&nbsp;<br>&nbsp;&nbsp;&nbsp; action-&gt;dev_id = dev_id;</p> 
+    <p>&nbsp;&nbsp;&nbsp; chip_bus_lock(desc);&nbsp;<br>&nbsp;&nbsp;&nbsp; retval = __setup_irq(irq, desc, action); －－－－－－－－－－－（5）&nbsp;<br>&nbsp;&nbsp;&nbsp; chip_bus_sync_unlock(desc);&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>（1）对于那些需要共享的中断，在request irq的时候需要给出dev id，否则会出错退出。为何对于IRQF_SHARED的中断必须要给出dev id呢？实际上，在共享的情况下，一个IRQ number对应若干个irqaction，当操作irqaction的时候，仅仅给出IRQ number就不是非常的足够了，这时候，需要一个ID表示具体的irqaction，这里就是dev_id的作用了。我们举一个例子：</p> 
+   <blockquote> 
+    <p>void free_irq(unsigned int irq, void *dev_id)</p> 
+   </blockquote> 
+   <p>当释放一个IRQ资源的时候，不但要给出IRQ number，还要给出device ID。只有这样，才能精准的把要释放的那个irqaction 从irq action list上移除。dev_id在中断处理中有没有作用呢？我们来看看source code：</p> 
+   <blockquote> 
+    <p>irqreturn_t handle_irq_event_percpu(struct irq_desc *desc, struct irqaction *action)&nbsp;<br>{</p> 
+    <p>&nbsp;&nbsp;&nbsp; do {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irqreturn_t res;&nbsp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; res = action-&gt;handler(irq, action-&gt;dev_id);</p> 
+    <p>……&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; action = action-&gt;next;&nbsp;<br>&nbsp;&nbsp;&nbsp; } while (action);</p> 
+    <p>……&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>linux interrupt framework虽然支持中断共享，但是它并不会协助解决识别问题，它只会遍历该IRQ number上注册的irqaction的callback函数，这样，虽然只是一个外设产生的中断，linux kernel还是把所有共享的那些中断handler都逐个调用执行。为了让系统的performance不受影响，irqaction的callback函数必须在函数的最开始进行判断，是否是自己的硬件设备产生了中断（读取硬件的寄存器），如果不是，尽快的退出。</p> 
+   <p>需要注意的是，这里dev_id并不能在中断触发的时候用来标识需要调用哪一个irqaction的callback函数，通过上面的代码也可以看出，dev_id有些类似一个参数传递的过程，可以把具体driver的一些硬件信息，组合成一个structure，在触发中断的时候可以把这个structure传递给中断处理函数。</p> 
+   <p>（2）通过IRQ number获取对应的中断描述符。在引入CONFIG_SPARSE_IRQ选项后，这个转换变得不是那么简单了。在过去，我们会以IRQ number为index，从irq_desc这个全局数组中直接获取中断描述符。如果配置CONFIG_SPARSE_IRQ选项，则需要从radix tree中搜索。CONFIG_SPARSE_IRQ选项的更详细的介绍请参考<a href="http://www.wowotech.net/linux_kenrel/interrupt_descriptor.html" rel="nofollow">IRQ number和中断描述符</a></p> 
+   <p>（3）并非系统中所有的IRQ number都可以request，有些中断描述符被标记为IRQ_NOREQUEST，标识该IRQ number不能被其他的驱动request。一般而言，这些IRQ number有特殊的作用，例如用于级联的那个IRQ number是不能request。irq_settings_can_request函数就是判断一个IRQ是否可以被request。</p> 
+   <p>irq_settings_is_per_cpu_devid函数用来判断一个中断描述符是否需要传递per cpu的device ID。per cpu的中断上面已经描述的很清楚了，这里不再细述。如果一个中断描述符对应的中断 ID是per cpu的，那么在申请其handler的时候就有两种情况，一种是传递统一的dev_id参数（传入request_threaded_irq的最后一个参数），另外一种情况是针对每个CPU，传递不同的dev_id参数。在这种情况下，我们需要调用request_percpu_irq接口函数而不是request_threaded_irq。</p> 
+   <p>（4）传入request_threaded_irq的primary handler和threaded handler参数有下面四种组合：</p> 
+   <table class="ke-zeroborder" style="width:700px;" border="0">
+    <tbody>
+     <tr>
+      <td valign="top">primary handler</td> 
+      <td valign="top">threaded handler</td> 
+      <td valign="top">描述</td> 
+     </tr>
+     <tr>
+      <td valign="top">NULL</td> 
+      <td valign="top">NULL</td> 
+      <td valign="top">函数出错，返回-EINVAL</td> 
+     </tr>
+     <tr>
+      <td valign="top">设定</td> 
+      <td valign="top">设定</td> 
+      <td valign="top">正常流程。中断处理被合理的分配到primary handler和threaded handler中。</td> 
+     </tr>
+     <tr>
+      <td valign="top">设定</td> 
+      <td valign="top">NULL</td> 
+      <td valign="top">中断处理都是在primary handler中完成</td> 
+     </tr>
+     <tr>
+      <td valign="top">NULL</td> 
+      <td valign="top">设定</td> 
+      <td valign="top">这种情况下，系统会帮忙设定一个default的primary handler：irq_default_primary_handler，协助唤醒threaded handler线程</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>（5）这部分的代码很简单，分配struct irqaction，赋值，调用__setup_irq进行实际的注册过程。这里要罗嗦几句的是锁的操作，在内核中，有很多函数，有的是需要调用者自己加锁保护的，有些是不需要加锁保护的。对于这些场景，linux kernel采取了统一的策略：基本函数名字是一样的，只不过需要调用者自己加锁保护的那个函数需要增加__的前缀，例如内核有有下面两个函数：setup_irq和__setup_irq。这里，我们在setup irq的时候已经调用chip_bus_lock进行保护，因此使用lock free的版本__setup_irq。</p> 
+   <p>chip_bus_lock定义如下：</p> 
+   <blockquote> 
+    <p>static inline void chip_bus_lock(struct irq_desc *desc)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; if (unlikely(desc-&gt;irq_data.chip-&gt;irq_bus_lock))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; desc-&gt;irq_data.chip-&gt;irq_bus_lock(&amp;desc-&gt;irq_data);&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>大部分的interrupt controller并没有定义irq_bus_lock这个callback函数，因此chip_bus_lock这个函数对大多数的中断控制器而言是没有实际意义的。但是，有些interrupt controller是连接到慢速总线上的，例如一个i2c接口的IO expander芯片（这种芯片往往也提供若干有中断功能的GPIO，因此也是一个interrupt controller），在访问这种interrupt controller的时候需要lock住那个慢速bus（只能有一个client在使用I2C bus）。</p> 
+   <p>&nbsp;</p> 
+   <p>2、注册irqaction</p> 
+   <p>（1）nested IRQ的处理代码</p> 
+   <p>在看具体的代码之前，我们首先要理解什么是nested IRQ。nested IRQ不是cascade IRQ，在<a href="http://www.wowotech.net/linux_kenrel/gic_driver.html" rel="nofollow">GIC代码分析</a>中我们有描述过cascade IRQ这个概念，主要用在interrupt controller级联的情况下。为了方便大家理解，我还是给出一个具体的例子吧，具体的HW block请参考下图：</p> 
+   <p><a href="http://www.wowotech.net/content/uploadfile/201409/a03daab0b60c21e763d7f367c449fb8820140922103330.gif" rel="nofollow"><img title="SOC-INT" src="https://yqfile.alicdn.com/img_c226759691b737ebb95a74d8847bbf71.gif" alt="SOC-INT" width="681" height="178"></a></p> 
+   <p>上图是一个两个GIC级联的例子，所有的HW block封装在了一个SOC chip中。为了方便描述，我们先进行编号：Secondary GIC的IRQ number是A，外设1的IRQ number是B，外设2的IRQ number是C。对于上面的硬件，linux kernel处理如下：</p> 
+   <p>（a）IRQ A的中断描述符被设定为不能注册irqaction（不能注册specific interrupt handler，或者叫中断服务程序）</p> 
+   <p>（b）IRQ A的highlevel irq-events handler（处理interrupt flow control）负责进行IRQ number的映射，在其irq domain上翻译出具体外设的IRQ number，并重新定向到外设IRQ number对应的highlevel irq-events handler。</p> 
+   <p>（c）所有外设驱动的中断正常request irq，可以任意选择线程化的handler，或者只注册primary handler。</p> 
+   <p>需要注意的是，对root GIC和Secondary GIC寄存器的访问非常快，因此ack、mask、EOI等操作也非常快。</p> 
+   <p>我们再看看另外一个interrupt controller级联的情况：</p> 
+   <p><a href="http://www.wowotech.net/content/uploadfile/201409/123d27cb3ef3f846a1f12b7ff969be0120140922103332.gif" rel="nofollow"><img title="nested" src="https://yqfile.alicdn.com/img_a457d223d6efdbe6b769e4bdfa2488d4.gif" alt="nested" width="720" height="182"></a></p> 
+   <p>IO expander HW block提供了有中断功能的GPIO，因此它也是一个interrupt controller，有它自己的irq domain和irq chip。上图中外设1和外设2使用了IO expander上有中断功能的GPIO，它们有属于自己的IRQ number以及中断描述符。IO expander HW block的IRQ line连接到SOC内部的interrupt controller上，因此，这也是一个interrupt controller级联的情况，对于这种情况，我们是否可以采用和上面GIC级联的处理方式呢？</p> 
+   <p>不行，对于GIC级联的情况，如果secondary GIC上的外设1产生了中断，整个关中断的时间是IRQ A的中断描述符的highlevel irq-events handler处理时间＋IRQ B的的中断描述符的highlevel irq-events handler处理时间＋外设1的primary handler的处理时间。所幸对root GIC和Secondary GIC寄存器的访问非常快，因此整个关中断的时间也不是非常的长。但是如果是IO expander这个情况，如果采取和上面GIC级联的处理方式一样的话，关中断的时间非常长。我们还是用外设1产生的中断为例子好了。这时候，由于IRQ B的的中断描述符的highlevel irq-events handler处理设计I2C的操作，因此时间非常的长，这时候，对于整个系统的实时性而言是致命的打击。对这种硬件情况，linux kernel处理如下：</p> 
+   <p>（a）IRQ A的中断描述符的highlevel irq-events handler根据实际情况进行设定，并且允许注册irqaction。对于连接到IO expander上的外设，它是没有real time的要求的（否则也不会接到IO expander上），因此一般会进行线程化处理。由于threaded handler中涉及I2C操作，因此要设定IRQF_ONESHOT的flag。</p> 
+   <p>（b）在IRQ A的中断描述符的threaded interrupt handler中进行进行IRQ number的映射，在IO expander irq domain上翻译出具体外设的IRQ number，并直接调用handle_nested_irq函数处理该IRQ。</p> 
+   <p>（c）外设对应的中断描述符设定IRQ_NESTED_THREAD的flag，表明这是一个nested IRQ。nested IRQ没有highlevel irq-events handler，也没有primary handler，它的threaded interrupt handler是附着在其parent IRQ的threaded handler上的。</p> 
+   <p>具体的nested IRQ的处理代码如下：</p> 
+   <blockquote> 
+    <p>static int __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)&nbsp;<br>{</p> 
+    <p>……&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;<strong>nested = irq_settings_is_nested_thread(desc);&nbsp;<br>&nbsp;&nbsp;&nbsp; if (nested) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!new-&gt;thread_fn) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -EINVAL;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_mput;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; new-&gt;handler = irq_nested_primary_handler;</strong>&nbsp;<br>&nbsp;&nbsp;&nbsp; } else {&nbsp;&nbsp;<br>……&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>……</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>如果一个中断描述符是nested thread type的，说明这个中断描述符应该设定threaded interrupt handler（当然，内核是不会单独创建一个thread的，它是借着其parent IRQ的interrupt thread执行），否则就会出错返回。对于primary handler，它应该没有机会被调用到，当然为了调试，kernel将其设定为irq_nested_primary_handler，以便在调用的时候打印一些信息，让工程师直到发生了什么状况。</p> 
+   <p>（2）forced irq threading处理</p> 
+   <p>具体的forced irq threading的处理代码如下：</p> 
+   <blockquote> 
+    <p>static int __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)&nbsp;<br>{</p> 
+    <p>……&nbsp;<br>&nbsp;&nbsp;&nbsp; nested = irq_settings_is_nested_thread(desc);&nbsp;<br>&nbsp;&nbsp;&nbsp; if (nested) {&nbsp;&nbsp;<br>……&nbsp;<br>&nbsp;&nbsp;&nbsp; } else {&nbsp;<br><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (irq_settings_can_thread(desc))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; irq_setup_forced_threading(new);</strong>&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+    <p>……</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>forced irq threading其实就是将系统中所有可以被线程化的中断handler全部线程化，即便你在request irq的时候，设定的是primary handler，而不是threaded handler。当然那些不能被线程化的中断（标注了IRQF_NO_THREAD的中断，例如系统timer）还是排除在外的。irq_settings_can_thread函数就是判断一个中断是否可以被线程化，如果可以的话，则调用irq_setup_forced_threading在set irq的时候强制进行线程化。具体代码如下：</p> 
+   <blockquote> 
+    <p>static void irq_setup_forced_threading(struct irqaction *new)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!force_irqthreads)－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－（a）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;&nbsp;<br>&nbsp;&nbsp;&nbsp; if (new-&gt;flags &amp; (IRQF_NO_THREAD | IRQF_PERCPU | IRQF_ONESHOT))－－－－－－－（b）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;</p> 
+    <p>&nbsp;&nbsp;&nbsp; new-&gt;flags |= IRQF_ONESHOT; －－－－－－－－－－－－－－－－－－－－－－－－－（d）</p> 
+    <p>&nbsp;&nbsp;&nbsp; if (!new-&gt;thread_fn) {－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－（c）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; set_bit(IRQTF_FORCED_THREAD, &amp;new-&gt;thread_flags);&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; new-&gt;thread_fn = new-&gt;handler;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; new-&gt;handler = irq_default_primary_handler;&nbsp;<br>&nbsp;&nbsp;&nbsp; }&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>（a）系统中有一个强制线程化的选项：CONFIG_IRQ_FORCED_THREADING，如果没有打开该选项，force_irqthreads总是0，因此irq_setup_forced_threading也就没有什么作用，直接return了。如果打开了CONFIG_IRQ_FORCED_THREADING，说明系统支持强制线程化，但是具体是否对所有的中断进行强制线程化处理还是要看命令行参数threadirqs。如果kernel启动的时候没有传入该参数，那么同样的，irq_setup_forced_threading也就没有什么作用，直接return了。只有bootloader向内核传入threadirqs这个命令行参数，内核才真正在启动过程中，进行各个中断的强制线程化的操作。</p> 
+   <p>（b）看到IRQF_NO_THREAD选项你可能会奇怪，前面irq_settings_can_thread函数不是检查过了吗？为何还要重复检查？其实一个中断是否可以进行线程化可以从两个层面看：一个是从底层看，也就是从中断描述符、从实际的中断硬件拓扑等方面看。另外一个是从中断子系统的用户层面看，也就是各个外设在注册自己的handler的时候是否想进行线程化处理。所有的IRQF_XXX都是从用户层面看的flag，因此如果用户通过IRQF_NO_THREAD这个flag告知kernel，该interrupt不能被线程化，那么强制线程化的机制还是尊重用户的选择的。</p> 
+   <p>PER CPU的中断都是一些较为特殊的中断，不是一般意义上的外设中断，因此对PER CPU的中断不强制进行线程化。IRQF_ONESHOT选项说明该中断已经被线程化了（而且是特殊的one shot类型的），因此也是直接返回了。</p> 
+   <p>（c）强制线程化只对那些没有设定thread_fn的中断进行处理，这种中断将全部的处理放在了primary interrupt handler中（当然，如果中断处理比较耗时，那么也可能会采用bottom half的机制），由于primary interrupt handler是全程关闭CPU中断的，因此可能对系统的实时性造成影响，因此考虑将其强制线程化。struct irqaction中的thread_flags是和线程相关的flag，我们给它打上IRQTF_FORCED_THREAD的标签，表明该threaded handler是被强制threaded的。new-&gt;thread_fn = new-&gt;handler这段代码表示将原来primary handler中的内容全部放到threaded handler中处理，新的primary handler被设定为default handler。</p> 
+   <p>（d）强制线程化是一个和实时性相关的选项，从我的角度来看是一个很不好的设计（个人观点），各个驱动工程师在撰写自己的驱动代码的时候已经安排好了自己的上下文环境。有的是进程上下文，有的是中断上下文，在各自的上下文环境中，驱动工程师又选择了适合的内核同步机制。但是，强制线程化导致原来运行在中断上下文的primary handler现在运行在进程上下文，这有可能导致一些难以跟踪和定位的bug。</p> 
+   <p>当然，作为内核的开发者，既然同意将强制线程化这个特性并入linux kernel，相信他们有他们自己的考虑。我猜测这是和一些旧的驱动代码维护相关的。linux kernel中的中断子系统的API的修改会引起非常大的震动，因为内核中成千上万的驱动都是需要调用旧的接口来申请linux kernel中断子系统的服务，对每一个驱动都进行修改是一个非常耗时的工作，为了让那些旧的驱动代码可以运行在新的中断子系统上，因此，在kernel中，实际上仍然提供了旧的request_irq接口函数，如下：</p> 
+   <blockquote> 
+    <p>static inline int __must_check&nbsp;<br>request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; const char *name, void *dev)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; return request_threaded_irq(irq, handler, NULL, flags, name, dev);&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>接口是OK了，但是，新的中断子系统的思路是将中断处理分成primary handler和threaded handler，而旧的驱动代码一般是将中断处理分成top half和bottom half，如何将这部分的不同抹平？linux kernel是这样处理的（这是我个人的理解，不保证是正确的）：</p> 
+   <p>（d-1）内核为那些被强制线程化的中断handler设定了IRQF_ONESHOT的标识。这是因为在旧的中断处理机制中，top half是不可重入的，强制线程化之后，强制设定IRQF_ONESHOT可以保证threaded handler是不会重入的。</p> 
+   <p>（d-2）在那些被强制线程化的中断线程中，disable bottom half的处理。这是因为在旧的中断处理机制中，botton half是不可能抢占top half的执行，强制线程化之后，应该保持这一点。</p> 
+   <p>&nbsp;</p> 
+   <p>（3）创建interrupt线程。代码如下：</p> 
+   <blockquote> 
+    <p>if (new-&gt;thread_fn &amp;&amp; !nested) {&nbsp;<br>&nbsp;&nbsp;&nbsp; struct task_struct *t;&nbsp;<br>&nbsp;&nbsp;&nbsp; static const struct sched_param param = {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .sched_priority = MAX_USER_RT_PRIO/2,&nbsp;<br>&nbsp;&nbsp;&nbsp; };</p> 
+    <p>&nbsp;&nbsp;&nbsp; t = kthread_create(irq_thread, new, "irq/%d-%s", irq,－－－－－－－－－－－－－－－－－－（a）<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; new-&gt;name);</p> 
+    <p>&nbsp;&nbsp;&nbsp; sched_setscheduler_nocheck(t, SCHED_FIFO, ¶m);</p> 
+    <p><br>&nbsp;&nbsp;&nbsp; get_task_struct(t);－－－－－－－－－－－－－－－－－－－－－－－－－－－（b）&nbsp;<br>&nbsp;&nbsp;&nbsp; new-&gt;thread = t;&nbsp;<br><br>&nbsp;&nbsp;&nbsp; set_bit(IRQTF_AFFINITY, &amp;new-&gt;thread_flags);－－－－－－－－－－－－－－－（c）&nbsp;<br>}</p> 
+    <p>if (!alloc_cpumask_var(&amp;mask, GFP_KERNEL)) {－－－－－－－－－－－－－－－－（d）&nbsp;<br>&nbsp;&nbsp;&nbsp; ret = -ENOMEM;&nbsp;<br>&nbsp;&nbsp;&nbsp; goto out_thread;&nbsp;<br>}&nbsp;<br>if (desc-&gt;irq_data.chip-&gt;flags &amp; IRQCHIP_ONESHOT_SAFE)－－－－－－－－－－－（e）&nbsp;<br>&nbsp;&nbsp;&nbsp; new-&gt;flags &amp;= ~IRQF_ONESHOT;</p> 
+   </blockquote> 
+   <p>（a）调用kthread_create来创建一个内核线程，并调用sched_setscheduler_nocheck来设定这个中断线程的调度策略和调度优先级。这些是和进程管理相关的内容，我们留到下一个专题再详细描述吧。</p> 
+   <p>（b）调用get_task_struct可以为这个threaded handler的task struct增加一次reference count，这样，即便是该thread异常退出也可以保证它的task struct不会被释放掉。这可以保证中断系统的代码不会访问到一些被释放的内存。irqaction的thread 成员被设定为刚刚创建的task，这样，primary handler就知道唤醒哪一个中断线程了。</p> 
+   <p>（c）设定IRQTF_AFFINITY的标志，在threaded handler中会检查该标志并进行IRQ affinity的设定。</p> 
+   <p>（d）分配一个cpu mask的变量的内存，后面会使用到</p> 
+   <p>（e）驱动工程师是撰写具体外设驱动的，他/她未必会了解到底层的一些具体的interrupt controller的信息。有些interrupt controller（例如MSI based interrupt）本质上就是就是one shot的（通过IRQCHIP_ONESHOT_SAFE标记），因此驱动工程师设定的IRQF_ONESHOT其实是画蛇添足，因此可以去掉。</p> 
+   <p>&nbsp;</p> 
+   <p>（4）共享中断的检查。代码如下：</p> 
+   <blockquote> 
+    <p>old_ptr = &amp;desc-&gt;action;&nbsp;<br>old = *old_ptr;</p> 
+    <p>if (old) {&nbsp;<br>&nbsp;&nbsp;&nbsp; if (!((old-&gt;flags &amp; new-&gt;flags) &amp; IRQF_SHARED) ||－－－－－－－－－－－－－－－－－（a）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ((old-&gt;flags ^ new-&gt;flags) &amp; IRQF_TRIGGER_MASK) ||&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ((old-&gt;flags ^ new-&gt;flags) &amp; IRQF_ONESHOT))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto mismatch;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* All handlers must agree on per-cpuness */&nbsp;<br>&nbsp;&nbsp;&nbsp; if ((old-&gt;flags &amp; IRQF_PERCPU) != (new-&gt;flags &amp; IRQF_PERCPU))&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto mismatch;</p> 
+    <p>&nbsp;&nbsp;&nbsp; /* add new interrupt at end of irq queue */&nbsp;<br>&nbsp;&nbsp;&nbsp; do {－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－（b）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; thread_mask |= old-&gt;thread_mask;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; old_ptr = &amp;old-&gt;next;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; old = *old_ptr;&nbsp;<br>&nbsp;&nbsp;&nbsp; } while (old);&nbsp;<br>&nbsp;&nbsp;&nbsp; shared = 1;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>（a）old指向注册之前的action list，如果不是NULL，那么说明需要共享interrupt line。但是如果要共享，需要每一个irqaction都同意共享（IRQF_SHARED），每一个irqaction的触发方式相同（都是level trigger或者都是edge trigger），相同的oneshot类型的中断（都是one shot或者都不是），per cpu类型的相同中断（都是per cpu的中断或者都不是）。</p> 
+   <p>（b）将该irqaction挂入队列的尾部。</p> 
+   <p>&nbsp;</p> 
+   <p>（5）thread mask的设定。代码如下：</p> 
+   <blockquote> 
+    <p>if (new-&gt;flags &amp; IRQF_ONESHOT) {&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (thread_mask == ~0UL) {－－－－－－－－－－－－－－－－－－－－－－－－（a）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -EBUSY;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_mask;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; new-&gt;thread_mask = 1 &lt;&lt; ffz(thread_mask);</p> 
+    <p>&nbsp;&nbsp;&nbsp; } else if (new-&gt;handler == irq_default_primary_handler &amp;&amp;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; !(desc-&gt;irq_data.chip-&gt;flags &amp; IRQCHIP_ONESHOT_SAFE)) {－－－－－－－－（b）&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = -EINVAL;&nbsp;<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto out_mask;&nbsp;<br>&nbsp;&nbsp;&nbsp; }</p> 
+   </blockquote> 
+   <p>对于one shot类型的中断，我们还需要设定thread mask。如果一个one shot类型的中断只有一个threaded handler（不支持共享），那么事情就很简单（临时变量thread_mask等于0），该irqaction的thread_mask成员总是使用第一个bit来标识该irqaction。但是，如果支持共享的话，事情变得有点复杂。我们假设这个one shot类型的IRQ上有A，B和C三个irqaction，那么A，B和C三个irqaction的thread_mask成员会有不同的bit来标识自己。例如A的thread_mask成员是0x01，B的是0x02，C的是0x04，如果有更多共享的irqaction（必须是oneshot类型），那么其thread_mask成员会依次设定为0x08，0x10……</p> 
+   <p>（a）在上面“共享中断的检查”这个section中，thread_mask变量保存了所有的属于该interrupt line的thread_mask，这时候，如果thread_mask变量如果是全1，那么说明irqaction list上已经有了太多的irq action（大于32或者64，和具体系统和编译器相关）。如果没有满，那么通过ffz函数找到第一个为0的bit作为该irq action的thread bit mask。</p> 
+   <p>（b）irq_default_primary_handler的代码如下：</p> 
+   <blockquote> 
+    <p>static irqreturn_t irq_default_primary_handler(int irq, void *dev_id)&nbsp;<br>{&nbsp;<br>&nbsp;&nbsp;&nbsp; return IRQ_WAKE_THREAD;&nbsp;<br>}</p> 
+   </blockquote> 
+   <p>代码非常的简单，返回IRQ_WAKE_THREAD，让kernel唤醒threaded handler就OK了。使用irq_default_primary_handler虽然简单，但是有一个风险：如果是电平触发的中断，我们需要操作外设的寄存器才可以让那个asserted的电平信号消失，否则它会一直持续。一般，我们都是直接在primary中操作外设寄存器（slow bus类型的interrupt controller不行），尽早的clear interrupt，但是，对于irq_default_primary_handler，它仅仅是wakeup了threaded interrupt handler，并没有clear interrupt，这样，执行完了primary handler，外设中断仍然是asserted，一旦打开CPU中断，立刻触发下一次的中断，然后不断的循环。因此，如果注册中断的时候没有指定primary interrupt handler，并且没有设定IRQF_ONESHOT，那么系统是会报错的。当然，有一种情况可以豁免，当底层的irq chip是one shot safe的（IRQCHIP_ONESHOT_SAFE）。</p> 
+   <p>（6）用户IRQ flag和底层interrupt flag的同步（TODO）</p> 
+   <p>&nbsp;</p> 
+   <p><em>原创文章，转发请注明出处。蜗窝科技。<a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html" rel="nofollow">http://www.wowotech.net/linux_kenrel/request_threaded_irq.html</a></em></p> 
+   <p>标签: <a href="http://www.wowotech.net/tag/request_threaded_irq" rel="nofollow">request_threaded_irq</a></p> 
+   <p> <a href="http://www.wowotech.net/support_us.html" rel="nofollow"><img src="https://yqfile.alicdn.com/img_bbae1cd6e2b9954d9e0e47a14dd1ad01.png" alt="" width="86" height="40" align="middle"></a></p> 
+   <div class="nextlog">
+    «&nbsp;
+    <a href="http://www.wowotech.net/device_model/device_resource_management.html" rel="nofollow">Linux设备模型(9)_device resource management</a>&nbsp;|&nbsp;
+    <a href="http://www.wowotech.net/pm_subsystem/autosleep.html" rel="nofollow">Linux电源管理(10)_autosleep</a>»
+   </div> 
+   <p> <a name="comments"></a></p> 
+   <p><strong>评论：</strong></p> 
+   <div class="comment"> 
+    <a name="3597"></a> 
+    <div class="comment-info"> 
+     <strong><a href="http://www.wowotech.net/" rel="nofollow">electrlife</a>&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2016-03-07 09:43</span></span> 
+     <div class="comment-content">
+      有个小疑问，对于中断只简单使用过gpio中断，有个gpio_to_irq的函数，可以把gpio直接转换成&nbsp;
+      <br>request_irq函数中所需要的irq number， 而其它的中断，对于request_irq中的irq number号如何&nbsp;
+      <br>得到。
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3597" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="3604"></a> 
+     <div class="comment-info"> 
+      <strong><a href="http://www.wowotech.net/" rel="nofollow">郭健</a>&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2016-03-07 22:40</span></span> 
+      <div class="comment-content">
+       @electrlife：这个和中断控制器驱动有关，可以静态分配，也可以动态分配。静态分配很简单，固定映射，某个IRQ number对应某个IRQ domain的HW interrupt ID。对于动态分配，可以调用irq_alloc_desc来分配一个空闲的IRQ number，然后建立和HW interrupt ID的mapping。
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3604" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+     <div class="comment comment-children"> 
+      <a name="3608"></a> 
+      <div class="comment-info"> 
+       <strong><a href="http://www.wowotech.net/" rel="nofollow">electrlife</a>&nbsp;</strong>
+       <br>
+       <span class="comment-time"><span class="comment-time">2016-03-08 11:09</span></span> 
+       <div class="comment-content">
+        @郭健：HW ID 与irq number 映射的过程，我明白，只是这个number如何告知驱动编写者，&nbsp;
+        <br>例如，有一个串口设备，我需要使用这个串口的中断，如果我想在tty serial框架下&nbsp;
+        <br>实现，但是我也需要这个串口中断，因此我的设备驱动中需要知道这个串口中断number，&nbsp;
+        <br>但这个中断的映射应该是厂商通过动态申请的，所以我无法得知这个number。PS：这个需求仅是虚构，实际上可能不会有这种场景出现，只是为了说明问题。
+       </div> 
+       <div class="comment-reply">
+        <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3608" rel="nofollow">回复</a>
+       </div> 
+      </div> 
+      <div class="comment comment-children"> 
+       <a name="3612"></a> 
+       <div class="comment-info"> 
+        <strong><a href="http://www.wowotech.net/" rel="nofollow">郭健</a>&nbsp;</strong>
+        <br>
+        <span class="comment-time"><span class="comment-time">2016-03-08 19:00</span></span> 
+        <div class="comment-content">
+         @electrlife：任何的驱动都不能脱离驱动模块，对应你的场景，我们可以借用platform bus、platform driver和platform device。具体而言，你可以在UART driver中定义一个platform driver。在该platform driver的probe函数只要调用platform_get_irq即可以获得IRQ number。虽然IRQ是动态分配的，但是你可以通过接口获取该IRQ number。
+        </div> 
+        <div class="comment-reply">
+         <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3612" rel="nofollow">回复</a>
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="3622"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">electrlife</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2016-03-09 14:06</span></span> 
+         <div class="comment-content">
+          @郭健：假设有一个I2C设备，这个设备就是记录串口中断产生的数量，因些按I2C驱动框架&nbsp;
+          <br>实现这个假想设备的驱动，在这种具体的场景中，如何得到串口的中断号？&nbsp;
+          <br>换句话说，这些动态申请的，分散在各个驱动的子系统中的irq number可没可能被其它&nbsp;
+          <br>的驱动共享使用。&nbsp;
+          <br>比如，I2C驱动子系统中并没有提供和中断有关的接口信息，而我的驱动Probe时也无法&nbsp;
+          <br>得到I2C的中断number，因为它是在厂商驱动初始化时动态申请，并且一般保存在厂商&nbsp;
+          <br>自己抽象的XXX_I2C结构中。
+         </div> 
+         <div class="comment-reply">
+          <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3622" rel="nofollow">回复</a>
+         </div> 
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="3623"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">electrlife</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2016-03-09 14:10</span></span> 
+         <div class="comment-content">
+          @electrlife：补充：比如，如何得到I2C adapter 的中断number？
+         </div> 
+         <div class="comment-reply">
+          <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3623" rel="nofollow">回复</a>
+         </div> 
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="3635"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">郭健</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2016-03-09 22:56</span></span> 
+         <div class="comment-content">
+          @electrlife：一般而言，SOC上的I2C controller（也就是I2C adapter）都是platform bus上的设备，呵呵~~~这个问题不是回答过了吗？你是想问I2C device driver如何得到IRQ number吗？
+         </div> 
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="3639"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">electrlife</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2016-03-10 12:16</span></span> 
+         <div class="comment-content">
+          @electrlife：唉，郭兄，我终于说明白，让你理解了，确实是想问I2C device driver如何得到IRQ number，或者说类似这种情况的。
+         </div> 
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="3640"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">electrlife</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2016-03-10 12:18</span></span> 
+         <div class="comment-content">
+          @electrlife：另外还有就是I2C如何得到其它设备驱动的IRQ number，比如串口。
+         </div> 
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="3645"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">郭健</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2016-03-10 20:09</span></span> 
+         <div class="comment-content">
+          @electrlife：其实struct i2c_client（对应设备模型中的i2c device）中有irq的成员的，保存的就是这个i2c设备使用的irq number，不过怎么得到呢？还是回到如何实例化i2c_client这个数据结构的场景。&nbsp;
+          <br>
+          <br>分配i2c_client并注册到设备模型中是在I2C controller（i2c adapter）驱动的初始化函数中进行的。在该函数中会调用i2c_register_adapter接口向I2C core模块注册一个adapter，并调用of_i2c_register_devices函数进行i2c device的实例化。这时候可以分析该i2c client的设备树节点，获取和中断相关的信息（设备树传递过来的），并进行分析并创建映射（irq_of_parse_and_map），并赋值给client-&gt;irq。
+         </div> 
+        </div> 
+       </div> 
+      </div> 
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="3777"></a> 
+     <div class="comment-info"> 
+      <strong>民&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2016-04-02 15:36</span></span> 
+      <div class="comment-content">
+       @electrlife：刚入门，看了这里也有个疑问想请教下：&nbsp;
+       <br>”gpio_to_irq的函数可以以把gpio直接转换成 request_irq函数中所需要的irq number“，并且request_irq函数的中断回调也可以设置了。那gpio中断，好像irq domain无关（request_irq函数没有和irq domain关联的地方），中断来了调用到回调函数不就达到目的了。&nbsp;
+       <br>“gpio中断，好像irq domain无关”=&gt;这样理解对不？&nbsp;
+       <br>
+       <br>谢谢
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3777" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="3512"></a> 
+    <div class="comment-info"> 
+     <strong><a href="http://www.wowotech.net/" rel="nofollow">狂奔的蜗牛</a>&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2016-02-23 10:21</span></span> 
+     <div class="comment-content">
+      向大神请教一个问题，我在3.14版本的内核上面直接request_irq(61,x,x,x,x);的时候cat /proc/interrupt显示的信息是：
+      <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;CPU0&nbsp;&nbsp;&nbsp;&nbsp;CPU1&nbsp;
+      <br>61&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; GIC&nbsp;&nbsp;&nbsp;&nbsp;61&nbsp;&nbsp;&nbsp;&nbsp;pcie_algo&nbsp;
+      <br>这里应该是简单的线性映射，前面和后面都是61，并且是可以正常接收到中断进入中断处理函数的，但是同样的方式在4.0版本的内核下就成了这个样子了：&nbsp;
+      <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;CPU0&nbsp;&nbsp;&nbsp;&nbsp;CPU1&nbsp;
+      <br>61&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; zynq-gpio&nbsp;&nbsp;&nbsp;&nbsp;38&nbsp;&nbsp;&nbsp;&nbsp;pcie_algo&nbsp;
+      <br>这时候中断控制器变了，后面的数字也从61变成了38，而且这时候是无法接收中断信号的，确定中断已经拉高了，应该是出在了中断号上面了，4.0上面不是简单的线性映射关系，但是我现在不知道如何在驱动里面正确的获得这个61号硬件interrupt ID 对应的虚拟中断号，如果是一个真实的设备有对应的寄存器的话，我可以在设备树里面定义中断，并且把驱动套一个platform的壳子，但现在data手册里面只给了硬件中断号就是61号，我只能在驱动里面想办法获取他的映射后的IRQ NUM了？
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3512" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="3543"></a> 
+     <div class="comment-info"> 
+      <strong><a href="http://www.wowotech.net/" rel="nofollow">狂奔的蜗牛</a>&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2016-02-26 14:16</span></span> 
+      <div class="comment-content">
+       @狂奔的蜗牛：这个问题使用设备树+platform的方式解决了，现在中断号是正确了，虚拟中断号是16，硬件中断号是61，但是中断一来，就进入死循环了，提示说unexpected IRQ trap at vector 00,&nbsp;&nbsp; irq 0, desc:xxxxx&nbsp;&nbsp;depth:1&nbsp;&nbsp; count:0&nbsp;&nbsp;unhandled:0 应该是内核没有找到我注册的那个中断处理函数，irq值也不对，跟站点请教一下，如果知道的话给个提示。。。。
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3543" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+     <div class="comment comment-children"> 
+      <a name="3546"></a> 
+      <div class="comment-info"> 
+       <strong><a href="http://www.wowotech.net/" rel="nofollow">郭健</a>&nbsp;</strong>
+       <br>
+       <span class="comment-time"><span class="comment-time">2016-02-26 14:45</span></span> 
+       <div class="comment-content">
+        @狂奔的蜗牛：呵呵～～～你这个问题太具体了，中断控制器原来用的是GIC，现在用了一个似乎是zynq-gpio的中断控制器（估计是一个有中断功能的GPIO controller？），那么你的系统的中断控制器是如何的？你的IRQ到hw interrupt ID是如何映射的？&nbsp;
+        <br>我估计你是注册了IRQ=16的中断handler，但是，要能执行这个handler需要：&nbsp;
+        <br>1、正确的初始化zynq-gpio所属的irq domain&nbsp;
+        <br>2、正确的建立mapping table，否则也无法将61号硬件中断转换成16这个IRQ number&nbsp;
+        <br>
+        <br>你给出的信息太少了，我也无法帮你，只能随便说两句
+       </div> 
+       <div class="comment-reply">
+        <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3546" rel="nofollow">回复</a>
+       </div> 
+      </div> 
+      <div class="comment comment-children"> 
+       <a name="3547"></a> 
+       <div class="comment-info"> 
+        <strong><a href="http://www.wowotech.net/" rel="nofollow">狂奔的蜗牛</a>&nbsp;</strong>
+        <br>
+        <span class="comment-time"><span class="comment-time">2016-02-26 14:54</span></span> 
+        <div class="comment-content">
+         @郭健：后来是GIC了，我搜了整个内核代码，也没有关于中断控制器的叫做ZYNQ-GPIO的，现在的打印信息是这样的：&nbsp;
+         <br>cat&nbsp;&nbsp; /proc/interrupts&nbsp;
+         <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CPU0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;CPU1&nbsp;
+         <br>16&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;GIC&nbsp;&nbsp; 61&nbsp;&nbsp;&nbsp;&nbsp;PCIE_ALGO&nbsp;
+         <br>后面的是硬件中断号，前面的是对应的映射后的，我是在设备树里面的设置的中断号，&lt;0 29 4&gt;,这个样子
+        </div> 
+        <div class="comment-reply">
+         <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3547" rel="nofollow">回复</a>
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="3548"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">狂奔的蜗牛</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2016-02-26 14:55</span></span> 
+         <div class="comment-content">
+          @狂奔的蜗牛：在驱动里面使用的platform_get_irq(),返回值就是16了，然后使用devm_request_irq()进行的注册
+         </div> 
+         <div class="comment-reply">
+          <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3548" rel="nofollow">回复</a>
+         </div> 
+        </div> 
+       </div> 
+      </div> 
+      <div class="comment comment-children"> 
+       <a name="3692"></a> 
+       <div class="comment-info"> 
+        <strong><a href="http://www.wowotech.net/" rel="nofollow">狂奔的蜗牛</a>&nbsp;</strong>
+        <br>
+        <span class="comment-time"><span class="comment-time">2016-03-19 10:13</span></span> 
+        <div class="comment-content">
+         @郭健：这个中断的问题解决了，是赛灵思提供的内核的问题，之前使用的他们网站上的内核是不稳定版本原来（他们竟然取名为master版本），换了一个稳定版就OK了。。。。。
+        </div> 
+        <div class="comment-reply">
+         <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3692" rel="nofollow">回复</a>
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="3696"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">郭健</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2016-03-20 23:55</span></span> 
+         <div class="comment-content">
+          @狂奔的蜗牛：问题解决了就好，呵呵~~
+         </div> 
+         <div class="comment-reply">
+          <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3696" rel="nofollow">回复</a>
+         </div> 
+        </div> 
+       </div> 
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="3492"></a> 
+    <div class="comment-info"> 
+     <strong><a href="http://www.wowotech.net/" rel="nofollow">source_123</a>&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2016-02-05 12:30</span></span> 
+     <div class="comment-content">
+      新人报道！&nbsp;
+      <br>先给各位大神拜个早年。&nbsp;
+      <br>小弟最近遇到个问题，请各位大神把把脉。&nbsp;
+      <br>err = request_threaded_irq(irq, NULL, test_irq,&nbsp;
+      <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;IRQF_TRIGGER_RISING | IRQF_ONESHOT | IRQF_NO_SUSPEND,&nbsp;
+      <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dev_name(&amp;spi-&gt;dev), my_dev);&nbsp;
+      <br>enable_irq_wake(irq);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+      <br>
+      <br>但是系统休眠后，这个中断无法唤醒系统，中断回调函数里面有log，看不到任何log输出。这是什么原因呢？&nbsp;
+      <br>备注：这个中断号是可以唤醒系统的，我们有另外一个器件用这个中断号没任何问题，做了一个器件替换后，系统无法唤醒了。 所以这个问题应该是软件问题，但小弟看了很久了，没有思路，求大神指点下哦。&nbsp;
+      <br>
+      <br>谢谢！
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3492" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="3496"></a> 
+     <div class="comment-info"> 
+      <strong><a href="http://www.wowotech.net/" rel="nofollow">郭健</a>&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2016-02-06 10:03</span></span> 
+      <div class="comment-content">
+       @source_123：如果我遇到这个问题，我们先沿着下面的思路处理：&nbsp;
+       <br>1、示波器观察该器件是否真的产生了中断信号&nbsp;
+       <br>2、如果的确产生了硬件的中断信号，那么在系统进入休眠状态之前，观察电源管理相关的寄存器设定是否正确&nbsp;
+       <br>3、如果都是OK的，那么在系统唤醒附近增加log，看看是否实际系统已经唤醒，只不过是卡在某个driver的resume函数中
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-3496" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="2997"></a> 
+    <div class="comment-info"> 
+     <strong><a href="http://www.wowotech.net/" rel="nofollow">coray</a>&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2015-11-04 10:29</span></span> 
+     <div class="comment-content">
+      请问使用了标志 IRQF_NO_SUSPEND申请中断，是否会造成功耗的增加？能简要分析一下吗？谢谢
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-2997" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="2998"></a> 
+     <div class="comment-info"> 
+      <strong><a href="http://www.wowotech.net/" rel="nofollow">linuxer</a>&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2015-11-04 19:34</span></span> 
+      <div class="comment-content">
+       @coray：你问的是增加什么状态下的功耗？是正常运行时候的，还是系统处于suspend状态时候的功耗？&nbsp;
+       <br>如果你问的是正常运行时候，那么毫无疑问，不会。 IRQF_NO_SUSPEND这个标志本来就不会影响正常运行时候的功耗。&nbsp;
+       <br>系统处于suspend状态时候的功耗是否会增加呢？我的理解是：这和系统实现相关。&nbsp;
+       <br>设置了IRQF_NO_SUSPEND flag的驱动，会导致在系统进入suspend状态的时候不会关闭该irq number对应的irq request line（具体代码参考suspend_device_irqs），也就是说，interrupt controller不会disable该外设的interrupt request line。会不会影响功耗呢？对于该外设而言，当然不会，在suspend过程中，该外设仍然会进入suspend状态。对于interrupt controller和cpu core而言，这不好回答，和具体的实现相关。
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-2998" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="2008"></a> 
+    <div class="comment-info"> 
+     <strong>passerby&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2015-06-18 16:35</span></span> 
+     <div class="comment-content">
+      hi linux,&nbsp;
+      <br>&nbsp;&nbsp;&nbsp;&nbsp;有个小问题，我们通过request_irq申请时指定中断触发标志IRQF_TRIGGER_RISING ，但是这个表示我在代码中没有看到怎么写到寄存器里面的。能否指点一下
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-2008" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="2009"></a> 
+     <div class="comment-info"> 
+      <strong>passerby&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2015-06-18 17:15</span></span> 
+      <div class="comment-content">
+       @passerby：OK,刚才是老眼昏花了。。。找到了，是__irq_set_trigger里面定义的，然后调用irq chip的irq_set_type进行寄存器设置的。
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-2009" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="1795"></a> 
+    <div class="comment-info"> 
+     <strong><a href="http://www.wowotech.net/" rel="nofollow">RobinHsiang</a>&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2015-05-14 17:09</span></span> 
+     <div class="comment-content">
+      @linuxer&nbsp;
+      <br>如果中断控制器可以支持足够多的interrupt source，那么在两个外设间共享一个interrupt request line是不推荐的，毕竟有一些额外的开销（发生中断的时候要逐个询问是不是你的中断，软件上就是遍历action list）&nbsp;
+      <br>-------------------------------------------------------------------------------------------------------------------------&nbsp;
+      <br>按上面描述，在遍历的时候做一次对比。没完全搞明白这个是如何实现的。&nbsp;
+      <br>我的理解是：&nbsp;
+      <br>首先,中断到来，那肯定先得到一个硬件寄存器中的信息。&nbsp;
+      <br>接着，那另一边就遍历所有这些IRQF_SHARED flags的信息，我不知道这些中断处理程序(标记IRQF_SHARED flags的)是如何被保存的，是抽象保存到一个链表里面？如果是这样，那这个是内核访问的全局地址抽象出来的，还是在request_irq(....,void *dev_id)时抽取的这个设备结构体指针？感觉应该保存这个dev_id，至少我表面上看上去这样会直观一点。不知道内核如何管理这些的？
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1795" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="1798"></a> 
+     <div class="comment-info"> 
+      <strong><a href="http://www.wowotech.net/" rel="nofollow">linuxer</a>&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2015-05-14 23:00</span></span> 
+      <div class="comment-content">
+       @RobinHsiang：我自己感觉你的问题都可以在http://www.wowotech.net/irq_subsystem/interrupt_descriptor.html中找到答案，你先看看这份文档，如果仍有疑问，那么我再进一步解答
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1798" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+     <div class="comment comment-children"> 
+      <a name="1806"></a> 
+      <div class="comment-info"> 
+       <strong>super-&nbsp;</strong>
+       <br>
+       <span class="comment-time"><span class="comment-time">2015-05-15 11:49</span></span> 
+       <div class="comment-content">
+        @linuxer：@linuxer:&nbsp;
+        <br>
+        <br>&nbsp;&nbsp;&nbsp;&nbsp;看到您的这一句描述 "为了让系统的performance不受影响，irqaction的callback函数必须在函数的最开始进行判断，是否是自己的硬件设备产生了中断（读取硬件的寄存器），如果不是，尽快的退出。"&nbsp;
+        <br>
+        <br>&nbsp;&nbsp;&nbsp;&nbsp;有一个关于共享中断的疑问, 共享中断是不是根据您上面的描述来区分具体的判断是哪一个设备发生了中断, 然后调用具体的action list中的specific handler ?
+       </div> 
+       <div class="comment-reply">
+        <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1806" rel="nofollow">回复</a>
+       </div> 
+      </div> 
+      <div class="comment comment-children"> 
+       <a name="1807"></a> 
+       <div class="comment-info"> 
+        <strong>super-&nbsp;</strong>
+        <br>
+        <span class="comment-time"><span class="comment-time">2015-05-15 12:18</span></span> 
+        <div class="comment-content">
+         @super-：我看了技术手册上的一些设备, 没有找到用于记录设备产生了中断的寄存器?&nbsp;&nbsp;还是我没有找到?
+        </div> 
+        <div class="comment-reply">
+         <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1807" rel="nofollow">回复</a>
+        </div> 
+       </div> 
+      </div> 
+      <div class="comment comment-children"> 
+       <a name="1817"></a> 
+       <div class="comment-info"> 
+        <strong><a href="http://www.wowotech.net/" rel="nofollow">linuxer</a>&nbsp;</strong>
+        <br>
+        <span class="comment-time"><span class="comment-time">2015-05-15 18:09</span></span> 
+        <div class="comment-content">
+         @super-：如果多个设备共享interrupt request line，那么任何一个产生了中断都可以触发中断线的有效状态，从而让interrupt controller向CPU汇报该中断，对于通用中断子系统而言，它无法分辨哪个设备产生了中断，因此只能是遍历action list，让specific handler自己判断。&nbsp;
+         <br>
+         <br>一般而言，设备中总是有记录中断状态寄存器的，你再仔细看看datasheet
+        </div> 
+        <div class="comment-reply">
+         <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1817" rel="nofollow">回复</a>
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="1824"></a> 
+        <div class="comment-info"> 
+         <strong>super-&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2015-05-18 09:53</span></span> 
+         <div class="comment-content">
+          @linuxer：非常感谢。
+         </div> 
+         <div class="comment-reply">
+          <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1824" rel="nofollow">回复</a>
+         </div> 
+        </div> 
+       </div> 
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="1413"></a> 
+    <div class="comment-info"> 
+     <strong>阿孟&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2015-03-25 16:42</span></span> 
+     <div class="comment-content">
+      Hi Linuxer,&nbsp;
+      <br>请教一下，&nbsp;
+      <br>
+      <br>“新的内核已经不区分slow handler和fast handle，都是fast handler，都是需要关闭CPU中断的，那些需要后续处理的内容推到threaded interrupt handler中去执行。”&nbsp;
+      <br>
+      <br>如果有的中断比较频繁，会不会可能丢失，如果刚好有其他中断已经关闭了CPU中断。 如果有这样的情况有什么建议吗?
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1413" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="1418"></a> 
+     <div class="comment-info"> 
+      <strong><a href="http://www.wowotech.net/" rel="nofollow">linuxer</a>&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2015-03-26 09:55</span></span> 
+      <div class="comment-content">
+       @阿孟：这是和系统（HW and SW）设计有关的，我们假设有硬件A和硬件B，在A的的handler中是关闭中断的，因此，这时候B产生中断只能体现在中断控制器的中断状态寄存器上，如果该寄存器不能反应多次中断，那么在由于A handler而关闭CPU中断的期间，多次B产生的中断只能是合成一次。&nbsp;
+       <br>
+       <br>如何解决这个问题？我想可能有下面的方法：&nbsp;
+       <br>1、fast handler就是fast handler，不要做额外的事情，尽量快的处理，减少关闭中断的时间&nbsp;
+       <br>2、硬件这么快的产生中断是为何呢？是不是硬件的FIFO不够大？
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1418" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+     <div class="comment comment-children"> 
+      <a name="1419"></a> 
+      <div class="comment-info"> 
+       <strong>阿孟&nbsp;</strong>
+       <br>
+       <span class="comment-time"><span class="comment-time">2015-03-26 10:58</span></span> 
+       <div class="comment-content">
+        @linuxer：是想使用mcu的一个timer中断，定时处理一些事务。 我这个timer中断是不是可能会导致其他中断收不到？把timer中断处理函数线程化会不会好些。&nbsp;
+        <br>
+        <br>中断的原理这一块不是很了解，我补补课。
+       </div> 
+       <div class="comment-reply">
+        <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1419" rel="nofollow">回复</a>
+       </div> 
+      </div> 
+      <div class="comment comment-children"> 
+       <a name="1420"></a> 
+       <div class="comment-info"> 
+        <strong><a href="http://www.wowotech.net/" rel="nofollow">linuxer</a>&nbsp;</strong>
+        <br>
+        <span class="comment-time"><span class="comment-time">2015-03-26 12:48</span></span> 
+        <div class="comment-content">
+         @阿孟：不能用softtime timer吗？为何要用硬件timer的中断来处理某些定时的事务？
+        </div> 
+        <div class="comment-reply">
+         <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1420" rel="nofollow">回复</a>
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="1421"></a> 
+        <div class="comment-info"> 
+         <strong>阿孟&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2015-03-26 13:29</span></span> 
+         <div class="comment-content">
+          @linuxer：这个也是我们一个客户搞的东西，具体为啥用个硬件timer还没搞清楚。&nbsp;
+          <br>
+          <br>另外&nbsp;
+          <br>还有点疑惑，现在版本linux都会禁止cpu中断，那么之前版本linux如果不加IRQF_DISABLED这个flag是支持中断嵌套吗？
+         </div> 
+         <div class="comment-reply">
+          <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1421" rel="nofollow">回复</a>
+         </div> 
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="1430"></a> 
+        <div class="comment-info"> 
+         <strong><a href="http://www.wowotech.net/" rel="nofollow">linuxer</a>&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2015-03-27 11:54</span></span> 
+         <div class="comment-content">
+          @阿孟：是的，slow handler执行时间太长了，必须开中断，以便在执行该handler的时候有机会让其他类型的中断handler抢占执行。当然，同一种类型的中断不会嵌套
+         </div> 
+         <div class="comment-reply">
+          <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1430" rel="nofollow">回复</a>
+         </div> 
+        </div> 
+       </div> 
+       <div class="comment comment-children"> 
+        <a name="1434"></a> 
+        <div class="comment-info"> 
+         <strong>阿孟&nbsp;</strong>
+         <br>
+         <span class="comment-time"><span class="comment-time">2015-03-27 15:17</span></span> 
+         <div class="comment-content">
+          @linuxer：明白了，多谢linuxer的解答。
+         </div> 
+        </div> 
+       </div> 
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="1321"></a> 
+    <div class="comment-info"> 
+     <strong><a href="http://www.wowotech.net/" rel="nofollow">RobinHsiang</a>&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2015-03-10 21:10</span></span> 
+     <div class="comment-content">
+      Hi Linuxer,&nbsp;
+      <br>请教一个问题，ARM外设使用GPIO中断唤醒CPU时，像GPIO配置成输入，和让该GPIO关联系统中断，以及让GPIO作为中断唤醒源等等动作一定要在外设驱动的初始化函数中完成吗？&nbsp;
+      <br>
+      <br>可以在device tree中编写，然后留一个类似的接口，让驱动只单纯的调用一个函数可以吗？&nbsp;
+      <br>我其实遇到的问题是，外设（中断源）的驱动是客户写的，但是这些系统相关的他们又不想管。
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1321" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+    <div class="comment comment-children"> 
+     <a name="1323"></a> 
+     <div class="comment-info"> 
+      <strong><a href="http://www.wowotech.net/" rel="nofollow">linuxer</a>&nbsp;</strong>
+      <br>
+      <span class="comment-time"><span class="comment-time">2015-03-11 09:03</span></span> 
+      <div class="comment-content">
+       @RobinHsiang：你问的问题涉及了三个模块：&nbsp;
+       <br>1、GPIO子系统模块&nbsp;
+       <br>2、电源管理子系统模块&nbsp;
+       <br>3、中断子系统模块&nbsp;
+       <br>
+       <br>实际上，一个外设驱动当然需要调用内核各个子系统的接口来完成自己的具体功能。因此：&nbsp;
+       <br>GPIO配置、申请中断以及设置wakeup source本身都是驱动功能的一部分。device tree的主要功能是让系统知道硬件的拓扑结构，不可能提供一个一统天下的接口来完成你说的那一系列功能。&nbsp;
+       <br>
+       <br>如果外设驱动是客户写的，那么你是否在他撰写该驱动的时候仔细的定义了规格？我觉得电源管理也是规格之一的。不过我猜你们和客户其实没有那么正式的合同来约定该驱动的开发，因此，他们只想关注硬件功能的代码而不想涉及其他，如果这样的话，那么该驱动的责任人应该是你们，客户仅仅是提供示例代码而已。
+      </div> 
+      <div class="comment-reply">
+       <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1323" rel="nofollow">回复</a>
+      </div> 
+     </div> 
+     <div class="comment comment-children"> 
+      <a name="1325"></a> 
+      <div class="comment-info"> 
+       <strong><a href="http://www.wowotech.net/" rel="nofollow">RobinHsiang</a>&nbsp;</strong>
+       <br>
+       <span class="comment-time"><span class="comment-time">2015-03-11 10:16</span></span> 
+       <div class="comment-content">
+        @linuxer：Thanks..!!&nbsp;
+        <br>确实是你所说的，这几个驱动没有约定这么详细，当初只是定了大致如何实现功能。&nbsp;
+        <br>关键是这个客户专门做这几个模块的研发，而且可能牵涉到一些军工和政府项目，不开源给我们。&nbsp;
+        <br>客户的建议是系统平台部分我们做，他们只open /dev/ttyhsl，至于电源和唤醒部分，我们也提供接口。&nbsp;
+        <br>最近也讨论了一些方案，比如侦测UART的传输情况来关闭电源和clock啊，或者将系统平台的情况写一些接口出来供他们调用，但是都感觉怪怪的，也怕实现不好。&nbsp;
+        <br>
+        <br>最终看来，只能是我们将代码写好，让他们做填空题，我们再测试了。
+       </div> 
+       <div class="comment-reply">
+        <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-1325" rel="nofollow">回复</a>
+       </div> 
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="465"></a> 
+    <div class="comment-info"> 
+     <strong><a href="http://www.wowotech.net/" rel="nofollow">linuxer</a>&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2014-09-25 10:16</span></span> 
+     <div class="comment-content">
+      你可以先用arm-linux-objdump的命令看看是否你编译的异常向量表就是这样的。&nbsp;
+      <br>指令“EAFFFFFE”应该是被翻译成一个跳转指令，跳转范围是24-bit的立即数，对于“EAFFFFFE”，显然还没有填入这个立即数，一般而言，当你编译出.o文件的时候，异常向量表的反汇编结果就是：&nbsp;
+      <br>__vectors_start():&nbsp;
+      <br>arch/arm/kernel/entry-armv.S:1134&nbsp;
+      <br>&nbsp;&nbsp; 0:&nbsp;&nbsp; eaffffff&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 4 &lt;__vectors_start+0x4&gt;&nbsp;
+      <br>arch/arm/kernel/entry-armv.S:1135&nbsp;
+      <br>&nbsp;&nbsp; 4:&nbsp;&nbsp; eafffffe&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1a0 &lt;vector_und&gt;&nbsp;
+      <br>arch/arm/kernel/entry-armv.S:1136&nbsp;
+      <br>&nbsp;&nbsp; 8:&nbsp;&nbsp; e59ffff0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp; pc, [pc, #4080] ; 1000 &lt;.vectors+0x1000&gt;&nbsp;
+      <br>arch/arm/kernel/entry-armv.S:1137&nbsp;
+      <br>&nbsp;&nbsp; c:&nbsp;&nbsp; eafffffe&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 120 &lt;vector_pabt&gt;&nbsp;
+      <br>arch/arm/kernel/entry-armv.S:1138&nbsp;
+      <br>&nbsp;&nbsp;10:&nbsp;&nbsp; eafffffe&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; a0 &lt;vector_dabt&gt;&nbsp;
+      <br>arch/arm/kernel/entry-armv.S:1139&nbsp;
+      <br>&nbsp;&nbsp;14:&nbsp;&nbsp; ea000086&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 220 &lt;vector_swi&gt;&nbsp;
+      <br>arch/arm/kernel/entry-armv.S:1140&nbsp;
+      <br>&nbsp;&nbsp;18:&nbsp;&nbsp; eafffffe&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 20 &lt;vector_irq&gt;&nbsp;
+      <br>arch/arm/kernel/entry-armv.S:1141&nbsp;
+      <br>&nbsp;&nbsp;1c:&nbsp;&nbsp; ea000087&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 224 &lt;vector_fiq_offset&gt;&nbsp;
+      <br>这时候，还没有link，因此地址还是reallocated。当连接完成，“EAFFFFFE”会被修正，其24-bit的立即数的位置会被填入真正跳转的地址，例如：&nbsp;
+      <br>__vectors_start():&nbsp;
+      <br>c000e4e4:&nbsp;&nbsp;&nbsp;&nbsp;ef9f0000 &nbsp;&nbsp;&nbsp;&nbsp;svc&nbsp;&nbsp;&nbsp;&nbsp;0x009f0000&nbsp;
+      <br>c000e4e8:&nbsp;&nbsp;&nbsp;&nbsp;ea0000dd &nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;c000e864 &lt;early_mem+0x8&gt;&nbsp;
+      <br>c000e4ec:&nbsp;&nbsp;&nbsp;&nbsp;e59ff410 &nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;pc, [pc, #1040]&nbsp;&nbsp;&nbsp;&nbsp;; c000e904 &lt;early_initrd+0x38&gt;&nbsp;
+      <br>c000e4f0:&nbsp;&nbsp;&nbsp;&nbsp;ea0000bb &nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;c000e7e4 &lt;parse_tag_serialnr+0x8&gt;&nbsp;
+      <br>c000e4f4:&nbsp;&nbsp;&nbsp;&nbsp;ea00009a &nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;c000e764 &lt;parse_tag_ramdisk+0x20&gt;&nbsp;
+      <br>c000e4f8:&nbsp;&nbsp;&nbsp;&nbsp;ea0000fa &nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;c000e8e8 &lt;early_initrd+0x1c&gt;&nbsp;
+      <br>c000e4fc:&nbsp;&nbsp;&nbsp;&nbsp;ea000078 &nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;c000e6e4 &lt;parse_tag_videotext+0x20&gt;&nbsp;
+      <br>c000e500:&nbsp;&nbsp;&nbsp;&nbsp;ea0000f7 &nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;c000e8e4 &lt;early_initrd+0x18&gt;&nbsp;
+      <br>
+      <br>我建议你一步一步的检查：&nbsp;
+      <br>1、先检查你编译出来的kernel image&nbsp;
+      <br>2、完成early_trap_init之后，检查看看exception table的copy的对不对&nbsp;
+      <br>3、是否运行时，有些代码误操作了exception table
+     </div> 
+     <div class="comment-reply">
+      <a href="http://www.wowotech.net/linux_kenrel/request_threaded_irq.html#comment-465" rel="nofollow">回复</a>
+     </div> 
+    </div> 
+   </div> 
+   <div class="comment"> 
+    <a name="464"></a> 
+    <div class="comment-info"> 
+     <strong><a href="http://www.wowotech.net/" rel="nofollow">forion</a>&nbsp;</strong>
+     <br>
+     <span class="comment-time"><span class="comment-time">2014-09-24 20:05</span></span> 
+     <div class="comment-content">
+      hi linuxer&nbsp;
+      <br>我现在遇到一个问题，就是很多时候我看到0xffff000c的地方是一个机器码为EAFFFFFE也就是 while（1）一样的指令，我不知道什么情况下vector table 会变成这样，不知道你有什么思路没有
+     </div> 
+    </div> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

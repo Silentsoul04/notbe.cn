@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>分析Linux内核创建一个新进程的过程【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/MarkWoo/p/4420588.html    前言说明    本篇为网易云课堂Linux内核分析课程的第六周作业，本次作业我们将具体来分析fork系统调用，来分析Linux内核创建新进程的过程       关键词：fork,&nb...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/07/28/weixin_34082177_90129565.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">分析Linux内核创建一个新进程的过程【转】</h1>
+    <p class="post-meta">Jul 28, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1><span style="font-size:16px;">转自：<a href="http://www.cnblogs.com/MarkWoo/p/4420588.html" rel="nofollow">http://www.cnblogs.com/MarkWoo/p/4420588.html</a></span></h1> 
+   <h1>前言说明</h1> 
+   <p>本篇为网易云课堂Linux内核分析课程的第六周作业，本次作业我们将具体来分析<code>fork</code>系统调用，来分析Linux内核创建新进程的过程</p> 
+   <hr>
+   <h2>关键词：<code>fork</code>,&nbsp;<code>系统调用</code>，<code>进程</code> </h2> 
+   <hr>
+   <p>*运行环境：**</p> 
+   <ul>
+    <li>Ubuntu 14.04 LTS x64</li> 
+    <li>gcc 4.9.2</li> 
+    <li>gdb 7.8</li> 
+    <li>vim 7.4 with vundle</li> 
+   </ul>
+   <hr>
+   <h1>分析</h1> 
+   <h2>分析方法说明</h2> 
+   <ul>
+    <li> <code>PCB</code>包含了一个进程的重要运行信息，所以我们将围绕在创建一个新进程时，如何来建立一个新的<code>PCB</code>的这一个过程来进行分析，在<code>Linux</code>系统中，<code>PCB</code>主要是存储在一个叫做<code>task_struct</code>这一个结构体中，创建新进程仅能通过<code>fork</code>,<code>clone</code>,<code>vfork</code>等系统调用的形式来进行</li> 
+    <li>不管是<code>fork</code>，还是<code>clone</code>，<code>vfork</code>,他们都是通过<code>do_fork</code>来创建进程</li> 
+    <li>接下来我将通过精简版的<code>do_fork</code>代码，和<code>do_fork</code>中关键的过程来进行分析说明</li> 
+   </ul>
+   <h2>do_fork()</h2> 
+   <div class="sourceCode"> 
+    <pre class="sourceCode c"><code class="sourceCode c hljs cpp"><span class="dt"><span class="hljs-function"><span class="hljs-keyword">long<span class="hljs-function"> <span class="hljs-title">do_fork<span class="hljs-params">(<span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">unsigned<span class="hljs-function"> <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">long<span class="hljs-function"> clone_flags, <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">unsigned<span class="hljs-function"> <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">long<span class="hljs-function"> stack_start, <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">unsigned<span class="hljs-function"> <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">long<span class="hljs-function"> stack_size, <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">int<span class="hljs-function"> __user *parent_tidptr, <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">int<span class="hljs-function"><span class="hljs-params"> __user *child_tidptr) { <span class="kw"><span class="hljs-keyword">struct task_struct *p; <span class="co"><span class="hljs-comment">//进程描述符结构体指针 <span class="dt"><span class="hljs-keyword">int trace = <span class="dv">0; <span class="dt"><span class="hljs-keyword">long nr; <span class="co"><span class="hljs-comment">//总的pid数量 <span class="co"><span class="hljs-comment">/*<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * Determine whether and which event to report to ptracer. When<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * called from kernel_thread or CLONE_UNTRACED is explicitly<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * requested, no event is reported; otherwise, report if the event<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * for the type of forking is enabled.<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> */ <span class="kw"><span class="hljs-keyword">if (!(clone_flags &amp; CLONE_UNTRACED)) { <span class="kw"><span class="hljs-keyword">if (clone_flags &amp; CLONE_VFORK) trace = PTRACE_EVENT_VFORK; <span class="kw"><span class="hljs-keyword">else <span class="kw"><span class="hljs-keyword">if ((clone_flags &amp; CSIGNAL) != SIGCHLD) trace = PTRACE_EVENT_CLONE; <span class="kw"><span class="hljs-keyword">else trace = PTRACE_EVENT_FORK; <span class="kw"><span class="hljs-keyword">if (likely(!ptrace_event_enabled(current, trace))) trace = <span class="dv">0; } <span class="co"><span class="hljs-comment">// 复制进程描述符，返回创建的task_struct的指针 p = copy_process(clone_flags, stack_start, stack_size, child_tidptr, <span class="hljs-literal">NULL, trace); <span class="co"><span class="hljs-comment">/*<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * Do this prior waking up the new thread - the thread pointer<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * might get invalid after that point, if the thread exits quickly.<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> */ <span class="kw"><span class="hljs-keyword">if (!IS_ERR(p)) { <span class="kw"><span class="hljs-keyword">struct completion vfork; <span class="kw"><span class="hljs-keyword">struct pid *pid; trace_sched_process_fork(current, p); <span class="co"><span class="hljs-comment">// 取出task结构体内的pid pid = get_task_pid(p, PIDTYPE_PID); nr = pid_vnr(pid); <span class="kw"><span class="hljs-keyword">if (clone_flags &amp; CLONE_PARENT_SETTID) put_user(nr, parent_tidptr); <span class="co"><span class="hljs-comment">// 如果使用的是vfork，那么必须采用某种完成机制，确保父进程后运行 <span class="kw"><span class="hljs-keyword">if (clone_flags &amp; CLONE_VFORK) { p-&gt;vfork_done = &amp;vfork; init_completion(&amp;vfork); get_task_struct(p); } <span class="co"><span class="hljs-comment">// 将子进程添加到调度器的队列，使得子进程有机会获得CPU wake_up_new_task(p); <span class="co"><span class="hljs-comment">/* forking complete and child started to run, tell ptracer */ <span class="kw"><span class="hljs-keyword">if (unlikely(trace)) ptrace_event_pid(trace, pid); <span class="co"><span class="hljs-comment">// 如果设置了 CLONE_VFORK 则将父进程插入等待队列，并挂起父进程直到子进程释放自己的内存空间 <span class="co"><span class="hljs-comment">// 保证子进程优先于父进程运行 <span class="kw"><span class="hljs-keyword">if (clone_flags &amp; CLONE_VFORK) { <span class="kw"><span class="hljs-keyword">if (!wait_for_vfork_done(p, &amp;vfork)) ptrace_event_pid(PTRACE_EVENT_VFORK_DONE, pid); } put_pid(pid); } <span class="kw"><span class="hljs-keyword">else { nr = PTR_ERR(p); } <span class="kw"><span class="hljs-keyword">return nr; }</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre> 
+   </div> 
+   <ul>
+    <li> <p>对于<code>do_fork</code>中比较重要的过程，我已经注释加以说明，这里我抽象的加以把过程总结一边</p> 
+     <blockquote> 
+      <ul>
+       <li>通过<code>copy_process</code>来复制进程描述符，返回新创建的子进程的task_struct的指针(即PCB指针)</li> 
+       <li>将新创建的子进程放入调度器的队列中，让其有机会获得CPU,并且要确保子进程要先于父进程运行，</li> 
+       <li> <strong>这里为什么要确保子进程先于父进程运行呢？</strong>，答案是在Linux系统中，有一个叫做copy_on_write技术（写时拷贝技术），该技术的作用是创建新进程时可以减少系统开销，具体该技术的细节请各位Google之，这里子进程先于父进程运行可以保证写时拷贝技术发挥其作用</li> 
+      </ul>
+     </blockquote> </li> 
+    <li>这里有一个<strong>重点的地方需要说明</strong>,在使用<code>get_pid</code>系统调用时，返回的并不是进程的<code>pid</code>,而是线程的<code>tgid</code>,<code>tgid</code>指的是一个线程组当时领头的进程的pid</li> 
+    <li> <p>在<code>do_fork</code>中，<code>copy_process</code>函数是比较重要的，其作用是创建进程描述符以及子进程所需要的其他所有数据结构为子进程准备运行环境,下面我将深入<code>copy_process</code>中来详细分析</p> </li> 
+   </ul>
+   <hr>
+   <h2>copy_process</h2> 
+   <div class="sourceCode"> 
+    <pre class="sourceCode c"><code class="sourceCode c hljs cpp"><span class="co"><span class="hljs-comment">/*<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> 创建进程描述符以及子进程所需要的其他所有数据结构<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> 为子进程准备运行环境<span class="hljs-comment"> <span class="co"><span class="hljs-comment">*/ <span class="dt"><span class="hljs-function"><span class="hljs-keyword">static<span class="hljs-function"> <span class="kw"><span class="hljs-function"><span class="hljs-keyword">struct<span class="hljs-function"> task_struct *<span class="hljs-title">copy_process<span class="hljs-params">(<span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">unsigned<span class="hljs-function"> <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">long<span class="hljs-function"> clone_flags, <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">unsigned<span class="hljs-function"> <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">long<span class="hljs-function"> stack_start, <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">unsigned<span class="hljs-function"> <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">long<span class="hljs-function"> stack_size, <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">int<span class="hljs-function"> __user *child_tidptr, <span class="kw"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">struct<span class="hljs-function"> pid *pid, <span class="dt"><span class="hljs-function"><span class="hljs-params"><span class="hljs-keyword">int<span class="hljs-function"><span class="hljs-params"> trace) { ... <span class="dt"><span class="hljs-keyword">int retval; <span class="kw"><span class="hljs-keyword">struct task_struct *p; ... <span class="co"><span class="hljs-comment">// 分配一个新的task_struct，此时的p与当前进程的task，仅仅是stack地址不同 p = dup_task_struct(current); <span class="kw"><span class="hljs-keyword">if (!p) <span class="kw"><span class="hljs-keyword">goto fork_out; ··· retval = -EAGAIN; <span class="co"><span class="hljs-comment">// 检查该用户的进程数是否超过限制 <span class="kw"><span class="hljs-keyword">if (atomic_read(&amp;p-&gt;real_cred-&gt;user-&gt;processes) &gt;= task_rlimit(p, RLIMIT_NPROC)) { <span class="co"><span class="hljs-comment">// 检查该用户是否具有相关权限，不一定是root <span class="kw"><span class="hljs-keyword">if (p-&gt;real_cred-&gt;user != INIT_USER &amp;&amp; !capable(CAP_SYS_RESOURCE) &amp;&amp; !capable(CAP_SYS_ADMIN)) <span class="kw"><span class="hljs-keyword">goto bad_fork_free; } current-&gt;flags &amp;= ~PF_NPROC_EXCEEDED; retval = copy_creds(p, clone_flags); <span class="kw"><span class="hljs-keyword">if (retval &lt; <span class="dv">0) <span class="kw"><span class="hljs-keyword">goto bad_fork_free; <span class="co"><span class="hljs-comment">/*<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * If multiple threads are within copy_process(), then this check<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * triggers too late. This doesn't hurt, the check is only there<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> * to stop root fork bombs.<span class="hljs-comment"> <span class="co"><span class="hljs-comment"> */ retval = -EAGAIN; <span class="co"><span class="hljs-comment">// 检查进程数量是否超过 max_threads，后者取决于内存的大小 <span class="kw"><span class="hljs-keyword">if (nr_threads &gt;= max_threads) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_count; <span class="kw"><span class="hljs-keyword">if (!try_module_get(task_thread_info(p)-&gt;exec_domain-&gt;module)) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_count; delayacct_tsk_init(p); <span class="co"><span class="hljs-comment">/* Must remain after dup_task_struct() */ p-&gt;flags &amp;= ~(PF_SUPERPRIV | PF_WQ_WORKER); <span class="co"><span class="hljs-comment">// 表明子进程还没有调用exec系统调用 p-&gt;flags |= PF_FORKNOEXEC; INIT_LIST_HEAD(&amp;p-&gt;children); INIT_LIST_HEAD(&amp;p-&gt;sibling); rcu_copy_process(p); p-&gt;vfork_done = <span class="hljs-literal">NULL; <span class="co"><span class="hljs-comment">// 初始化自旋锁 spin_lock_init(&amp;p-&gt;alloc_lock); <span class="co"><span class="hljs-comment">// 初始化挂起信号 init_sigpending(&amp;p-&gt;pending); <span class="co"><span class="hljs-comment">// 初始化定时器 p-&gt;utime = p-&gt;stime = p-&gt;gtime = <span class="dv">0; p-&gt;utimescaled = p-&gt;stimescaled = <span class="dv">0; <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE p-&gt;prev_cputime.utime = p-&gt;prev_cputime.stime = <span class="dv">0; <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">endif <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN seqlock_init(&amp;p-&gt;vtime_seqlock); p-&gt;vtime_snap = <span class="dv">0; p-&gt;vtime_snap_whence = VTIME_SLEEPING; <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">endif ... <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">ifdef CONFIG_DEBUG_MUTEXES p-&gt;blocked_on = <span class="hljs-literal">NULL; <span class="co"><span class="hljs-comment">/* not blocked yet */ <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">endif <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">ifdef CONFIG_BCACHE p-&gt;sequential_io = <span class="dv">0; p-&gt;sequential_io_avg = <span class="dv">0; <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">endif <span class="co"><span class="hljs-comment">/* Perform scheduler related setup. Assign this task to a CPU. */ <span class="co"><span class="hljs-comment">// 完成对新进程调度程序数据结构的初始化，并把新进程的状态设置为TASK_RUNNING <span class="co"><span class="hljs-comment">// 同时将thread_info中得preempt_count置为1，禁止内核抢占 retval = sched_fork(clone_flags, p); <span class="kw"><span class="hljs-keyword">if (retval) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_policy; retval = perf_event_init_task(p); <span class="kw"><span class="hljs-keyword">if (retval) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_policy; retval = audit_alloc(p); <span class="kw"><span class="hljs-keyword">if (retval) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_perf; <span class="co"><span class="hljs-comment">/* copy all the process information */ <span class="co"><span class="hljs-comment">// 复制所有的进程信息 shm_init_task(p); retval = copy_semundo(clone_flags, p); <span class="kw"><span class="hljs-keyword">if (retval) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_audit; retval = copy_files(clone_flags, p); <span class="kw"><span class="hljs-keyword">if (retval) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_semundo; ... <span class="co"><span class="hljs-comment">// 初始化子进程的内核栈 retval = copy_thread(clone_flags, stack_start, stack_size, p); <span class="kw"><span class="hljs-keyword">if (retval) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_io; <span class="kw"><span class="hljs-keyword">if (pid != &amp;init_struct_pid) { retval = -ENOMEM; <span class="co"><span class="hljs-comment">// 这里为子进程分配了新的pid号 pid = alloc_pid(p-&gt;nsproxy-&gt;pid_ns_for_children); <span class="kw"><span class="hljs-keyword">if (!pid) <span class="kw"><span class="hljs-keyword">goto bad_fork_cleanup_io; } ... <span class="co"><span class="hljs-comment">// 清除子进程thread_info结构的 TIF_SYSCALL_TRACE，防止 ret_from_fork将系统调用消息通知给调试进程 clear_tsk_thread_flag(p, TIF_SYSCALL_TRACE); <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">ifdef TIF_SYSCALL_EMU clear_tsk_thread_flag(p, TIF_SYSCALL_EMU); <span class="ot"><span class="hljs-meta">#<span class="hljs-meta-keyword">endif clear_all_latency_tracing(p); <span class="co"><span class="hljs-comment">/* ok, now we should be set up.. */ <span class="co"><span class="hljs-comment">// 设置子进程的pid p-&gt;pid = pid_nr(pid); <span class="co"><span class="hljs-comment">// 如果是创建线程 <span class="kw"><span class="hljs-keyword">if (clone_flags &amp; CLONE_THREAD) { p-&gt;exit_signal = <span class="hljs-number">-<span class="dv">1; <span class="co"><span class="hljs-comment">// 线程组的leader设置为当前线程的leader p-&gt;group_leader = current-&gt;group_leader; <span class="co"><span class="hljs-comment">// tgid是当前线程组的id，也就是main进程的pid p-&gt;tgid = current-&gt;tgid; } <span class="kw"><span class="hljs-keyword">else { <span class="kw"><span class="hljs-keyword">if (clone_flags &amp; CLONE_PARENT) p-&gt;exit_signal = current-&gt;group_leader-&gt;exit_signal; <span class="kw"><span class="hljs-keyword">else p-&gt;exit_signal = (clone_flags &amp; CSIGNAL); <span class="co"><span class="hljs-comment">// 创建的是进程，自己是一个单独的线程组 p-&gt;group_leader = p; <span class="co"><span class="hljs-comment">// tgid和pid相同 p-&gt;tgid = p-&gt;pid; } ... <span class="kw"><span class="hljs-keyword">if (likely(p-&gt;pid)) { ptrace_init_task(p, (clone_flags &amp; CLONE_PTRACE) || trace); init_task_pid(p, PIDTYPE_PID, pid); <span class="kw"><span class="hljs-keyword">if (thread_group_leader(p)) { ... <span class="co"><span class="hljs-comment">// 将pid加入散列表 attach_pid(p, PIDTYPE_PGID); attach_pid(p, PIDTYPE_SID); __this_cpu_inc(process_counts); } <span class="kw"><span class="hljs-keyword">else { ... } <span class="co"><span class="hljs-comment">// 将pid加入PIDTYPE_PID这个散列表 attach_pid(p, PIDTYPE_PID); <span class="co"><span class="hljs-comment">// 递增 nr_threads的值 nr_threads++; } total_forks++; spin_unlock(&amp;current-&gt;sighand-&gt;siglock); syscall_tracepoint_update(p); write_unlock_irq(&amp;tasklist_lock); ... <span class="co"><span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre>
+   </div>
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

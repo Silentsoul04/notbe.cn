@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>NGINX引入线程池 性能提升9倍 « NotBeCN</title>
+  <meta name="description" content="             1. 引言    正如我们所知，NGINX采用了异步、事件驱动的方法来处理连接。这种处理方式无需（像使用传统架构的服务器一样）为每个请求创建额外的专用进程或者线程，而是在一个工作进程中处理多个连接和请求。为此，NGINX工作在非阻塞的socket模式下，并使用了epoll&nbsp;和&...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/12/14/weixin_33735676_90132972.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">NGINX引入线程池 性能提升9倍</h1>
+    <p class="post-meta">Dec 14, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h2 style="margin-left:30px;">1. 引言</h2> 
+   <p style="margin-left:30px;">正如我们所知，NGINX采用了<a href="http://nginx.com/blog/inside-nginx-how-we-designed-for-performance-scale/" rel="nofollow">异步、事件驱动的方法来处理连接</a>。这种处理方式无需（像使用传统架构的服务器一样）为每个请求创建额外的专用进程或者线程，而是在一个工作进程中处理多个连接和请求。为此，NGINX工作在非阻塞的socket模式下，并使用了<a href="http://man7.org/linux/man-pages/man7/epoll.7.html" rel="nofollow">epoll</a>&nbsp;和&nbsp;<a href="https://www.freebsd.org/cgi/man.cgi?query=kqueue" rel="nofollow">kqueue</a>这样有效的方法。</p> 
+   <p style="margin-left:30px;">因为满负载进程的数量很少（通常每核CPU只有一个）而且恒定，所以任务切换只消耗很少的内存，而且不会浪费CPU周期。通过NGINX本身的实例，这种方法的优点已经为众人所知。NGINX可以非常好地处理百万级规模的并发请求。</p> 
+   <p style="margin-left:30px;"><img src="http://cdn3.infoqstatic.com/statics_s2_20161208-0302u1/resource/articles/thread-pools-boost-performance-9x/zh/resources/0622000.jpg" alt="" width="550"></p> 
+   <div class="clear">
+    &nbsp;
+   </div> 
+   <blockquote style="margin-left:30px;"> 
+    <p style="margin-left:30px;">每个进程都消耗额外的内存，而且每次进程间的切换都会消耗CPU周期并丢弃CPU高速缓存中的数据。</p> 
+   </blockquote> 
+   <p style="margin-left:30px;">但是，异步、事件驱动方法仍然存在问题。或者，我喜欢将这一问题称为“敌兵”，这个敌兵的名字叫阻塞（blocking）。不幸的是，很多第三方模块使用了阻塞调用，然而用户（有时甚至是模块的开发者）并不知道阻塞的缺点。阻塞操作可以毁掉NGINX的性能，我们必须不惜一切代价避免使用阻塞。</p> 
+   <p style="margin-left:30px;">即使在当前官方的NGINX代码中，依然无法在全部场景中避免使用阻塞，<a href="http://hg.nginx.org/nginx/rev/466bd63b63d1?_ga=1.182562213.2027750078.1426070219" rel="nofollow">NGINX1.7.11中实现</a>的线程池机制解决了这个问题。我们将在后面讲述这个线程池是什么以及该如何使用。现在，让我们先和我们的“敌兵”进行一次面对面的碰撞。</p> 
+   <h2 style="margin-left:30px;">2. 问题</h2> 
+   <p style="margin-left:30px;">首先，为了更好地理解这一问题，我们用几句话说明下NGINX是如何工作的。</p> 
+   <p style="margin-left:30px;">通常情况下，NGINX是一个事件处理器，即一个接收来自内核的所有连接事件的信息，然后向操作系统发出做什么指令的控制器。实际上，NGINX干了编排操作系统的全部脏活累活，而操作系统做的是读取和发送字节这样的日常工作。所以，对于NGINX来说，快速和及时的响应是非常重要的。</p> 
+   <p style="margin-left:30px;"><img src="http://cdn3.infoqstatic.com/statics_s2_20161208-0302u1/resource/articles/thread-pools-boost-performance-9x/zh/resources/0622001.png" alt="" width="550"></p> 
+   <blockquote style="margin-left:30px;"> 
+    <p style="margin-left:30px;">工作进程监听并处理来自内核的事件</p> 
+   </blockquote> 
+   <p style="margin-left:30px;">事件可以是超时、socket读写就绪的通知，或者发生错误的通知。NGINX接收大量的事件，然后一个接一个地处理它们，并执行必要的操作。因此，所有的处理过程是通过一个线程中的队列，在一个简单循环中完成的。NGINX从队列中取出一个事件并对其做出响应，比如读写socket。在多数情况下，这种方式是非常快的（也许只需要几个CPU周期，将一些数据复制到内存中），NGINX可以在一瞬间处理掉队列中的所有事件。</p> 
+   <p style="margin-left:30px;"><img src="http://cdn3.infoqstatic.com/statics_s2_20161208-0302u1/resource/articles/thread-pools-boost-performance-9x/zh/resources/0622002.jpg" alt="" width="550"></p> 
+   <blockquote style="margin-left:30px;"> 
+    <p style="margin-left:30px;">所有处理过程是在一个简单的循环中，由一个线程完成</p> 
+   </blockquote> 
+   <p style="margin-left:30px;">但是，如果NGINX要处理的操作是一些又长又重的操作，又会发生什么呢？整个事件处理循环将会卡住，等待这个操作执行完毕。</p> 
+   <p style="margin-left:30px;">因此，所谓“阻塞操作”是指任何导致事件处理循环显著停止一段时间的操作。操作可以由于各种原因成为阻塞操作。例如，NGINX可能因长时间、CPU密集型处理，或者可能等待访问某个资源（比如硬盘，或者一个互斥体，亦或要从处于同步方式的数据库获得相应的库函数调用等）而繁忙。关键是在处理这样的操作期间，工作进程无法做其他事情或者处理其他事件，即使有更多的可用系统资源可以被队列中的一些事件所利用。</p> 
+   <p style="margin-left:30px;">我们来打个比方，一个商店的营业员要接待他面前排起的一长队顾客。队伍中的第一位顾客想要的某件商品不在店里而在仓库中。这位营业员跑去仓库把东西拿来。现在整个队伍必须为这样的配货方式等待数个小时，队伍中的每个人都很不爽。你可以想见人们的反应吧？队伍中每个人的等待时间都要增加这些时间，除非他们要买的东西就在店里。</p> 
+   <p style="margin-left:30px;"><img src="http://cdn3.infoqstatic.com/statics_s2_20161208-0302u1/resource/articles/thread-pools-boost-performance-9x/zh/resources/0622003.jpg" alt="" width="550"></p> 
+   <blockquote style="margin-left:30px;"> 
+    <p style="margin-left:30px;">队伍中的每个人不得不等待第一个人的购买</p> 
+   </blockquote> 
+   <p style="margin-left:30px;">在NGINX中会发生几乎同样的情况，比如当读取一个文件的时候，如果该文件没有缓存在内存中，就要从磁盘上读取。从磁盘（特别是旋转式的磁盘）读取是很慢的,而当队列中等待的其他请求可能不需要访问磁盘时，它们也得被迫等待。导致的结果是，延迟增加并且系统资源没有得到充分利用。</p> 
+   <p style="margin-left:30px;"><img src="http://cdn3.infoqstatic.com/statics_s2_20161208-0302u1/resource/articles/thread-pools-boost-performance-9x/zh/resources/0622004.png" alt="" width="550"></p> 
+   <blockquote style="margin-left:30px;"> 
+    <p style="margin-left:30px;">一个阻塞操作足以显著地延缓所有接下来的操作</p> 
+   </blockquote> 
+   <p style="margin-left:30px;">一些操作系统为读写文件提供了异步接口，NGINX可以使用这样的接口（见<a href="http://nginx.org/en/docs/http/ngx_http_core_module.html?&amp;_ga=1.7505329.2027750078.1426070219#aio" rel="nofollow">AIO</a>指令）。FreeBSD就是个很好的例子。不幸的是，我们不能在Linux上得到相同的福利。虽然Linux为读取文件提供了一种异步接口，但是存在明显的缺点。其中之一是要求文件访问和缓冲要对齐，但NGINX很好地处理了这个问题。但是，另一个缺点更糟糕。异步接口要求文件描述符中要设置O_DIRECT标记，就是说任何对文件的访问都将绕过内存中的缓存，这增加了磁盘的负载。在很多场景中，这都绝对不是最佳选择。</p> 
+   <p style="margin-left:30px;">为了有针对性地解决这一问题，在NGINX 1.7.11中引入了线程池。默认情况下，NGINX+还没有包含线程池，但是如果你想试试的话，可以<a href="http://nginx.com/contact/" rel="nofollow">联系销售人员</a>，NGINX+ R6是一个已经启用了线程池的构建版本。</p> 
+   <p style="margin-left:30px;">现在，让我们走进线程池，看看它是什么以及如何工作的。</p> 
+   <h2 style="margin-left:30px;">3. 线程池</h2> 
+   <p style="margin-left:30px;">让我们回到那个可怜的，要从大老远的仓库去配货的售货员那儿。这回，他已经变聪明了（或者也许是在一群愤怒的顾客教训了一番之后，他才变得聪明的？），雇用了一个配货服务团队。现在，当任何人要买的东西在大老远的仓库时，他不再亲自去仓库了，只需要将订单丢给配货服务，他们将处理订单，同时，我们的售货员依然可以继续为其他顾客服务。因此，只有那些要买仓库里东西的顾客需要等待配货，其他顾客可以得到即时服务。</p> 
+   <p style="margin-left:30px;"><img src="http://cdn3.infoqstatic.com/statics_s2_20161208-0302u1/resource/articles/thread-pools-boost-performance-9x/zh/resources/0622005.jpg" alt="" width="550"></p> 
+   <blockquote style="margin-left:30px;"> 
+    <p style="margin-left:30px;">传递订单给配货服务不会阻塞队伍</p> 
+   </blockquote> 
+   <p style="margin-left:30px;">对NGINX而言，线程池执行的就是配货服务的功能。它由一个任务队列和一组处理这个队列的线程组成。<br>当工作进程需要执行一个潜在的长操作时，工作进程不再自己执行这个操作，而是将任务放到线程池队列中，任何空闲的线程都可以从队列中获取并执行这个任务。</p> 
+   <p style="margin-left:30px;"><img src="http://cdn3.infoqstatic.com/statics_s2_20161208-0302u1/resource/articles/thread-pools-boost-performance-9x/zh/resources/0622006.jpg" alt="" width="550"></p> 
+   <blockquote style="margin-left:30px;"> 
+    <p style="margin-left:30px;">工作进程将阻塞操作卸给线程池</p> 
+   </blockquote> 
+   <p style="margin-left:30px;">那么，这就像我们有了另外一个队列。是这样的，但是在这个场景中，队列受限于特殊的资源。磁盘的读取速度不能比磁盘产生数据的速度快。不管怎么说，至少现在磁盘不再延误其他事件，只有访问文件的请求需要等待。</p> 
+   <p style="margin-left:30px;">“从磁盘读取”这个操作通常是阻塞操作最常见的示例，但是实际上，NGINX中实现的线程池可用于处理任何不适合在主循环中执行的任务。</p> 
+   <p style="margin-left:30px;">目前，卸载到线程池中执行的两个基本操作是大多数操作系统中的read()系统调用和Linux中的sendfile()。接下来，我们将对线程池进行测试（test）和基准测试（benchmark），在未来的版本中，如果有明显的优势，我们可能会卸载其他操作到线程池中。</p> 
+   <h2 style="margin-left:30px;">4. 基准测试</h2> 
+   <p style="margin-left:30px;">现在让我们从理论过度到实践。我们将进行一次模拟基准测试（synthetic benchmark），模拟在阻塞操作和非阻塞操作的最差混合条件下，使用线程池的效果。</p> 
+   <p style="margin-left:30px;">另外，我们需要一个内存肯定放不下的数据集。在一台48GB内存的机器上，我们已经产生了每文件大小为4MB的随机数据，总共256GB，然后配置NGINX，版本为1.9.0。</p> 
+   <p style="margin-left:30px;">配置很简单：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>worker_processes <span style="color:#800080;">16</span><span style="color:#000000;">;
+
+events {
+    accept_mutex off;
+}
+
+http {
+    include mime.types;
+    default_type application</span>/octet-<span style="color:#000000;">stream;
+
+    access_log off;
+    sendfile on;
+    sendfile_max_chunk 512k;
+
+    server {
+        listen </span><span style="color:#800080;">8000</span><span style="color:#000000;">;
+
+        location </span>/<span style="color:#000000;"> {
+            root </span>/<span style="color:#000000;">storage;
+        }
+    }
+}</span></pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">如上所示，为了达到更好的性能，我们调整了几个参数：禁用了<a href="http://nginx.org/en/docs/http/ngx_http_log_module.html?&amp;_ga=1.68303569.179747171.1434684576#access_log" rel="nofollow">logging</a>和<a href="http://nginx.org/en/docs/ngx_core_module.html?&amp;_ga=1.68303569.179747171.1434684576#accept_mutex" rel="nofollow">accept_mutex</a>，同时，启用了<a href="http://nginx.org/en/docs/http/ngx_http_core_module.html?&amp;_ga=1.159473533.179747171.1434684576#sendfile" rel="nofollow">sendfile</a>并设置了<a href="http://nginx.org/en/docs/http/ngx_http_core_module.html?&amp;_ga=1.159473533.179747171.1434684576#sendfile_max_chunk" rel="nofollow">sendfile_max_chunk</a>的大小。最后一个指令可以减少阻塞调用sendfile()所花费的最长时间，因为NGINX不会尝试一次将整个文件发送出去，而是每次发送大小为512KB的块数据。</p> 
+   <p style="margin-left:30px;">这台测试服务器有2个Intel Xeon E5645处理器（共计：12核、24超线程）和10-Gbps的网络接口。磁盘子系统是由4块西部数据WD1003FBYX 磁盘组成的RAID10阵列。所有这些硬件由Ubuntu服务器14.04.1 LTS供电。</p> 
+   <p style="margin-left:30px;"><img src="http://cdn3.infoqstatic.com/statics_s2_20161208-0302u1/resource/articles/thread-pools-boost-performance-9x/zh/resources/0622007.jpg" alt="" width="550"></p> 
+   <blockquote style="margin-left:30px;"> 
+    <p style="margin-left:30px;">为基准测试配置负载生成器和NGINX</p> 
+   </blockquote> 
+   <p style="margin-left:30px;">客户端有2台服务器，它们的规格相同。在其中一台上，在<a href="https://github.com/wg/wrk" rel="nofollow">wrk</a>中使用Lua脚本创建了负载程序。脚本使用200个并行连接向服务器请求文件，每个请求都可能未命中缓存而从磁盘阻塞读取。我们将这种负载称作随机负载。</p> 
+   <p style="margin-left:30px;">在另一台客户端机器上，我们将运行wrk的另一个副本，使用50个并行连接多次请求同一个文件。因为这个文件将被频繁地访问，所以它会一直驻留在内存中。在正常情况下，NGINX能够非常快速地服务这些请求，但是如果工作进程被其他请求阻塞的话，性能将会下降。我们将这种负载称作恒定负载。</p> 
+   <p style="margin-left:30px;">性能将由服务器上ifstat监测的吞吐率（throughput）和从第二台客户端获取的wrk结果来度量。</p> 
+   <p style="margin-left:30px;">现在，没有使用线程池的第一次运行将不会带给我们非常振奋的结果：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>% ifstat -<span style="color:#000000;">bi eth2
+eth2
+Kbps </span><span style="color:#0000ff;">in</span><span style="color:#000000;">  Kbps out
+</span><span style="color:#800080;">5531.24</span>  <span style="color:#800080;">1.03e+06</span>
+<span style="color:#800080;">4855.23</span>  <span style="color:#800080;">812922.7</span>
+<span style="color:#800080;">5994.66</span>  <span style="color:#800080;">1.07e+06</span>
+<span style="color:#800080;">5476.27</span>  <span style="color:#800080;">981529.3</span>
+<span style="color:#800080;">6353.62</span>  <span style="color:#800080;">1.12e+06</span>
+<span style="color:#800080;">5166.17</span>  <span style="color:#800080;">892770.3</span>
+<span style="color:#800080;">5522.81</span>  <span style="color:#800080;">978540.8</span>
+<span style="color:#800080;">6208.10</span>  <span style="color:#800080;">985466.7</span>
+<span style="color:#800080;">6370.79</span>  <span style="color:#800080;">1.12e+06</span>
+<span style="color:#800080;">6123.33</span>  <span style="color:#800080;">1.07e+06</span></pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">如上所示，使用这种配置，服务器产生的总流量约为1Gbps。从下面所示的top输出，我们可以看到，工作进程的大部分时间花在阻塞I/O上（它们处于top的D状态）：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>top - <span style="color:#800080;">10</span>:<span style="color:#800080;">40</span>:<span style="color:#800080;">47</span> up <span style="color:#800080;">11</span> days,  <span style="color:#800080;">1</span>:<span style="color:#800080;">32</span>,  <span style="color:#800080;">1</span> user,  load average: <span style="color:#800080;">49.61</span>, <span style="color:#800080;">45.77</span> <span style="color:#800080;">62.89</span><span style="color:#000000;">
+Tasks: </span><span style="color:#800080;">375</span> total,  <span style="color:#800080;">2</span> running, <span style="color:#800080;">373</span> sleeping,  <span style="color:#800080;">0</span> stopped,  <span style="color:#800080;">0</span><span style="color:#000000;"> zombie
+</span>%Cpu(s):  <span style="color:#800080;">0.0</span> us,  <span style="color:#800080;">0.3</span> sy,  <span style="color:#800080;">0.0</span> ni, <span style="color:#800080;">67.7</span> <span style="color:#0000ff;">id</span>, <span style="color:#800080;">31.9</span> wa,  <span style="color:#800080;">0.0</span> hi,  <span style="color:#800080;">0.0</span> si,  <span style="color:#800080;">0.0</span><span style="color:#000000;"> st
+KiB Mem:  </span><span style="color:#800080;">49453440</span> total, <span style="color:#800080;">49149308</span> used,   <span style="color:#800080;">304132</span> <span style="color:#0000ff;">free</span>,    <span style="color:#800080;">98780</span><span style="color:#000000;"> buffers
+KiB Swap: </span><span style="color:#800080;">10474236</span> total,    <span style="color:#800080;">20124</span> used, <span style="color:#800080;">10454112</span> <span style="color:#0000ff;">free</span>, <span style="color:#800080;">46903412</span><span style="color:#000000;"> cached Mem
+
+  PID USER     PR  NI    VIRT    RES     SHR S  </span>%CPU %MEM    TIME+<span style="color:#000000;"> COMMAND
+ </span><span style="color:#800080;">4639</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28152</span>     <span style="color:#800080;">496</span> D   <span style="color:#800080;">0.7</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.17</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4632</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28196</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.11</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4633</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28324</span>     <span style="color:#800080;">540</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.11</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4635</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28136</span>     <span style="color:#800080;">480</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.12</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4636</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28208</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.14</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4637</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28208</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.10</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4638</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28204</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.12</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4640</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28324</span>     <span style="color:#800080;">540</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.13</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4641</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28324</span>     <span style="color:#800080;">540</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.13</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4642</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28208</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.11</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4643</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28276</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.29</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4644</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28204</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.11</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4645</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28204</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.17</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4646</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28204</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.12</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4647</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28208</span>     <span style="color:#800080;">532</span> D   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.17</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4631</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>    <span style="color:#800080;">756</span>     <span style="color:#800080;">252</span> S   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.00</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4634</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">47180</span>  <span style="color:#800080;">28208</span>     <span style="color:#800080;">536</span> D   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.11</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4648</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">25232</span>   <span style="color:#800080;">1956</span>    <span style="color:#800080;">1160</span> R   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.08</span><span style="color:#000000;"> top
+</span><span style="color:#800080;">25921</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">121956</span>   <span style="color:#800080;">2232</span>    <span style="color:#800080;">1056</span> S   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.97</span><span style="color:#000000;"> sshd
+</span><span style="color:#800080;">25923</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">40304</span>   <span style="color:#800080;">4160</span>    <span style="color:#800080;">2208</span> S   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.53</span> zsh</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">在这种情况下，吞吐率受限于磁盘子系统，而CPU在大部分时间里是空闲的。从wrk获得的结果也非常低：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>Running 1m test @ http:<span style="color:#008000;">//</span><span style="color:#008000;">192.0.2.1:8000/1/1/1</span>
+  <span style="color:#800080;">12</span> threads and <span style="color:#800080;">50</span><span style="color:#000000;"> connections
+  Thread Stats   Avg    Stdev     Max  </span>+/-<span style="color:#000000;"> Stdev
+    Latency     </span><span style="color:#800080;">7</span>.42s  <span style="color:#800080;">5</span>.31s   <span style="color:#800080;">24</span>.41s   <span style="color:#800080;">74.73</span>%<span style="color:#000000;">
+    Req</span>/Sec     <span style="color:#800080;">0.15</span>    <span style="color:#800080;">0.36</span>     <span style="color:#800080;">1.00</span>    <span style="color:#800080;">84.62</span>%
+  <span style="color:#800080;">488</span> requests <span style="color:#0000ff;">in</span> <span style="color:#800080;">1.01m</span>, <span style="color:#800080;">2</span><span style="color:#000000;">.01GB read
+Requests</span>/sec:      <span style="color:#800080;">8.08</span><span style="color:#000000;">
+Transfer</span>/sec:     <span style="color:#800080;">34</span>.07MB</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">请记住，文件是从内存送达的！第一个客户端的200个连接创建的随机负载，使服务器端的全部的工作进程忙于从磁盘读取文件，因此产生了过大的延迟，并且无法在合理的时间内处理我们的请求。</p> 
+   <p style="margin-left:30px;">现在，我们的线程池要登场了。为此，我们只需在<code>location</code>块中添加<a href="http://nginx.org/en/docs/http/ngx_http_core_module.html?&amp;_ga=1.59978733.179747171.1434684576#aio" rel="nofollow">aio</a>&nbsp;threads指令：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>location /<span style="color:#000000;"> {
+    root </span>/<span style="color:#000000;">storage;
+    aio threads;
+}</span></pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">接着，执行NGINX reload重新加载配置。</p> 
+   <p style="margin-left:30px;">然后，我们重复上述的测试：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>% ifstat -<span style="color:#000000;">bi eth2
+eth2
+Kbps </span><span style="color:#0000ff;">in</span><span style="color:#000000;">  Kbps out
+</span><span style="color:#800080;">60915.19</span>  <span style="color:#800080;">9.51e+06</span>
+<span style="color:#800080;">59978.89</span>  <span style="color:#800080;">9.51e+06</span>
+<span style="color:#800080;">60122.38</span>  <span style="color:#800080;">9.51e+06</span>
+<span style="color:#800080;">61179.06</span>  <span style="color:#800080;">9.51e+06</span>
+<span style="color:#800080;">61798.40</span>  <span style="color:#800080;">9.51e+06</span>
+<span style="color:#800080;">57072.97</span>  <span style="color:#800080;">9.50e+06</span>
+<span style="color:#800080;">56072.61</span>  <span style="color:#800080;">9.51e+06</span>
+<span style="color:#800080;">61279.63</span>  <span style="color:#800080;">9.51e+06</span>
+<span style="color:#800080;">61243.54</span>  <span style="color:#800080;">9.51e+06</span>
+<span style="color:#800080;">59632.50</span>  <span style="color:#800080;">9.50e+06</span></pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;"><span style="font-family:'Courier New';font-size:12px;">现在，我们的服务器产生的流量是9.5Gbps，相比之下，没有使用线程池时只有约1Gbps！</span></p> 
+   <p style="margin-left:30px;">理论上还可以产生更多的流量，但是这已经达到了机器的最大网络吞吐能力，所以在这次NGINX的测试中，NGINX受限于网络接口。工作进程的大部分时间只是休眠和等待新的事件（它们处于top的S状态）：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>top - <span style="color:#800080;">10</span>:<span style="color:#800080;">43</span>:<span style="color:#800080;">17</span> up <span style="color:#800080;">11</span> days,  <span style="color:#800080;">1</span>:<span style="color:#800080;">35</span>,  <span style="color:#800080;">1</span> user,  load average: <span style="color:#800080;">172.71</span>, <span style="color:#800080;">93.84</span>, <span style="color:#800080;">77.90</span><span style="color:#000000;">
+Tasks: </span><span style="color:#800080;">376</span> total,  <span style="color:#800080;">1</span> running, <span style="color:#800080;">375</span> sleeping,  <span style="color:#800080;">0</span> stopped,  <span style="color:#800080;">0</span><span style="color:#000000;"> zombie
+</span>%Cpu(s):  <span style="color:#800080;">0.2</span> us,  <span style="color:#800080;">1.2</span> sy,  <span style="color:#800080;">0.0</span> ni, <span style="color:#800080;">34.8</span> <span style="color:#0000ff;">id</span>, <span style="color:#800080;">61.5</span> wa,  <span style="color:#800080;">0.0</span> hi,  <span style="color:#800080;">2.3</span> si,  <span style="color:#800080;">0.0</span><span style="color:#000000;"> st
+KiB Mem:  </span><span style="color:#800080;">49453440</span> total, <span style="color:#800080;">49096836</span> used,   <span style="color:#800080;">356604</span> <span style="color:#0000ff;">free</span>,    <span style="color:#800080;">97236</span><span style="color:#000000;"> buffers
+KiB Swap: </span><span style="color:#800080;">10474236</span> total,    <span style="color:#800080;">22860</span> used, <span style="color:#800080;">10451376</span> <span style="color:#0000ff;">free</span>, <span style="color:#800080;">46836580</span><span style="color:#000000;"> cached Mem
+
+  PID USER     PR  NI    VIRT    RES     SHR S  </span>%CPU %MEM    TIME+<span style="color:#000000;"> COMMAND
+ </span><span style="color:#800080;">4654</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309708</span>  <span style="color:#800080;">28844</span>     <span style="color:#800080;">596</span> S   <span style="color:#800080;">9.0</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">08.65</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4660</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309748</span>  <span style="color:#800080;">28920</span>     <span style="color:#800080;">596</span> S   <span style="color:#800080;">6.6</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">14.82</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4658</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28424</span>     <span style="color:#800080;">520</span> S   <span style="color:#800080;">4.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.40</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4663</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28476</span>     <span style="color:#800080;">572</span> S   <span style="color:#800080;">4.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.32</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4667</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309584</span>  <span style="color:#800080;">28712</span>     <span style="color:#800080;">588</span> S   <span style="color:#800080;">3.7</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">05.19</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4656</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28476</span>     <span style="color:#800080;">572</span> S   <span style="color:#800080;">3.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.84</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4664</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28428</span>     <span style="color:#800080;">524</span> S   <span style="color:#800080;">3.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.29</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4652</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28476</span>     <span style="color:#800080;">572</span> S   <span style="color:#800080;">3.0</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.46</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4662</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309552</span>  <span style="color:#800080;">28700</span>     <span style="color:#800080;">596</span> S   <span style="color:#800080;">2.7</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">05.92</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4661</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309464</span>  <span style="color:#800080;">28636</span>     <span style="color:#800080;">596</span> S   <span style="color:#800080;">2.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.59</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4653</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28476</span>     <span style="color:#800080;">572</span> S   <span style="color:#800080;">1.7</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.70</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4666</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28428</span>     <span style="color:#800080;">524</span> S   <span style="color:#800080;">1.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.63</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4657</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309584</span>  <span style="color:#800080;">28696</span>     <span style="color:#800080;">592</span> S   <span style="color:#800080;">1.0</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.64</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4655</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">30958</span>   <span style="color:#800080;">28476</span>     <span style="color:#800080;">572</span> S   <span style="color:#800080;">0.7</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">02.81</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4659</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28468</span>     <span style="color:#800080;">564</span> S   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.20</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">4665</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">309452</span>  <span style="color:#800080;">28476</span>     <span style="color:#800080;">572</span> S   <span style="color:#800080;">0.3</span>  <span style="color:#800080;">0.1</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.71</span><span style="color:#000000;"> nginx
+ </span><span style="color:#800080;">5180</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">25232</span>   <span style="color:#800080;">1952</span>    <span style="color:#800080;">1156</span> R   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.45</span><span style="color:#000000;"> top
+ </span><span style="color:#800080;">4651</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">20032</span>    <span style="color:#800080;">752</span>     <span style="color:#800080;">252</span> S   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.00</span><span style="color:#000000;"> nginx
+</span><span style="color:#800080;">25921</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>  <span style="color:#800080;">121956</span>   <span style="color:#800080;">2176</span>    <span style="color:#800080;">1000</span> S   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">01.98</span><span style="color:#000000;"> sshd
+</span><span style="color:#800080;">25923</span> vbart    <span style="color:#800080;">20</span>   <span style="color:#800080;">0</span>   <span style="color:#800080;">40304</span>   <span style="color:#800080;">3840</span>    <span style="color:#800080;">2208</span> S   <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0.0</span>  <span style="color:#800080;">0</span>:<span style="color:#800080;">00.54</span> zsh</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">如上所示，基准测试中还有大量的CPU资源剩余。</p> 
+   <p style="margin-left:30px;">wrk的结果如下：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>Running 1m test @ http:<span style="color:#008000;">//</span><span style="color:#008000;">192.0.2.1:8000/1/1/1</span>
+  <span style="color:#800080;">12</span> threads and <span style="color:#800080;">50</span><span style="color:#000000;"> connections
+  Thread Stats   Avg      Stdev     Max  </span>+/-<span style="color:#000000;"> Stdev
+    Latency   </span><span style="color:#800080;">226</span>.32ms  <span style="color:#800080;">392</span>.76ms   <span style="color:#800080;">1</span>.72s   <span style="color:#800080;">93.48</span>%<span style="color:#000000;">
+    Req</span>/Sec    <span style="color:#800080;">20.02</span>     <span style="color:#800080;">10.84</span>    <span style="color:#800080;">59.00</span>    <span style="color:#800080;">65.91</span>%
+  <span style="color:#800080;">15045</span> requests <span style="color:#0000ff;">in</span> <span style="color:#800080;">1.00m</span>, <span style="color:#800080;">58</span><span style="color:#000000;">.86GB read
+Requests</span>/sec:    <span style="color:#800080;">250.57</span><span style="color:#000000;">
+Transfer</span>/sec:      <span style="color:#800080;">0</span>.98GB</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">服务器处理4MB文件的平均时间从7.42秒降到226.32毫秒（减少了33倍），每秒请求处理数提升了31倍（250 vs 8）！</p> 
+   <p style="margin-left:30px;">对此，我们的解释是请求不再因为工作进程被阻塞在读文件，而滞留在事件队列中，等待处理，它们可以被空闲的进程处理掉。只要磁盘子系统能做到最好，就能服务好第一个客户端上的随机负载，NGINX可以使用剩余的CPU资源和网络容量，从内存中读取，以服务于上述的第二个客户端的请求。</p> 
+   <h2 style="margin-left:30px;">5. 依然没有银弹</h2> 
+   <p style="margin-left:30px;">在抛出我们对阻塞操作的担忧并给出一些令人振奋的结果后，可能大部分人已经打算在你的服务器上配置线程池了。先别着急。</p> 
+   <p style="margin-left:30px;">实际上，最幸运的情况是，读取和发送文件操作不去处理缓慢的硬盘驱动器。如果我们有足够多的内存来存储数据集，那么操作系统将会足够聪明地在被称作“页面缓存”的地方，缓存频繁使用的文件。</p> 
+   <p style="margin-left:30px;">“页面缓存”的效果很好，可以让NGINX在几乎所有常见的用例中展示优异的性能。从页面缓存中读取比较快，没有人会说这种操作是“阻塞”。而另一方面，卸载任务到一个线程池是有一定开销的。</p> 
+   <p style="margin-left:30px;">因此，如果内存有合理的大小并且待处理的数据集不是很大的话，那么无需使用线程池，NGINX已经工作在最优化的方式下。</p> 
+   <p style="margin-left:30px;">卸载读操作到线程池是一种适用于非常特殊任务的技术。只有当经常请求的内容的大小，不适合操作系统的虚拟机缓存时，这种技术才是最有用的。至于可能适用的场景，比如，基于NGINX的高负载流媒体服务器。这正是我们已经模拟的基准测试的场景。</p> 
+   <p style="margin-left:30px;">我们如果可以改进卸载读操作到线程池，将会非常有意义。我们只需要知道所需的文件数据是否在内存中，只有不在内存中时，读操作才应该卸载到一个单独的线程中。</p> 
+   <p style="margin-left:30px;">再回到售货员那个比喻的场景中，这回，售货员不知道要买的商品是否在店里，他必须要么总是将所有的订单提交给配货服务，要么总是亲自处理它们。</p> 
+   <p style="margin-left:30px;">人艰不拆，操作系统缺少这样的功能。第一次尝试是在2010年，人们试图将这一功能添加到Linux作为<a href="https://lwn.net/Articles/371538/" rel="nofollow">fincore()</a>系统调用，但是没有成功。后来还有一些尝试，是使用RWF_NONBLOCK标记作为preadv2()系统调用来实现这一功能（详情见LWN.net上的<a href="https://lwn.net/Articles/612483/" rel="nofollow">非阻塞缓冲文件读取操作</a>和<a href="https://lwn.net/Articles/636967/" rel="nofollow">异步缓冲读操作</a>）。但所有这些补丁的命运目前还不明朗。悲催的是，这些补丁尚没有被内核接受的主要原因，貌似是因为旷日持久的撕逼大战（<a href="http://bikeshed.com/" rel="nofollow">bikeshedding</a>）。</p> 
+   <p style="margin-left:30px;">另一方面，FreeBSD的用户完全不必担心。FreeBSD已经具备足够好的异步读取文件接口，我们应该用这个接口而不是线程池。</p> 
+   <h2 style="margin-left:30px;">6. 配置线程池</h2> 
+   <p style="margin-left:30px;">所以，如果你确信在你的场景中使用线程池可以带来好处，那么现在是时候深入了解线程池的配置了。</p> 
+   <p style="margin-left:30px;">线程池的配置非常简单、灵活。首先，获取NGINX 1.7.11或更高版本的源代码，使用<code>--with-threads</code>配置参数编译。在最简单的场景中，配置看起来很朴实。我们只需要在<code>http</code>、&nbsp;<code>server</code>，或者<code>location</code>上下文中包含<a href="http://nginx.org/en/docs/http/ngx_http_core_module.html?&amp;_ga=1.131102671.179747171.1434684576#aio" rel="nofollow">aio</a>&nbsp;threads指令即可：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>aio threads;</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">这是线程池的最简配置。实际上的精简版本示例如下：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>thread_pool default threads=<span style="color:#800080;">32</span> max_queue=<span style="color:#800080;">65536</span><span style="color:#000000;">;
+aio threads</span>=default;</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">这里定义了一个名为“default”，包含32个线程，任务队列最多支持65536个请求的线程池。如果任务队列过载，NGINX将输出如下错误日志并拒绝请求：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre>thread pool <span style="color:#800000;">"</span><span style="color:#800000;">NAME</span><span style="color:#800000;">"</span> queue overflow: N tasks waiting</pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">错误输出意味着线程处理作业的速度有可能低于任务入队的速度了。你可以尝试增加队列的最大值，但是如果这无济于事，那么这说明你的系统没有能力处理如此多的请求了。</p> 
+   <p style="margin-left:30px;">正如你已经注意到的，你可以使用<a href="http://nginx.org/r/thread_pool?_ga=1.173161571.179747171.1434684576" rel="nofollow">thread_pool</a>指令，配置线程的数量、队列的最大值，以及线程池的名称。最后要说明的是，可以配置多个独立的线程池，将它们置于不同的配置文件中，用做不同的目的：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre><span style="color:#000000;">http {
+    thread_pool one threads</span>=<span style="color:#800080;">128</span> max_queue=<span style="color:#800080;">0</span><span style="color:#000000;">;
+    thread_pool two threads</span>=<span style="color:#800080;">32</span><span style="color:#000000;">;
+
+    server {
+        location </span>/<span style="color:#000000;">one {
+            aio threads</span>=<span style="color:#000000;">one;
+        }
+
+        location </span>/<span style="color:#000000;">two {
+            aio threads</span>=<span style="color:#000000;">two;
+        }
+    }
+…
+}</span></pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">如果没有指定<code>max_queue</code>参数的值，默认使用的值是65536。如上所示，可以设置<code>max_queue</code>为0。在这种情况下，线程池将使用配置中全部数量的线程，尽可能地同时处理多个任务；队列中不会有等待的任务。</p> 
+   <p style="margin-left:30px;">现在，假设我们有一台服务器，挂了3块硬盘，我们希望把该服务器用作“缓存代理”，缓存后端服务器的全部响应信息。预期的缓存数据量远大于可用的内存。它实际上是我们个人CDN的一个缓存节点。毫无疑问，在这种情况下，最重要的事情是发挥硬盘的最大性能。</p> 
+   <p style="margin-left:30px;">我们的选择之一是配置一个RAID阵列。这种方法毁誉参半，现在，有了NGINX，我们可以有其他的选择：</p> 
+   <div class="cnblogs_code" style="margin-left:30px;"> 
+    <pre># 我们假设每块硬盘挂载在相应的目录中：/mnt/disk1、/mnt/disk2、/mnt/<span style="color:#000000;">disk3
+
+proxy_cache_path </span>/mnt/disk1 levels=<span style="color:#800080;">1</span>:<span style="color:#800080;">2</span> keys_zone=cache_1:256m max_size=<span style="color:#000000;">1024G
+                 use_temp_path</span>=<span style="color:#000000;">off;
+proxy_cache_path </span>/mnt/disk2 levels=<span style="color:#800080;">1</span>:<span style="color:#800080;">2</span> keys_zone=cache_2:256m max_size=<span style="color:#000000;">1024G
+                 use_temp_path</span>=<span style="color:#000000;">off;
+proxy_cache_path </span>/mnt/disk3 levels=<span style="color:#800080;">1</span>:<span style="color:#800080;">2</span> keys_zone=cache_3:256m max_size=<span style="color:#000000;">1024G
+                 use_temp_path</span>=<span style="color:#000000;">off;
+
+thread_pool pool_1 threads</span>=<span style="color:#800080;">16</span><span style="color:#000000;">;
+thread_pool pool_2 threads</span>=<span style="color:#800080;">16</span><span style="color:#000000;">;
+thread_pool pool_3 threads</span>=<span style="color:#800080;">16</span><span style="color:#000000;">;
+
+split_clients $request_uri $disk {
+    </span><span style="color:#800080;">33.3</span>%     <span style="color:#800080;">1</span><span style="color:#000000;">;
+    </span><span style="color:#800080;">33.3</span>%     <span style="color:#800080;">2</span><span style="color:#000000;">;
+    </span>*         <span style="color:#800080;">3</span><span style="color:#000000;">;
+}
+
+location </span>/<span style="color:#000000;"> {
+    proxy_pass http:</span><span style="color:#008000;">//</span><span style="color:#008000;">backend;</span>
+<span style="color:#000000;">    proxy_cache_key $request_uri;
+    proxy_cache cache_$disk;
+    aio threads</span>=<span style="color:#000000;">pool_$disk;
+    sendfile on;
+}</span></pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <p style="margin-left:30px;">在这份配置中，使用了3个独立的缓存，每个缓存专用一块硬盘，另外，3个独立的线程池也各自专用一块硬盘。</p> 
+   <p style="margin-left:30px;">缓存之间（其结果就是磁盘之间）的负载均衡使用<a href="http://nginx.org/en/docs/http/ngx_http_split_clients_module.html?_ga=1.105534531.179747171.1434684576" rel="nofollow">split_clients</a>模块，<code>split_clients</code>非常适用于这个任务。</p> 
+   <p style="margin-left:30px;">在&nbsp;<a href="http://nginx.org/en/docs/http/ngx_http_proxy_module.html?&amp;_ga=1.66794350.179747171.1434684576#proxy_cache_path" rel="nofollow">proxy_cache_path</a>指令中设置<code>use_temp_path=off</code>，表示NGINX会将临时文件保存在缓存数据的同一目录中。这是为了避免在更新缓存时，磁盘之间互相复制响应数据。</p> 
+   <p style="margin-left:30px;">这些调优将带给我们磁盘子系统的最大性能，因为NGINX通过单独的线程池并行且独立地与每块磁盘交互。每块磁盘由16个独立线程和读取和发送文件专用任务队列提供服务。</p> 
+   <p style="margin-left:30px;">我敢打赌，你的客户喜欢这种量身定制的方法。请确保你的磁盘也持有同样的观点。</p> 
+   <p style="margin-left:30px;">这个示例很好地证明了NGINX可以为硬件专门调优的灵活性。这就像你给NGINX下了一道命令，让机器和数据用最佳姿势来搞基。而且，通过NGINX在用户空间中细粒度的调优，我们可以确保软件、操作系统和硬件工作在最优模式下，尽可能有效地利用系统资源。</p> 
+   <h2 style="margin-left:30px;">7. 总结</h2> 
+   <p style="margin-left:30px;">综上所述，线程池是一个伟大的功能，将NGINX推向了新的性能水平，除掉了一个众所周知的长期危害——阻塞——尤其是当我们真正面对大量内容的时候。</p> 
+   <p style="margin-left:30px;">甚至，还有更多的惊喜。正如前面提到的，这个全新的接口，有可能没有任何性能损失地卸载任何长期阻塞操作。NGINX在拥有大量的新模块和新功能方面，开辟了一方新天地。许多流行的库仍然没有提供异步非阻塞接口，此前，这使得它们无法与NGINX兼容。我们可以花大量的时间和资源，去开发我们自己的无阻塞原型库，但这么做始终都是值得的吗？现在，有了线程池，我们可以相对容易地使用这些库，而不会影响这些模块的性能。</p> 
+   <p style="margin-left:30px;">&nbsp;</p> 
+   <p style="margin-left:30px;">&nbsp;</p> 
+   <p style="margin-left:30px;">英文原文：<a href="http://nginx.com/blog/thread-pools-boost-performance-9x/" rel="nofollow">Thread Pools in NGINX Boost Performance 9x!</a></p> 
+   <br>
+   <p align="center"><a href="https://images.cnblogs.com/cnblogs_com/liu-ke/763267/o_zsm.png" rel="nofollow"><img src="https://yqfile.alicdn.com/img_42a4adae4716d0e15c3eeaabfd040044.png" alt="img_42a4adae4716d0e15c3eeaabfd040044.png"></a> </p> 
+   <p align="right"><font color="#FF0000">注：转载需注明出处及作者。</font></p> 
+   <p align="right"><a href="http://liu-ke.cnblogs.com/" rel="nofollow"><font color="#FFA500">流柯</font></a>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

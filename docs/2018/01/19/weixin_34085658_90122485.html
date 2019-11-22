@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>实践：几十亿条数据分布在几十个节点上的毫秒级实时排序方法 « NotBeCN</title>
+  <meta name="description" content="             引子    先简单的问一下， 你如何解决这样的需求：                      对一堆数据按某字段排序，获取第100-10条的数据。    假设你面对的数据是个单节点，简单来说，就是一个mysql数据库， 很自然地用    select a from tb order b...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/19/weixin_34085658_90122485.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">实践：几十亿条数据分布在几十个节点上的毫秒级实时排序方法</h1>
+    <p class="post-meta">Jan 19, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <h1>引子</h1> 
+   <p>先简单的问一下， 你如何解决这样的需求：</p> 
+   <pre><code>                  对一堆数据按某字段排序，获取第100-10条的数据。</code></pre> 
+   <p>假设你面对的数据是个单节点，简单来说，就是一个mysql数据库， 很自然地用</p> 
+   <p>select a from tb order by a limit 100, 10;<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/6516e6d9fec01d5038d579d531446065.png" alt="image.png" title="image.png"></p> 
+   <p>你面对的是10个甚至100个节点呢<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/c3f7b91a4238299be23fc75c422b7bd0.png" alt="image.png" title="image.png"></p> 
+   <p>按照常理，我们会先把所有节点的前110条数据拉到一个公用节点上，再排序，前文已述。</p> 
+   <p>咱们把数字改一下，要获取第[100万， 100万+10]中间的数据10条数据，这个方法就不能用了。</p> 
+   <p>问题变成：</p> 
+   <pre><code>              对分布在几十个节点上的上亿条数据要求1秒内排序。</code></pre> 
+   <p>在<a href="https://www.atatech.org/articles/97626" rel="nofollow">上一篇文章的理论</a> 中，我提到让各数据节点活动起来，不再只承担存储的功能，还要相互发现，相互问答，即“你那有这个数据吗”，“你那这个数据排多少名”。</p> 
+   <p>就好像把全服的机器当成了神经网络中的一个个神经元，互相启发，理解新世界，产生乘法功能。</p> 
+   <p>言归正传，接下来，我给大家实现一下这个需求。</p> 
+   <p>咱们把目标按数据源分两种，先对内存型排序，再进行磁盘型排序，咱们这篇是头一种。</p> 
+   <h1>统一目标</h1> 
+   <p>咱们简单统一下试验目标。</p> 
+   <p>1.有10个节点，每个节点存储100万条数据，都放在缓存中。</p> 
+   <p>2.内存中的数据是排序过的。</p> 
+   <p>“神马？ 数据源中的原始数据都是排好序的， 那岂不是很简单，那你这个排序还有什么价值？”</p> 
+   <p>这个问题这段时间一直困扰着我，因为部分同学没看明白前文，而钉我问我鄙视我（微笑）。</p> 
+   <p>“对单节点数据源的排序成本很高吗”，我一般会这么反问，很显然，相比于海量节点的排序，单个节点内的数据排序成本很低。</p> 
+   <p>“每个节点的数据源都是排好序的，所有节点间的数据排序就完成了吗”， 不是的， 中国有首富榜，印度有首富榜，就算中国比印度富一点（如有意见，纯属意淫），要获取中印共榜后的前10名，总不能只用中国的前10了事吧。</p> 
+   <h1>架构设计</h1> 
+   <p>既然咱们是来开发试验的，而且是分布式节点，咱们就得设计架构。</p> 
+   <h2>架构目标</h2> 
+   <p>1.各节点能够快速互相发现，互相通信。</p> 
+   <p>2.节点掉线被系统实时发现，并做冗灾。</p> 
+   <p>3.支持运行时新增节点。</p> 
+   <p>试验采用的架构：<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/2bf85a002f9f60272250a6f896709ac3.png" alt="image.png" title="image.png"></p> 
+   <p>config：负责节点注册，节点发现。</p> 
+   <p>server：数据源节点，试验中有10台server。</p> 
+   <p>service:对外服务，承接外部http访问，转为server查询，再将返回结果合并发给用户。</p> 
+   <h2>试验目标</h2> 
+   <p>单次查询与skip的大小无关，不能查询说查询100万以上的排序比查询100条以内的慢。（这一条是不是太屌了）</p> 
+   <p>响应时间控制在100ms以内。</p> 
+   <p>那咱们就开始吧。</p> 
+   <p>开始前先放一下效果吧，怕大家没信心看下去。</p> 
+   <h2>效果展示</h2> 
+   <p><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/82db7fd50625fdd8be35050d41d58253.png" alt="image.png" title="image.png"></p> 
+   <p><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/e6ee1d9cf1bf7f80efbf3a2f242d7e58.png" alt="image.png" title="image.png"></p> 
+   <p>第一张图：同样是获取100条，分别是从第10条，10000条， 1000万条起。</p> 
+   <p>第二张图：获取从100万开始的1000条数据。</p> 
+   <table>
+    <thead>
+     <tr>
+      <th>skip</th> 
+      <th>耗时（limit=100)</th> 
+      <th>耗时(limit=1000)</th> 
+     </tr>
+    </thead>
+    <tbody>
+     <tr>
+      <td>10000</td> 
+      <td>64ms</td> 
+      <td>29ms</td> 
+     </tr>
+     <tr>
+      <td>10</td> 
+      <td>20ms</td> 
+      <td>38ms</td> 
+     </tr>
+     <tr>
+      <td>1000000</td> 
+      <td>23ms</td> 
+      <td>58ms</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>可以看出，请求耗时与skip, limit并没有线型关系，从哪里开始取，取多少条，响应时间都差不多。</p> 
+   <p>也就是说，当你要从分布式存储中获取第100万开始的100条数据，与从第10条开始的100条数据，所得时间相当，而且在100ms以内， 达到实时效果。</p> 
+   <h2>语言选择</h2> 
+   <p>我选择的语言是c++， 因为我觉得对内存，存储啥的，它要擅长一些。 不过我尽量写的简单通俗一点，并力争在不久后用java来实现开源。</p> 
+   <h2>分布式处理</h2> 
+   <p>分布式处理的config-service-server以前的文章里已经写过，框架具备自发现，动态扩容的特点，读者想要了解的话，我在以后的文章里可以继续写。</p> 
+   <h2>协议设计</h2> 
+   <p>外部协议</p> 
+   <pre><code>/topkn&amp;k=1000&amp;n=100
+k: skip
+n:limit</code></pre> 
+   <p>内部协议<br>内部节点相互通信频繁， 且是双向的， 因此我采用protobuf协议，方便扩展，速度也是扛扛的。</p> 
+   <p>server功能：</p> 
+   <pre><code>message ServerRequest{
+    optional ServerBGQuery    bg = 4;              //service -&gt; server请求， “hey, 我要从100万开始的100条数”
+    optional ServerBGIndexReq  bg_index = 5;       //server -&gt; server 问索引，"hey 你那边这个数的索引是多少“
+    optional ServerBGIndexSync bg_sync = 6;        //server -&gt;sync 同步查询结果， "hey, 我已经确认了查询结果，我同步给你吧”
+}
+message ServerResponse{
+    optional ServerBGResponse bg = 4;              //server -&gt; service 响应， “hey，这是我查询完的结果，请收”
+    optional ServerBGIndexResponse bg_index = 5;   //server -&gt; server 答索引  “hey，这个数在我这边的索引是这个”
+}</code></pre> 
+   <h2>service</h2> 
+   <p>节点流程图<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/6e70910c636d329e357e6969c2543d3e.png" alt="image.png" title="image.png"></p> 
+   <p>service起来服务代理的作用，承接外部http访问，转为server查询，再将返回结果合并发给用户。</p> 
+   <p>接入请求，比较简单，只接收/topkn的get请求</p> 
+   <pre><code class="cpp">service.handleGetReq("/topkn", [this](const BGCon&amp; con){
+     this-&gt;OnHttpPostRequestTopKN(con);
+});</code></pre> 
+   <p>解析参数：<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/5a127891211435113f0fd413508a6618.png" alt="image.png" title="image.png"></p> 
+   <p>发送请求给后端的server:<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/7d6a4d18aba17660e60516e32afd2766.png" alt="image.png" title="image.png"></p> 
+   <p>所用到的协议：</p> 
+   <pre><code>message ServerBGQuery{
+    required int64          _s = 1;           //为这次查询取个ID吧
+    required int64          flag = 2;         //为这次查询立个flag
+    required int64          k = 3;            //skip
+    required int64          n = 4;            //limit
+}</code></pre> 
+   <p>server返回</p> 
+   <pre><code class="cpp">void Service::OpBackBG(const BGCon&amp; con, const ServerBGResponse&amp; response)
+{
+ 
+    for(auto&amp;&amp; v : response.vs()){
+       auto vit = _ctx-&gt;_v.find(v.v());
+       if(vit == _ctx-&gt;_v.end()){
+             BigValuePtr bv(new BigValue{v.v(), v.count(), v.index()});
+             _ctx-&gt;_v.insert(std::make_pair(v.v(), bv));
+        }
+        else{
+             BigValuePtr bv = vit-&gt;second;
+             bv-&gt;count += v.count();
+             bv-&gt;index += v.index();
+        }
+    }
+}</code></pre> 
+   <p>代码中的response代表某个server，response.vs()是它返回来的数据。</p> 
+   <p>可以看见， service对所有server的数据进行整合。</p> 
+   <p>涉及的协议：</p> 
+   <pre><code>message ServerBGResponse{
+    required int64              _s = 1;       //查询的ID
+    repeated ServerBGIndex      vs =  9;      //某节点中所包含的数据， “hei, 这里是我在本次查询中包含的数据”
+}
+ 
+message ServerBGIndex{
+    required int64 v = 1;                     //某个数
+    required int64 index = 2;                 //这个数的索引是多少
+    required int64 count = 3;                 //这个数有多少个
+}</code></pre> 
+   <p>service的业务功能没多少个，流程也很简单，就是起个请求代理与数据合并的功能。</p> 
+   <h2>server</h2> 
+   <p>server的的节点逻辑用一个图来表示最好不过了。</p> 
+   <p><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/7173b046b57b2052e6785f424e4b6030.png" alt="image.png" title="image.png"></p> 
+   <p>再来个简图</p> 
+   <p><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/893d5b6859029c141aaab61444a1898b.png" alt="image.png" title="image.png"></p> 
+   <p>逻辑处理</p> 
+   <p>server的响应逻辑，可以分成3个，就是实现下面的三条协议。</p> 
+   <pre><code>message ServerRequest{
+    optional ServerBGQuery    bg = 4;              //service -&gt; server请求， “hey, 我要从100万开始的100条数”
+    optional ServerBGIndexReq  bg_index = 5;       //server -&gt; server 问索引，"hey 你那边这个数的索引是多少“
+    optional ServerBGIndexSync bg_sync = 6;        //server -&gt;sync 同步查询结果， "hey, 我已经确认了查询结果，我同步给你吧”
+}
+</code></pre> 
+   <p>对应的处理函数：<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/1ada366b4a88f88ac3f2a8f8ad572155.png" alt="image.png" title="image.png"></p> 
+   <p>Top：service发过来， “hey, 我想查一下skip=100万，limit=100的数是哪些”</p> 
+   <p>Count：“hey, 这个数在你那排第几”。</p> 
+   <p>CountBack："hey, 这个数在我这排第9”</p> 
+   <p>CountSync: “hey, 我已经排完了，我知道service请求的数是这些，你看看”</p> 
+   <p>处理service发来的请求<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/3fbc40ebfe861bc46e05a64f69a1039d.png" alt="image.png" title="image.png"></p> 
+   <p>这个看到了咱们的核心函数Guess<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/ea15231eb17bf23300365eafcb372028.png" alt="image.png" title="image.png"></p> 
+   <h1>Guess逻辑</h1> 
+   <p>guess部分的代码太长，咱们来看逻辑。</p> 
+   <p>当接受到一次(skip, limit)请求时， 全服系统需要寻找2个索引， skip, skip+limit, 比如当skip=100, limit=10时，全服需要找的是第排序为第100与第110的数，它们之间的数都被包含是结果集中。</p> 
+   <p>这就好办了，我把skip对应的数称为b(begin), skip+limit对应的数称为e(end). 要找到b和e,满足 index(b)=skip, index(e)=skip+limit.</p> 
+   <p>1.将猜测范围锁定为全局， 我们试验中的数据源是长整型，我们把从[0， 0x7ffffffffffffffe]。</p> 
+   <p>2.将猜测范围内的数分成20等分，得到集合V1=[v1, v2, ...v20], 然后得到这些点的全局排序索引I1=[index1, index2....index20]。</p> 
+   <p>index(b) 与index(e) 必然落在I1中的某个区间。</p> 
+   <p>假设 index2</p> 
+   <p>3.针对b: 将猜测范围定在[v2, v3],进行第2步。</p> 
+   <p>4.针对e:将猜测范围定在[v4, v5]，进行第2步。</p> 
+   <p>重复上述过程，不断缩小包转圈，直至发现b, e, 满足index(b)=skip, index(e)=skip+limit.<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/2f96c8b573f07e59731f7e2c840a9c63.png" alt="image.png" title="image.png"></p> 
+   <p>实际在处理过程中，会有一些边界值，比如skip太大，所有的数据都满足不了， 则第2步不满足就能发现。</p> 
+   <p>再比如区间太小，不能拆分20等分，那就设步长为1来猜测。</p> 
+   <p>再比如下面的一个切面， skip小于当前最小的索引， 则直接分配最小索引为skip。</p> 
+   <p><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/87bf586f3ca477002fb64281742c41a1.png" alt="image.png" title="image.png"></p> 
+   <h2>测试数据产生</h2> 
+   <p>测试数据为每个节点100万条， 每条数据8个字节，可以将这里的数据理解成mysql的索引， 但是实际存储中索引只占很小一部分。<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/93ba73330a2878394e3136248249ff08.png" alt="image.png" title="image.png"></p> 
+   <p>运行程序<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/c63910ffb17b05ee8e3ad7f1bcf2dffd.png" alt="image.png" title="image.png"></p> 
+   <p>测试：<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/5743df26d4c747f23f6d4ed2c4264471.png" alt="image.png" title="image.png"></p> 
+   <p>图中的cost time 来自于这里<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/03303ce952a258afdec96729bc8835b1.png" alt="image.png" title="image.png"></p> 
+   <p>ctx-&gt;timeSec_为请求时打的点，因此cost time表示此交请求中service&lt;-&gt;server的时间， 即后端处理的时间几乎为0。</p> 
+   <p><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/10678abcc1ca2cf8e61b1084d2e26050.png" alt="image.png" title="image.png"></p> 
+   <p>好了， 上面的数据是100万条一个节点，我们来看看单节点1亿条的情况。</p> 
+   <h1>解决1亿条数据排序</h1> 
+   <h2>生成测试数据</h2> 
+   <p>为了快速生成测试数据，我写了生成程序，咱们看看解析部分：</p> 
+   <p><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/24cbf018ec8113462b5bf77305562cf8.png" alt="image.png" title="image.png"></p> 
+   <p>程序接受2个参数， datacount 数据数量，在此我们传1千万， filecount为文件个数，我们传10。</p> 
+   <h2>运行生成程序</h2> 
+   <p>我们试着生成一下。<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/75d082a03c6dba7e276f19465f77365d.png" alt="image.png" title="image.png"></p> 
+   <p>生成的数据：<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/aadea0c7e7d3d70462be252cf381749c.png" alt="image.png" title="image.png"></p> 
+   <p>总共一亿条数分布在10个节点中。</p> 
+   <p>起动程序后内存迅速被吃满</p> 
+   <p><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/c0798297feba0f7f6cc87c3a57edb931.png" alt="image.png" title="image.png"></p> 
+   <p>来在来查询一下100万起的数据:<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/177c44a10078a505c9dd58f9fddb2ba4.png" alt="image.png" title="image.png"></p> 
+   <p>1000万起的数据20条：<br><img src="http://ata2-img.cn-hangzhou.img-pub.aliyun-inc.com/04014e806cf7e8f776d46b0a0f8d8e65.png" alt="image.png" title="image.png"></p> 
+   <p>总共时间在10ms以内，可见查询时间与分布式节点的数据大小没有关系。</p> 
+   <h1>结论</h1> 
+   <p>当有上亿条数据分布在集群中的大量节点上时，如果各节点上的数据是有序的，我们对节点整个排序时，可进行 猜测=&gt;应答=&gt;同步 的方式进行实时操作，让节点之间实时高效地互动起来， 让它们并行运算直至产生最终结果。</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

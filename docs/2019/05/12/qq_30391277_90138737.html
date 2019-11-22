@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Java并发中的内存模型 « NotBeCN</title>
+  <meta name="description" content="                   什么是JavaMemoryModel(JMM)?   JMM通过构建一个统一的内存模型来屏蔽掉不同硬件平台和不同操作系统之间的差异，让Java开发者无需关注不同平台之间的差异，达到一次编译，随处运行的目的，这也正是Java的设计目的之一。   CPU和内存   在讲JMM之前...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/qq_30391277_90138737.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Java并发中的内存模型</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <h2><a id="JavaMemoryModelJMM_0"></a>什么是JavaMemoryModel(JMM)?</h2> 
+  <p>JMM通过构建一个统一的内存模型来屏蔽掉不同硬件平台和不同操作系统之间的差异，让Java开发者无需关注不同平台之间的差异，达到一次编译，随处运行的目的，这也正是Java的设计目的之一。</p> 
+  <h2><a id="CPU_3"></a>CPU和内存</h2> 
+  <p>在讲JMM之前，我想先和大家聊聊硬件层面的东西。大家应该都知道执行运算操作的CPU本身是不具备存储能力的，它只负责根据指令对传递进来的数据做相应的运算，而数据存储这一任务则交给内存去完成。虽然内存的运行速度虽然比起硬盘快非常多，但是和3GHZ，4GHZ,甚至5GHZ的CPU比起来还是太慢了，在CPU的眼中，内存运行的速度简直就是弟弟中的弟弟，等内存进行一次读写操作，CPU能思考成百上千次人生了😁。但是CPU的运算能力是紧缺资源啊，可不能这么白白浪费了，所以得想办法解决这一个问题。</p> 
+  <blockquote> 
+   <p>没有什么问题是一个缓存不能解决的，如果有，那就再加一个缓存 ——鲁迅：反正我没说这句话</p> 
+  </blockquote> 
+  <p>所以人们就想到了给CPU增加一个高速缓存（为什么是加高速缓存而不是给内存提高速度就牵扯到硬件成本问题了）来解决这个问题，比如像博主用的Intel的I9 9900k CPU就带了高达16M的三级缓存，所以硬件上的内存模型大概如下图所示。<br> <img src="http://cdn.zyinux.com/1557583876.png" alt=""></p> 
+  <p>如图可以很清楚的看到，在CPU内部构建了一到多层的缓存，并且其中的L1 Cache是CPU内核心独有的，不同的Core之间是不能共享的，而L2 Cache则是所有的核心共享。简单来说就是CPU在读取一个数据时会先去最近的Cache层级上读取，如果找不到则会去下一个层级寻找，都找不到的话就会从内存中去加载，而如果Cache中能拿到所需要的数据就不会去内存读取。在将数据写回的时候也会先写入Cache中，等待合适的时机再写入到内存中（其中有一个细节就是缓存行的问题，关于这部分内容放在文章结尾）。而由于存在多个cache层级，并且部分cache还不能够被共享，所以会存在内存可见性的问题。</p> 
+  <p>举个简单的例子：<br> 假设现在存在两个Core，分别是CoreA和CoreB并且他们都拥有属于自己的L1Chace和共用的L2Cache。同时有一个变量X的值为1，该变量已经被加载在L2Cahce上。此时CoreA执行运算需要用到变量X，先去L1Cache寻找，未命中，继续在L2Cache寻找，命中成功，将X=1载入L1Cahce，再经过一系列运算后将X修改为2并写入L1Cache。于此同时CoreB刚好也需要X来进行运算，此时他去自己的L1Cahce寻找，未命中，继续L2Cache寻找，命中成功，将X=1载入自己的L1Cache。此时就出现了问题，CoreA明明已经将X的值修改为2了，CoreB读取到的依然是X=1，这就是内存可见性问题。</p> 
+  <p>看到这里的小伙伴们可能要问了，博主你啥情况啊，你这写的渐渐忘记标题了啊，说好了Java内存模型，你扯这么多硬件上的问题干啥啊？(╯‵□′)╯︵┻━┻</p> 
+  <h2><a id="Java_18"></a>Java中的主内存和工作内存</h2> 
+  <p>小伙伴们别着急，其实JMM和上面的硬件层次上的模型很像，不信看下面的图片<br> <img src="http://cdn.zyinux.com/1557585715.png" alt=""></p> 
+  <p>怎么样，是不是看起来很像，可以简单的理解为线程的工作内存就是CPU里Core独占的L1Cahce，而主内存就是共享的L2Cache。所以上述的内存一致性问题也会在JMM中存在，而JMM就需要制定一些列的规则来保证内存一致性，这也是Java多线程并发的一个疑难点，那么JMM制定了哪些规则呢？</p> 
+  <p>##内存间交互操作<br> 首先是主内存的工作内存之间的交互协议，具体来说定义了以下几个操作（并且保证这几个操作都是原子性的）：</p> 
+  <ul> 
+   <li>lock （锁定）作用于主内存的变量，将一个变量标识为一个线程独占状态</li> 
+   <li>unlock（解锁）作用于主内存的变量，将一个处于锁定状态的变量释放出来，释放之后才能被其他线程锁定</li> 
+   <li>read（读取）作用于主内存的变量，将一个变量的值从主内存传输到线程工作内存中，便于之后的load操作使用</li> 
+   <li>load（载入）作用于工作内存的变量，它把read操作从主内存中得到的变量值放入工作内存的变量副本中。</li> 
+   <li>use（使用）作用于工作内存的变量，把工作内存中的一个变量值传递给执行引擎，每当虚拟机遇到一个需要使用变量的值的字节码指令时将会执行这个操作。</li> 
+   <li>assign（赋值）作用于工作内存的变量，它把一个从执行引擎接收到的值赋值给工作内存的变量，每当虚拟机遇到一个给变量赋值的字节码指令时执行这个操作。</li> 
+   <li>store（存储）作用于工作内存的变量，把工作内存中的一个变量的值传送到主内存中，以便随后的write的操作。</li> 
+   <li>write（写入）作用于主内存的变量，它把store操作从工作内存中一个变量的值传送到主内存的变量中。</li> 
+  </ul> 
+  <p>同时还规定了执行上述八个操作时必须遵循以下规则：</p> 
+  <ul> 
+   <li>如果要把一个变量从主内存中复制到工作内存，就需要按顺寻地执行read和load操作， 如果把变量从工作内存中同步回主内存中，就要按顺序地执行store和write操作。但Java内存模型只要求上述操作必须按顺序执行，而没有保证必须是连续执行。</li> 
+   <li>不允许read和load、store和write操作之一单独出现</li> 
+   <li>不允许一个线程丢弃它的最近assign的操作，即变量在工作内存中改变了之后必须同步到主内存中。</li> 
+   <li>不允许一个线程无原因地（没有发生过任何assign操作）把数据从工作内存同步回主内存中。</li> 
+   <li>一个新的变量只能在主内存中诞生，不允许在工作内存中直接使用一个未被初始化（load或assign）的变量。即就是对一个变量实施use和store操作之前，必须先执行过了assign和load操作。</li> 
+   <li>一个变量在同一时刻只允许一条线程对其进行lock操作，但lock操作可以被同一条线程重复执行多次，多次执行lock后，只有执行相同次数的unlock操作，变量才会被解锁。lock和unlock必须成对出现</li> 
+   <li>如果对一个变量执行lock操作，将会清空工作内存中此变量的值，在执行引擎使用这个变量前需要重新执行load或assign操作初始化变量的值</li> 
+   <li>如果一个变量事先没有被lock操作锁定，则不允许对它执行unlock操作；也不允许去unlock一个被其他线程锁定的变量。</li> 
+   <li>对一个变量执行unlock操作之前，必须先把此变量同步到主内存中（执行store和write操作）。</li> 
+  </ul> 
+  <p>（上述部分参考并引用《深入理解Java虚拟机》中的内容）</p> 
+  <h3><a id="volatile_48"></a>volatile（能够保证内存可见性和禁止指令重排序）</h3> 
+  <p>对于volatile修饰的变量，JMM对其有一些特殊的规定。</p> 
+  <h4><a id="_50"></a>内存可见性</h4> 
+  <blockquote> 
+   <p>往简单来说volatile关键字可以理解为，有一个volatile修饰的变量x，当一个线程需要使用该变量的时候，直接从主内存中读取，而当一个线程修改该变量的值时，直接写入到主内存中。根据之前的分析我们能得出具备这些特性的volatile能够保证一个变量的内存可见性和内存一致性。</p> 
+  </blockquote> 
+  <h4><a id="_52"></a>指令重排序</h4> 
+  <p>指令重排序是一个大部分CPU都有的操作，同时JVM在运行时也会存在指令重排序的操作。<br> 简单举个🌰</p> 
+  <pre><code class="prism language-java">    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">test</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{</span>
+        <span class="token keyword">int</span> a<span class="token punctuation">,</span>b<span class="token punctuation">,</span>c<span class="token punctuation">;</span><span class="token comment">//1</span>
+        a<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">;</span><span class="token comment">//2</span>
+        b<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">;</span><span class="token comment">//3</span>
+        c<span class="token operator">=</span>a<span class="token operator">+</span>b<span class="token punctuation">;</span><span class="token comment">//4</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+  <p>假设有上面这么一个方法，内部有这4行代码。那么JVM可能会对其进行指令重排序，而指令重排序的规定则是as-if-serial 不管怎么重排序（编译器和处理器为了提高并行度），（单线程）程序的执行结果不能被改变。根据这一规定，编译器和处理器不会对有依赖关系的指令重排序，但是对没有依赖的指令则可能会进行重排序。放在上面的例子里面就是，第1行代码和2，3，4行代码是有依赖关系的，所以第一行代码的指令必须排在2，3，4之前，因为不可能对一个未定义的变量进行赋值操作。而第2，3行代码之间并没有相互依赖关系，所以此处可能会发生指令重排序，先执行3，再执行2。而最后的第4行代码和之前的3行代码都有依赖关系，所以他一定会放在最后执行。</p> 
+  <p>既然JVM特别指出指令重排序只在单线程下和未排序的效果一致，那是否表示在多线程下会存在一些问题呢？<br> 答案是肯定的，多线程下指令重排序会带来一些意想不到的结果。</p> 
+  <pre><code class="prism language-java">    <span class="token keyword">int</span> a<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token comment">//flag作为一个标识符，标识是否写入完成</span>
+    <span class="token keyword">boolean</span> flag <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">writer</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{</span>
+        a<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">;</span><span class="token comment">//1</span>
+        flag<span class="token operator">=</span><span class="token boolean">true</span><span class="token punctuation">;</span><span class="token comment">//2</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">reader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>flag<span class="token punctuation">)</span>
+            System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"a:"</span><span class="token operator">+</span>a<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+  <p>假设存在一个类，他有上述部分的field和method，该类在设计上以flag作为写入是否完成的标志，在单线程下这并不会存在问题。而此时有两个线程分别执行writer和reader方法，暂时不考虑内存可见性的问题，假设对a和flag的写入，是立即被其他线程所知晓的，这个时候大家觉得输出a的值为多少？10？</p> 
+  <p>即使不考虑内存可见性，此时a的值还是有可能会输出0，这就是指令重排序带来的问题。在上述代码中注释1和2处的代码是没有依赖关系的，在单线程下先执行1还是2都没有任何问题，根据as-if-serial 原则此时就可能会发生指令重排序。</p> 
+  <p>而volatile关键字可以禁止指令重排序。</p> 
+  <h4><a id="longdouble_87"></a>long，double的问题</h4> 
+  <p>我们都知道JMM定义的8个主内存和工作内存之间的操作都是具备原子性的，但是对long和double这两个64位的数据类型有一些例外。</p> 
+  <blockquote> 
+   <p>允许虚拟机将没有被volatile修饰的long和double的64数据的读写操作划分为两次32位的读写操作，即不要求虚拟机保证对他们的load ,store,read,write四个操作的原子性。<br> 但是大部分的虚拟机实现都保证了这四个操作的原子性的，所以大部分时候我们都不需要刻意的对long，double对象使用volatile修饰。</p> 
+  </blockquote> 
+  <h4><a id="_92"></a>性能问题</h4> 
+  <p>volatile是Java提供的保证内存可见性的最轻量级操作，比起重量级的synchronized能快上不少，但是具体能快多少这部分没办法量化。而我们可以知道的是volatile修饰的变量读操作的性能消耗几乎和普通变量相差无几，而写操作则会慢上一些。所以当volatile能解决我们的问题的时候（内存可见性和禁止指令重排序），我们应该优先选择使用volatile而不是锁。</p> 
+  <h3><a id="synchronized_95"></a>synchronized的内存语义</h3> 
+  <p>简单概括就是</p> 
+  <blockquote> 
+   <p>当程序进入synchronized块时，把在synchronized块中用到的变量从工作内存中清楚，这样在需要访问这些变量的时候会重新从主内存中获取。当程序退出synchronized块时，把对块中恭喜变量的修改刷新到主内存。<br> 如此依赖synchronized也能保证了内存的可见性。</p> 
+  </blockquote> 
+  <h3><a id="final_100"></a>final的内存语义</h3> 
+  <p>final也能保证内存的可见性</p> 
+  <blockquote> 
+   <p>被final修饰的字段在构造器中一旦初始化完成，并且构造器没有把this引用传递出去，那么其他线程中就能看见final字段的值。</p> 
+  </blockquote> 
+  <h2><a id="CPU_105"></a>后记之CPU缓存行和伪共享</h2> 
+  <h3><a id="_106"></a>什么是伪共享</h3> 
+  <p>根据前面的文章，我们知道CPU和Memory之间是有Cache的，而Cache内部是按行存储的，行拥有固定的大小，这些行被称为缓存行。<br> 当CPU访问的某个变量不在Cache中时，就会去内存里获取，并将该变量所在内存的一个缓存行大小的数据读入Cache中。由于一次读取并不是单个对象而是一整个缓存行，所以可能会存在多个变量被读入一个缓存行中。而一个缓存行只能同时被一个线程操作，所以当多个线程同时修改一个缓存行里的多个变量时会造成其他线程等待从而带来性能损耗（但是在单线程情况下，伪共享反而会提升性能，因为一次性可能会缓存多个变量，节省后续变量的读取时间）。</p> 
+  <h3><a id="_110"></a>如何避免伪共享</h3> 
+  <p>在Java8之后可以使用JDK提供的@sun.misc.Contended注解来解决伪共享，像Thread中的threadLocalRandom 字段就使用了这个注解。</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

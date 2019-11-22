@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>【技术篇】fork源码剖析 « NotBeCN</title>
+  <meta name="description" content="         （一）预备知识   1：clone、fork、vfork三个系统调用的实现都是通过 do_ fork()实现的，不同的是对do_ fork()的调用参数。关键是这些参数起的作用；系统调用clone()的主要用途是创建一个线程，这个线程可以是内核线程，也可以是用户线程。创建用户控件线程时，可以给定...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/xing1584114471_90137811.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">【技术篇】fork源码剖析</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <h3>（一）预备知识</h3> 
+  <p>1：clone、fork、vfork三个系统调用的实现都是通过 do_ fork()实现的，不同的是对do_ fork()的调用参数。关键是这些参数起的作用；系统调用clone()的主要用途是创建一个线程，这个线程可以是内核线程，也可以是用户线程。创建用户控件线程时，可以给定子线程用户空间堆栈的位置，还可以指定子进程运行的起点。同时也可以用clone()创建进程，有选择的赋值父进程的资源；fork()是全面的复制父进程的资源创建进程；vfork()的作用的创建一个线程，主要作用只是为作为创建进程的中间步骤，目的在于提高创建时的效率，减少系统的开销；</p> 
+  <p>2：内核通过一个task_struct的结构体来抽象一个进程，结构体的属性用来描述一个进程所处的状态、进程的标志、进程是否被其他进程跟踪、进程锁的深度，进程的优先级、进程的pid、进程的父母、进程的孩子链表、进程所打开的文件描述表、进程所处的文件系统、进程的信号等一些描述进程的信息。satk_struct结构体中的部分成员如下所示：</p> 
+  <pre class="has">
+<code class="language-cpp">task_struct{
+    volatile long state;    
+    void *stack;
+    atomic_t usage;
+    unsigned int flags; 
+    unsigned int ptrace;
+
+    int lock_depth;     
+    int prio, static_prio, normal_prio;
+    unsigned int rt_priority;
+    const struct sched_class *sched_class;
+    struct sched_entity se;
+    struct sched_rt_entity rt;
+    unsigned char fpu_counter;
+    struct list_head tasks;
+    struct plist_node pushable_tasks;
+
+    struct mm_struct *mm, *active_mm;
+    pid_t pid;
+    struct task_struct *real_parent; 
+    struct task_struct *parent; 
+    struct list_head children;  
+    struct fs_struct *fs;
+    struct files_struct *files;
+    struct signal_struct *signal;
+}</code></pre> 
+  <p>3：</p> 
+  <p><strong>地址重定向</strong>（从逻辑地址到物理地址的映射称）</p> 
+  <ul>
+   <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 静态重定向--在程序装入主存时已经完成了逻辑地址到物理地址和变换，在程序执行期间不会再发生改变。</li> 
+   <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 动态重定向--程序执行期间完成，其实现依赖于硬件地址变换机构，如基址寄存器。</li> 
+  </ul>
+  <p><strong>逻辑地址：</strong>CPU所生成的地址。CPU产生的逻辑地址被分为 :p （页号） 它包含每个页在物理内存中的基址，用来作为页表的索引；d （页偏移），同基址相结合，用来确定送入内存设备的物理内存地址。<br><strong>物理地址：</strong>内存单元所看到的地址。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 用户程序看不见真正的物理地址。用户只生成逻辑地址，且认为进程的地址空间为0到max。物理地址范围从R+0到R+max，R为基地址,地址映射－将程序地址空间中使用的逻辑地址变换成内存中的物理地址的过程。由内存管理单元（MMU）来完成。fork（）会产生一个和父进程完全相同的子进程，但子进程在此后多会exec系统调用，出于效率考虑，linux中引入了“写时复制“技术，也就是只有进程空间的各段的内容要发生变化时，才会将父进程的内容复制一份给子进程。在fork之后exec之前两个进程用的是相同的物理空间（内存区），子进程的代码段、数据段、堆栈都是指向父进程的物理空间，也就是说，两者的虚拟空间不同，但其对应的物理空间是同一个。当父子进程中有更改相应段的行为发生时，再为子进程相应的段分配物理空间，如果不是因为exec，内核会给子进程的数据段、堆栈段分配相应的物理空间（至此两者有各自的进程空间，互不影响），而代码段继续共享父进程的物理空间（两者的代码完全相同）。而如果是因为exec，由于两者执行的代码不同，子进程的代码段也会分配单独的物理空间。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp; fork时子进程获得父进程数据空间、堆和栈的复制，所以变量的地址（当然是虚拟地址）也是一样的。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp; 每个进程都有自己的虚拟地址空间，不同进程的相同的虚拟地址显然可以对应不同的物理地址。因此地址相同（虚拟地址）而值不同没什么奇怪。具体过程： fork子进程完全复制父进程的栈空间，也复制了页表，但没有复制物理页面，所以这时虚拟地址相同，物理地址也相同，但是会把父子共享的页面标记为“只读”（类似mmap的private的方式），如果父子进程一直对这个页面是同一个页面，知道其中任何一个进程要对共享的页面“写操作”，这时内核会复制一个物理页面给这个进程使用，同时修改页表。而把原来的只读页面标记为“可写”，留给另外一个进程使用。这就是所谓的“写时复制”。正因为fork采用了这种写时复制的机制，所以fork出来子进程之后，父子进程哪个先调度呢？内核一般会先调度子进程，因为很多情况下子进程是要马上执行exec，会清空栈、堆。。这些和父进程共享的空间，加载新的代码段。。。，这就避免了“写时复制”拷贝共享页面的机会。如果父进程先调度很可能写共享页面，会产生“写时复制”的无用功。所以，一般是子进程先调度。</p> 
+  <h3>（二）do_fork()函数</h3> 
+  <p><strong>&nbsp;&nbsp; 2.1函数原型</strong></p> 
+  <pre class="has">
+<code class="language-cpp">long do_fork(unsigned long clone_flags,
+	      unsigned long stack_start,
+	      struct pt_regs *regs,
+	      unsigned long stack_size,
+	      int __user *parent_tidptr,
+	      int __user *child_tidptr)
+</code></pre> 
+  <p>参数clone_flags:该参数是此函数中最重要的一个参数，该值中的每个位都代表对子进程task_struct中的每种属性的设置；标志内容如下所示：</p> 
+  <pre class="has">
+<code class="language-cpp"> #define CSIGNAL     0x000000ff  /* signal mask to be sent at exit */
+ #define CLONE_VM    0x00000100  /* set if VM shared between processes */
+ #define CLONE_FS    0x00000200  /* set if fs info shared between processes */
+ #define CLONE_FILES 0x00000400  /* set if open files shared between processes */
+ #define CLONE_SIGHAND   0x00000800  /* set if signal handlers and blocked signals shared */
+ #define CLONE_PTRACE    0x00002000  /* set if we want to let tracing continue on the child too */
+ #define CLONE_VFORK 0x00004000  /* set if the parent wants the child to wake it up on mm_release */
+ #define CLONE_PARENT    0x00008000  /* set if we want to have the same parent as the cloner */
+ #define CLONE_THREAD    0x00010000  /* Same thread group? */                                                                       
+ #define CLONE_NEWNS 0x00020000  /* New namespace group? */
+ #define CLONE_SYSVSEM   0x00040000  /* share system V SEM_UNDO semantics */
+ #define CLONE_SETTLS    0x00080000  /* create a new TLS for the child */
+ #define CLONE_PARENT_SETTID 0x00100000  /* set the TID in the parent */
+ #define CLONE_CHILD_CLEARTID    0x00200000  /* clear the TID in the child */
+ #define CLONE_DETACHED      0x00400000  /* Unused, ignored */
+ #define CLONE_UNTRACED      0x00800000  /* set if the tracing process can't force CLONE_PTRACE on this clone */
+ #define CLONE_CHILD_SETTID  0x01000000  /* set the TID in the child */
+ #define CLONE_STOPPED       0x02000000  /* Start in stopped state */
+ #define CLONE_NEWUTS        0x04000000  /* New utsname group? */
+ #define CLONE_NEWIPC        0x08000000  /* New ipcs */
+ #define CLONE_NEWUSER       0x10000000  /* New user namespace */
+ #define CLONE_NEWPID        0x20000000  /* New pid namespace */
+ #define CLONE_NEWNET        0x40000000  /* New network namespace */
+ #define CLONE_IO        0x80000000  /* Clone io context */
+</code></pre> 
+  <p><br> 参数stack_start:子进程用户态堆栈的开始地址<br> 参数regs:当系统发生系统调用时，需从用户态切换到内核态，此结构体用来保存此时用户态进程中的通用寄存器中的值，并被存放在内核态堆栈中<br> 参数stack_size:目前未被使用，通常设为0<br> 参数parent_tidptr:父进程在用户态下pid的地址<br> 参数child_tidptr:子进程在用户态下pid的地址</p> 
+  <p><br><strong>2.2函数的实现流程</strong></p> 
+  <p>&nbsp;&nbsp; 2.2.1do_fork开始执行的第一步是定义一个新的task_struct指针；&nbsp;&nbsp;&nbsp;</p> 
+  <pre class="has">
+<code class="language-cpp">struct task_struct *p;
+</code></pre> 
+  <p>&nbsp;&nbsp; 2.2.2检查一些矛盾的clone_flags组合；</p> 
+  <p>&nbsp; &nbsp; eg:当同时设置CLONE_NEWUSER标志，和CLONE_THREAD标志，时就会产生错误；语句如下所示：</p> 
+  <pre class="has">
+<code class="language-cpp">if (clone_flags &amp; CLONE_NEWUSER) 
+{
+    if (clone_flags &amp; CLONE_THREAD)
+        return -EINVAL;
+}</code></pre> 
+  <p>&nbsp;2.2.3copy_process()函数登场；</p> 
+  <p>&nbsp;&nbsp;&nbsp; copy_process()函数的流程如下：</p> 
+  <p>&nbsp;（1）调用dup_task_struct()函数为新的进程创建一个内核栈，thread_info结构体和task_struct等并且值与父进程完全相同；每一个进程描述符里都有一个thread_info指针,thread_info结构体保存的是进程上下文的信息。要修改thread_info *info，子进程的task_struct成员struct thread_info *info指向自己申请的struct thread_info。而在struct thread_info结构体中有一个struct task_struct类型的指针，这个指针应指向自己的struct task_struct。</p> 
+  <pre class="has">
+<code class="language-cpp">static struct task_struct *dup_task_struct(struct task_struct *orig)
+{
+    struct task_struct *tsk;
+    struct thread_info *ti;
+    unsigned long *stackend;
+
+    int err;
+
+    prepare_to_copy(orig);
+    //为tsk分配内存空间
+    tsk = alloc_task_struct();
+    if (!tsk)
+        return NULL;
+
+    //为ti分配内存空间
+    ti = alloc_thread_info(tsk);
+    if (!ti) {
+        free_task_struct(tsk);
+        return NULL;
+    }
+
+    赋值orig属性给新的tsk
+    err = arch_dup_task_struct(tsk, orig);
+    if (err)
+        goto out;
+
+    tsk-&gt;stack = ti;
+
+    //初始化进程缓存脏数据
+    err = prop_local_init_single(&amp;tsk-&gt;dirties);
+    if (err)
+        goto out;
+
+    //设置线程栈空间
+    setup_thread_stack(tsk, orig);
+    stackend = end_of_stack(tsk);
+    *stackend = STACK_END_MAGIC;    /* for overflow detection */
+
+#ifdef CONFIG_CC_STACKPROTECTOR
+    tsk-&gt;stack_canary = get_random_int();
+#endif
+
+    /* One for us, one for whoever does the "release_task()" (usually parent) */
+    atomic_set(&amp;tsk-&gt;usage,2);
+    atomic_set(&amp;tsk-&gt;fs_excl, 0);
+#ifdef CONFIG_BLK_DEV_IO_TRACE
+    tsk-&gt;btrace_seq = 0;
+#endif
+    tsk-&gt;splice_pipe = NULL;
+
+    account_kernel_stack(ti, 1);
+
+    return tsk;
+
+out:
+    free_thread_info(ti);
+    free_task_struct(tsk);
+    return NULL;
+}
+</code></pre> 
+  <p>（2）检查并确保新创建的进程后，当前用户所拥有的进程数量没有超出给他分配放入资源限制</p> 
+  <pre class="has">
+<code class="language-cpp">if (atomic_read(&amp;p-&gt;real_cred-&gt;user-&gt;processes) &gt;=                                                                      
+             p-&gt;signal-&gt;rlim[RLIMIT_NPROC].rlim_cur) 
+{
+         if (!capable(CAP_SYS_ADMIN) &amp;&amp; !capable(CAP_SYS_RESOURCE) &amp;&amp;
+             p-&gt;real_cred-&gt;user != INIT_USER)
+             goto bad_fork_free;
+ }
+</code></pre> 
+  <p>&nbsp;&nbsp; （3）子进程着手将自己和父进程分开，从父进程哪里继承过来的许多属性都要被清0，或者设置成一个初始值，但是task_struct中的大多数据还是未被修改，部分代码如下；</p> 
+  <pre class="has">
+<code class="language-cpp">     spin_lock_init(&amp;p-&gt;alloc_lock);
+
+     init_sigpending(&amp;p-&gt;pending);
+
+     p-&gt;utime = cputime_zero;
+     p-&gt;stime = cputime_zero;
+     p-&gt;gtime = cputime_zero;
+     p-&gt;utimescaled = cputime_zero;
+     p-&gt;stimescaled = cputime_zero;
+     p-&gt;prev_utime = cputime_zero;
+     p-&gt;prev_stime = cputime_zero;
+
+     p-&gt;default_timer_slack_ns = current-&gt;timer_slack_ns;
+
+    task_io_accounting_init(&amp;p-&gt;ioac);
+     acct_clear_integrals(p);
+
+     posix_cpu_timers_init(p);
+
+     p-&gt;lock_depth = -1;     /* -1 = no lock */
+     do_posix_clock_monotonic_gettime(&amp;p-&gt;start_time);
+     p-&gt;real_start_time = p-&gt;start_time;
+     monotonic_to_bootbased(&amp;p-&gt;real_start_time);
+     p-&gt;io_context = NULL;
+     p-&gt;audit_context = NULL;
+#ifdef CONFIG_TRACE_IRQFLAGS
+     p-&gt;irq_events = 0;
+ #ifdef __ARCH_WANT_INTERRUPTS_ON_CTXSW
+     p-&gt;hardirqs_enabled = 1;
+ #else
+     p-&gt;hardirqs_enabled = 0;
+ #endif
+     p-&gt;hardirq_enable_ip = 0;
+     p-&gt;hardirq_enable_event = 0;
+     p-&gt;hardirq_disable_ip = _THIS_IP_;
+     p-&gt;hardirq_disable_event = 0;
+     p-&gt;softirqs_enabled = 1;
+     p-&gt;softirq_enable_ip = _THIS_IP_;
+     p-&gt;softirq_enable_event = 0;
+     p-&gt;softirq_disable_ip = 0;
+     p-&gt;softirq_disable_event = 0;
+     p-&gt;hardirq_context = 0;
+     p-&gt;softirq_context = 0;
+ #endif
+ #ifdef CONFIG_LOCKDEP
+     p-&gt;lockdep_depth = 0; /* no locks held yet */
+     p-&gt;curr_chain_key = 0;
+     p-&gt;lockdep_recursion = 0;
+ #endif
+
+ #ifdef CONFIG_DEBUG_MUTEXES
+     p-&gt;blocked_on = NULL; /* not blocked yet */
+ #endif
+
+     p-&gt;bts = NULL;
+</code></pre> 
+  <p>（4）给子进程分配一个cpu</p> 
+  <pre class="has">
+<code class="language-cpp">sched_fork(p, clone_flags);
+</code></pre> 
+  <p>（5）拷贝父进程的资源</p> 
+  <ul>
+   <li>&nbsp;复制父进程打开的文件描述符</li> 
+  </ul>
+  <pre class="has">
+<code class="language-cpp"> 
+/**
+ * 复制进程文件描述符
+ */
+static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
+{
+	struct files_struct *oldf, *newf;
+	struct file **old_fds, **new_fds;
+	int open_files, size, i, error = 0, expand;
+ 
+	/*
+	 * A background process may not have any files ...
+	 */
+	oldf = current-&gt;files;
+	if (!oldf)
+		goto out;
+ 
+	if (clone_flags &amp; CLONE_FILES) {
+		atomic_inc(&amp;oldf-&gt;count);
+		goto out;
+	}
+ 
+	/*
+	 * Note: we may be using current for both targets (See exec.c)
+	 * This works because we cache current-&gt;files (old) as oldf. Don't
+	 * break this.
+	 */
+	tsk-&gt;files = NULL;
+	error = -ENOMEM;
+	newf = kmem_cache_alloc(files_cachep, SLAB_KERNEL);
+	if (!newf) 
+		goto out;
+ 
+	atomic_set(&amp;newf-&gt;count, 1);
+ 
+	spin_lock_init(&amp;newf-&gt;file_lock);
+	newf-&gt;next_fd	    = 0;
+	newf-&gt;max_fds	    = NR_OPEN_DEFAULT;
+	newf-&gt;max_fdset	    = __FD_SETSIZE;
+	newf-&gt;close_on_exec = &amp;newf-&gt;close_on_exec_init;
+	newf-&gt;open_fds	    = &amp;newf-&gt;open_fds_init;
+	newf-&gt;fd	    = &amp;newf-&gt;fd_array[0];
+ 
+	spin_lock(&amp;oldf-&gt;file_lock);
+ 
+	open_files = count_open_files(oldf, oldf-&gt;max_fdset);
+	expand = 0;
+ 
+	/*
+	 * Check whether we need to allocate a larger fd array or fd set.
+	 * Note: we're not a clone task, so the open count won't  change.
+	 */
+	if (open_files &gt; newf-&gt;max_fdset) {
+		newf-&gt;max_fdset = 0;
+		expand = 1;
+	}
+	if (open_files &gt; newf-&gt;max_fds) {
+		newf-&gt;max_fds = 0;
+		expand = 1;
+	}
+ 
+	/* if the old fdset gets grown now, we'll only copy up to "size" fds */
+	if (expand) {
+		spin_unlock(&amp;oldf-&gt;file_lock);
+		spin_lock(&amp;newf-&gt;file_lock);
+		error = expand_files(newf, open_files-1);
+		spin_unlock(&amp;newf-&gt;file_lock);
+		if (error &lt; 0)
+			goto out_release;
+		spin_lock(&amp;oldf-&gt;file_lock);
+	}
+ 
+	old_fds = oldf-&gt;fd;
+	new_fds = newf-&gt;fd;
+ 
+	memcpy(newf-&gt;open_fds-&gt;fds_bits, oldf-&gt;open_fds-&gt;fds_bits, open_files/8);
+	memcpy(newf-&gt;close_on_exec-&gt;fds_bits, oldf-&gt;close_on_exec-&gt;fds_bits, open_files/8);
+ 
+	for (i = open_files; i != 0; i--) {
+		struct file *f = *old_fds++;
+		if (f) {
+			get_file(f);
+		} else {
+			/*
+			 * The fd may be claimed in the fd bitmap but not yet
+			 * instantiated in the files array if a sibling thread
+			 * is partway through open().  So make sure that this
+			 * fd is available to the new process.
+			 */
+			FD_CLR(open_files - i, newf-&gt;open_fds);
+		}
+		*new_fds++ = f;
+	}
+	spin_unlock(&amp;oldf-&gt;file_lock);
+ 
+	/* compute the remainder to be cleared */
+	size = (newf-&gt;max_fds - open_files) * sizeof(struct file *);
+ 
+	/* This is long word aligned thus could use a optimized version */ 
+	memset(new_fds, 0, size); 
+ 
+	if (newf-&gt;max_fdset &gt; open_files) {
+		int left = (newf-&gt;max_fdset-open_files)/8;
+		int start = open_files / (8 * sizeof(unsigned long));
+ 
+		memset(&amp;newf-&gt;open_fds-&gt;fds_bits[start], 0, left);
+		memset(&amp;newf-&gt;close_on_exec-&gt;fds_bits[start], 0, left);
+	}
+ 
+	tsk-&gt;files = newf;
+	error = 0;
+out:
+	return error;
+ 
+out_release:
+	free_fdset (newf-&gt;close_on_exec, newf-&gt;max_fdset);
+	free_fdset (newf-&gt;open_fds, newf-&gt;max_fdset);
+	free_fd_array(newf-&gt;fd, newf-&gt;max_fds);
+	kmem_cache_free(files_cachep, newf);
+	goto out;
+}</code></pre> 
+  <ul>
+   <li>复制内存空间</li> 
+  </ul>
+  <p>&nbsp;&nbsp;&nbsp; 第一步： copy_mm复制地址空间，struct mm_struct *mm, *active_mm,mm表示：进程所拥有的内存空间的描述符，对于内核线程的mm为NULL，active__mm表示：进程运行时所需要使用的进程描述符</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 首先判断是否设置了CLONE_VM标志，如果设置，创建进程，新进程共享父进程的地址空间，将mm_user加1，然后mm=oldmm，把父进程的mm_struct指针赋给子进程的mm_struct；如果没有设置，当前进程分配一个新的内存描述符，mm=allocate_mm(),将它的弟子放在子进程的mm中。再把父进程（*oldmm）的内容拷进(*mm)中。</p> 
+  <pre class="has">
+<code class="language-cpp"> 
+/**
+ * 当创建一个新的进程时，内核调用copy_mm函数，
+ * 这个函数通过建立新进程的所有页表和内存描述符来创建进程的地址空间。
+ * 通常，每个进程都有自己的地址空间，但是轻量级进程共享同一地址空间，即允许它们对同一组页进行寻址。
+ */
+static int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
+{
+	struct mm_struct * mm, *oldmm;
+	int retval;
+ 
+	tsk-&gt;min_flt = tsk-&gt;maj_flt = 0;
+	tsk-&gt;nvcsw = tsk-&gt;nivcsw = 0;
+ 
+	tsk-&gt;mm = NULL;
+	tsk-&gt;active_mm = NULL;
+ 
+	/*
+	 * Are we cloning a kernel thread?
+	 *
+	 * We need to steal a active VM for that..
+	 */
+	oldmm = current-&gt;mm;
+	/**
+	 * 内核线程？？
+	 */
+	if (!oldmm)
+		return 0;
+ 
+	/**
+	 * 指定了CLONE_VM标志，表示创建线程。
+	 */
+	if (clone_flags &amp; CLONE_VM) {
+		/**
+		 * 新线程共享父进程的地址空间，所以需要将mm_users加一。
+		 */
+		atomic_inc(&amp;oldmm-&gt;mm_users);
+		mm = oldmm;
+		/*
+		 * There are cases where the PTL is held to ensure no
+		 * new threads start up in user mode using an mm, which
+		 * allows optimizing out ipis; the tlb_gather_mmu code
+		 * is an example.
+		 */
+		/**
+		 * 如果其他CPU持有进程页表自旋锁，就通过spin_unlock_wait保证在释放锁前，缺页处理程序不会结果。
+		 * 实际上，这个锁除了保护页表，还必须禁止创建新的轻量级进程。因为它们共享mm描述符
+		 */
+		spin_unlock_wait(&amp;oldmm-&gt;page_table_lock);
+		/**
+		 * 在good_mm中，将父进程的地址空间赋给子进程。
+		 * 注意前面对mm的赋值，表示了新线程使用的mm
+		 * 完了，就这么简单
+		 */
+		goto good_mm;
+	}
+ 
+	/**
+	 * 没有CLONE_VM标志，就必须创建一个新的地址空间。
+	 * 必须要有地址空间，即使此时并没有分配内存。
+	 */
+	retval = -ENOMEM;
+	/**
+	 * 分配一个新的内存描述符。把它的地址存放在新进程的mm中。
+	 */
+	mm = allocate_mm();
+	if (!mm)
+		goto fail_nomem;
+ 
+	/* Copy the current MM stuff.. */
+	/**
+	 * 并从当前进程复制mm的内容。
+	 */
+	memcpy(mm, oldmm, sizeof(*mm));
+	if (!mm_init(mm))
+		goto fail_nomem;
+ 
+	/**
+	 * 调用依赖于体系结构的init_new_context。
+	 * 对于80X86来说，该函数检查当前进程是否有定制的局部描述符表。
+	 * 如果有，就复制一份局部描述符表并把它插入tsk的地址空间
+	 */
+	if (init_new_context(tsk,mm))
+		goto fail_nocontext;
+ 
+	/**
+	 * dup_mmap不但复制了线程区和页表，也设置了mm的一些属性.
+	 * 它也会改变父进程的私有，可写的页为只读的，以使写时复制机制生效。
+	 */
+	retval = dup_mmap(mm, oldmm);
+	if (retval)
+		goto free_pt;
+ 
+	mm-&gt;hiwater_rss = mm-&gt;rss;
+	mm-&gt;hiwater_vm = mm-&gt;total_vm;
+ 
+good_mm:
+	tsk-&gt;mm = mm;
+	tsk-&gt;active_mm = mm;
+	return 0;
+ 
+free_pt:
+	mmput(mm);
+fail_nomem:
+	return retval;
+ 
+fail_nocontext:
+	/*
+	 * If init_new_context() failed, we cannot use mmput() to free the mm
+	 * because it calls destroy_context()
+	 */
+	mm_free_pgd(mm);
+	free_mm(mm);
+	return retval;
+}</code></pre> 
+  <p>第二步：复制线性区和页表，设置mm的一些属性，改变父进程的私有，可写的页为只读的，以使写时拷贝技术生效。</p> 
+  <pre class="has">
+<code class="language-cpp">/**
+ * 既复制父进程的线性区，也复制它的页表。
+ */
+static inline int dup_mmap(struct mm_struct * mm, struct mm_struct * oldmm)
+{
+	struct vm_area_struct * mpnt, *tmp, **pprev;
+	struct rb_node **rb_link, *rb_parent;
+	int retval;
+	unsigned long charge;
+	struct mempolicy *pol;
+ 
+	down_write(&amp;oldmm-&gt;mmap_sem);
+	flush_cache_mm(current-&gt;mm);
+	mm-&gt;locked_vm = 0;
+	mm-&gt;mmap = NULL;
+	mm-&gt;mmap_cache = NULL;
+	mm-&gt;free_area_cache = oldmm-&gt;mmap_base;
+	mm-&gt;map_count = 0;
+	mm-&gt;rss = 0;
+	mm-&gt;anon_rss = 0;
+	cpus_clear(mm-&gt;cpu_vm_mask);
+	mm-&gt;mm_rb = RB_ROOT;
+	rb_link = &amp;mm-&gt;mm_rb.rb_node;
+	rb_parent = NULL;
+	pprev = &amp;mm-&gt;mmap;
+ 
+	/**
+	 * 复制父进程的每一个vm_area_struct线性区描述符，并把复制品插入到子进程的线性区链表和红黑树中。
+	 */
+	for (mpnt = current-&gt;mm-&gt;mmap ; mpnt ; mpnt = mpnt-&gt;vm_next) {
+		struct file *file;
+ 
+		if (mpnt-&gt;vm_flags &amp; VM_DONTCOPY) {
+			__vm_stat_account(mm, mpnt-&gt;vm_flags, mpnt-&gt;vm_file,
+							-vma_pages(mpnt));
+			continue;
+		}
+		charge = 0;
+		if (mpnt-&gt;vm_flags &amp; VM_ACCOUNT) {
+			unsigned int len = (mpnt-&gt;vm_end - mpnt-&gt;vm_start) &gt;&gt; PAGE_SHIFT;
+			if (security_vm_enough_memory(len))
+				goto fail_nomem;
+			charge = len;
+		}
+		tmp = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+		if (!tmp)
+			goto fail_nomem;
+		*tmp = *mpnt;
+		pol = mpol_copy(vma_policy(mpnt));
+		retval = PTR_ERR(pol);
+		if (IS_ERR(pol))
+			goto fail_nomem_policy;
+		vma_set_policy(tmp, pol);
+		tmp-&gt;vm_flags &amp;= ~VM_LOCKED;
+		tmp-&gt;vm_mm = mm;
+		tmp-&gt;vm_next = NULL;
+		anon_vma_link(tmp);
+		file = tmp-&gt;vm_file;
+		if (file) {
+			struct inode *inode = file-&gt;f_dentry-&gt;d_inode;
+			get_file(file);
+			if (tmp-&gt;vm_flags &amp; VM_DENYWRITE)
+				atomic_dec(&amp;inode-&gt;i_writecount);
+      
+			/* insert tmp into the share list, just after mpnt */
+			spin_lock(&amp;file-&gt;f_mapping-&gt;i_mmap_lock);
+			tmp-&gt;vm_truncate_count = mpnt-&gt;vm_truncate_count;
+			flush_dcache_mmap_lock(file-&gt;f_mapping);
+			vma_prio_tree_add(tmp, mpnt);
+			flush_dcache_mmap_unlock(file-&gt;f_mapping);
+			spin_unlock(&amp;file-&gt;f_mapping-&gt;i_mmap_lock);
+		}
+ 
+		/*
+		 * Link in the new vma and copy the page table entries:
+		 * link in first so that swapoff can see swap entries,
+		 * and try_to_unmap_one's find_vma find the new vma.
+		 */
+		spin_lock(&amp;mm-&gt;page_table_lock);
+		*pprev = tmp;
+		pprev = &amp;tmp-&gt;vm_next;
+ 
+		__vma_link_rb(mm, tmp, rb_link, rb_parent);
+		rb_link = &amp;tmp-&gt;vm_rb.rb_right;
+		rb_parent = &amp;tmp-&gt;vm_rb;
+ 
+		mm-&gt;map_count++;
+		/**
+		 * copy_page_range创建必要的页表来映射线性区所包含的一组页。并且初始化新页表的表项。
+		 * 对私有、可写的页（无VM_SHARED标志，有VM_MAYWRITE标志），对父子进程都标记为只读的。
+		 * 为写时复制进行处理。
+		 */
+		retval = copy_page_range(mm, current-&gt;mm, tmp);
+		spin_unlock(&amp;mm-&gt;page_table_lock);
+ 
+		if (tmp-&gt;vm_ops &amp;&amp; tmp-&gt;vm_ops-&gt;open)
+			tmp-&gt;vm_ops-&gt;open(tmp);
+ 
+		if (retval)
+			goto out;
+	}
+	retval = 0;
+ 
+out:
+	flush_tlb_mm(current-&gt;mm);
+	up_write(&amp;oldmm-&gt;mmap_sem);
+	return retval;
+fail_nomem_policy:
+	kmem_cache_free(vm_area_cachep, tmp);
+fail_nomem:
+	retval = -ENOMEM;
+	vm_unacct_memory(charge);
+	goto out;
+}</code></pre> 
+  <ul>
+   <li>复制进程的内核栈</li> 
+  </ul>
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 调用cpoy_thread，用调用do_fork时CPU寄存器的值（它们还保存在父进程的内核栈中）来初始化子进程的内核栈。不过，copy_thread把eax寄存器对应字段的值（fork子进程中的返回值）设置为0。子进程描述符的thread.esp字段初始化为子进程内核栈的基地址ret_from_fork的地址存放在thread.eip中。</p> 
+  <pre class="has">
+<code class="language-cpp"> int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
+	unsigned long unused,
+	struct task_struct * p, struct pt_regs * regs)
+{
+	struct pt_regs * childregs;
+	struct task_struct *tsk;
+	int err;
+ 
+	childregs = ((struct pt_regs *) (THREAD_SIZE + (unsigned long) p-&gt;thread_info)) - 1;
+	*childregs = *regs;
+	childregs-&gt;eax = 0;
+	childregs-&gt;esp = esp;
+ 
+	p-&gt;thread.esp = (unsigned long) childregs;
+	p-&gt;thread.esp0 = (unsigned long) (childregs+1);
+ 
+	p-&gt;thread.eip = (unsigned long) ret_from_fork;
+ 
+	savesegment(fs,p-&gt;thread.fs);
+	savesegment(gs,p-&gt;thread.gs);
+ 
+	tsk = current;
+	if (unlikely(NULL != tsk-&gt;thread.io_bitmap_ptr)) {
+		p-&gt;thread.io_bitmap_ptr = kmalloc(IO_BITMAP_BYTES, GFP_KERNEL);
+		if (!p-&gt;thread.io_bitmap_ptr) {
+			p-&gt;thread.io_bitmap_max = 0;
+			return -ENOMEM;
+		}
+		memcpy(p-&gt;thread.io_bitmap_ptr, tsk-&gt;thread.io_bitmap_ptr,
+			IO_BITMAP_BYTES);
+	}
+ 
+	/*
+	 * Set a new TLS for the child thread?
+	 */
+	if (clone_flags &amp; CLONE_SETTLS) {
+		struct desc_struct *desc;
+		struct user_desc info;
+		int idx;
+ 
+		err = -EFAULT;
+		if (copy_from_user(&amp;info, (void __user *)childregs-&gt;esi, sizeof(info)))
+			goto out;
+		err = -EINVAL;
+		if (LDT_empty(&amp;info))
+			goto out;
+ 
+		idx = info.entry_number;
+		if (idx &lt; GDT_ENTRY_TLS_MIN || idx &gt; GDT_ENTRY_TLS_MAX)
+			goto out;
+ 
+		desc = p-&gt;thread.tls_array + idx - GDT_ENTRY_TLS_MIN;
+		desc-&gt;a = LDT_entry_a(&amp;info);
+		desc-&gt;b = LDT_entry_b(&amp;info);
+	}
+ 
+	err = 0;
+}</code></pre> 
+  <p>（6）调用alloc_pid为新进程分配一个pid；</p> 
+  <pre class="has">
+<code class="language-cpp">pid = alloc_pid(p-&gt;nsproxy-&gt;pid_ns);  </code></pre> 
+  <p>（7）copy_process做一些收尾工作，并返回新进程的task_struct指针；此时再次回到了do_fork，新创建的子进程被唤醒，并让其先投入运行；</p> 
+  <pre class="has">
+<code class="language-cpp">         if (unlikely(clone_flags &amp; CLONE_STOPPED)) {
+             /*
+              * We'll start up with an immediate SIGSTOP.
+              */
+             sigaddset(&amp;p-&gt;pending.signal, SIGSTOP);
+             set_tsk_thread_flag(p, TIF_SIGPENDING);
+             __set_task_state(p, TASK_STOPPED);
+         } else {
+             //换新新的进程
+             wake_up_new_task(p, clone_flags);                                                                               
+         }
+</code></pre> 
+  <h3>（三）总结</h3> 
+  <p>第一抓住进程被内核抽象成了啥？它的数据结构是咋样的(task_struct)这点我们必须有所认识，</p> 
+  <p>第二抓住创建进程最主要的其实就是拷贝父进程的task_struct里的属性，关键点是拷贝哪些，哪些又是子进程和父进程所不同的，很简单我们只需要把握住进程创建函数里的clone_flags参数就可以知道咋么拷贝了。<br> &nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

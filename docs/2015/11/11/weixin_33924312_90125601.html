@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux 串口、usb转串口驱动分析(2-1) 【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=26807463&amp;id=4186851    &nbsp;    Linux 串口、usb转串口驱动分析1    内核版本：2.6.35.6&nbsp;&...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/11/11/weixin_33924312_90125601.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux 串口、usb转串口驱动分析(2-1) 【转】</h1>
+    <p class="post-meta">Nov 11, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="text-align:left;" align="center">转自：<a href="http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=26807463&amp;id=4186851" rel="nofollow">http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=26807463&amp;id=4186851</a></p> 
+   <p align="center">&nbsp;</p> 
+   <p align="center">Linux 串口、usb转串口驱动分析1</p> 
+   <p>内核版本：2.6.35.6&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 荣鹏140319</p> 
+   <p>&nbsp;</p> 
+   <p>声明：图和个别段落（我做了小的修改）是直接从网上截取</p> 
+   <p>&nbsp;</p> 
+   <p>目标：主要是想对Linux 串口、usb转串口驱动框架有一个整体的把控，因此会忽略某些细节，同时里面涉及到的一些驱动基础，比如字符设备驱动、平台驱动等也不进行详细说明原理。如果有任何错误地方，请指出，谢谢！</p> 
+   <p>一、整体概述</p> 
+   <p>linux下的串口或者usb转串口驱动都是依赖linux内核提供的tty核心、tty线路规划和tty驱动，所以牵涉到很多层次，之所以有这么多层次，肯定是有它们存在意义的。</p> 
+   <p>举例来说，像串口或者usb转串口的驱动，最终可以确定的是以字符设备驱动提供给上层使用，于是tty核心层就对这部分通用的实现进行了封装，但这不是最重要的，最重要的是tty核心层里同时实现了一种数据格式化机制，这就是tty线路规划，这样的好处是可以分别针对不同类设备的线路规划，比如针对终端io的，比如针对网络的ppp还有slip还有蓝牙还有IrDA等，这些的实现不需要考虑底层硬件，也就是说这些串口到具体协议的转换的实现与硬件相分离了，这就是tty核心及tty线路规划存在的目地。</p> 
+   <p>那为什么会有tty驱动层呢？　也许你觉得我们的串口驱动可以直接通过tty核心提供的功能就可以实现了。 这个确实是可以，但是linux内核因为要兼容世界上存在的各种串口设备，所以针对串口额外实现了一个serial核心层，针对usb转串口额外实现了usb-serial核心层，它们就是所谓的tty驱动层。我们的串口或者usb转串口实现就是与tty驱动层打交道，当然串口芯片或者usb转串口芯片有很多种，所以不同的芯片都要有对应的驱动，但是它们都是基于tty驱动层实现，这个是可以肯定的。</p> 
+   <p>所以，我们要写串口驱动，最好还是对这些层次有些了解。</p> 
+   <p>&nbsp;</p> 
+   <p>整体框架图如下：<br>&nbsp; &nbsp; <img src="https://yqfile.alicdn.com/img_01d19128011ab32d67d9ce5259ad1150.png" alt="">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>这图是直接摘抄网上的。其实，我认为在tty驱动层下还应该有个具体的驱动，比如如果是8250串口控制器芯片，那么应该有个8250的驱动，然后才是硬件。</p> 
+   <p>更准确的图我认为如下图所示：</p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_e2df6b047388f014ab73e511ceab171b.png" alt=""></p> 
+   <p>更详细的如下图所示：</p> 
+   <p><img src="https://yqfile.alicdn.com/img_1f24749713f415e622c2b8cbb9c0594a.png" alt=""><br>&nbsp; &nbsp; &nbsp; &nbsp;&nbsp;</p> 
+   <p>下面摘抄网上的</p> 
+   <p>（1）、tty线程规程</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;以特殊的方式格式化从一个用户或者硬件收到的数据，这种格式化常常采用一个协议转换的形式，如虚拟终端、PPP、Bluetooth、Ir等。</p> 
+   <p>（2）、tty设备发送数据流程</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;tty核心从一个用户获取将要发送给一个tty设备的数据，tty核心将数据传递给tty线路规程驱动，接着数据被传递到tty驱动，tty驱动将数据转换为可以发送的硬件格式。</p> 
+   <p>（3）、tty设备接收数据流程</p> 
+   <p>&nbsp;&nbsp;&nbsp;从tty硬件接收到的数据向上交给tty驱动，进入tty线路规程驱动，再进入tty核心，在此被用户获取。尽管tty核心与tty之间的数据传输会经历tty线路规程的转换，但是tty驱动与tty核心之间也可以直接传输数据。</p> 
+   <p>再摘抄2张网上的图：</p> 
+   <p>&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;<img src="https://yqfile.alicdn.com/img_02835823871d657351d1791bdcccacca.png" alt=""></p> 
+   <p>tty设备的数据流通图：</p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_9f2a5631f9767a4312559997492ea108.png" alt=""></p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

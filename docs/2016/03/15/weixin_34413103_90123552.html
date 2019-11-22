@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>一个硬中断的完整处理过程【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/super-king/p/3296201.html CPU做的工作：CPU收到中断/异常信号；CPU判断当前CPL级别如果等于3，则导致堆栈切换3-&gt;0，堆栈切换过程：a. CPU从当前TR指向的TSS中读取SS0和ESP0；b....">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/03/15/weixin_34413103_90123552.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">一个硬中断的完整处理过程【转】</h1>
+    <p class="post-meta">Mar 15, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <pre>转自：<a href="http://www.cnblogs.com/super-king/p/3296201.html" rel="nofollow">http://www.cnblogs.com/super-king/p/3296201.html</a><br> CPU做的工作：
+CPU收到中断/异常信号；
+CPU判断当前CPL级别如果等于3，则导致堆栈切换3-&gt;0，堆栈切换过程：
+a. CPU从当前TR指向的TSS中读取SS0和ESP0；
+b. CPU将当前的【SS:ESP】寄存器内容临时保存起来，假设为SSt和ESPt；
+c. CPU将SS0和ESP0恢复到【SS:ESP】寄存器中；
+d. CPU将临时保存的SSt和ESPt压入当前的堆栈【SS:ESP】中（其实就是SS0和ESP0指向的堆栈)；
+CPU判断当前CPL级别如果等于0，则不会有2中的步骤；
+CPU将EFLAGS、CS、EIP依次压入当前的堆栈【SS:ESP】中；
+如果当前是异常，则CPU将异常码error code压入当前的堆栈【SS:ESP】中，否则会省略该步骤；
+对于中断，CPU清零当前EFLAGS-&gt;IF位，即关闭CPU中断使能，对于异常，CPU则不会清零该位；
+执行对中断/异常处理程序的调用；
+
+注：对中断/异常处理程序的要求，为了正常的从中断/异常处理程序中返回，中断/异常处理程序必须使用IRET指令返回，该指令会依次出栈EIP、CS和 EFLAGS，比RET多一个EFLAGS，当EFLAGS恢复后，由于原来保存时IF位为1，因此这里相当于CPU中断使能又打开了；
+ Linux内核做的工作 (2.4 kernel)：
+1. 中断向量表--&gt;common_interrupt：
+common_interrupt:
+SAVE_ALL
+pushl $ret_from_intr
+SYMBOL_NAME_STR(call_do_IRQ):
+jmp SYMBOL_NAME_STR(do_IRQ);
+
+SAVE_ALL保存所有CPU没有保存的寄存器，由于do_IRQ是函数，这里直接调用jmp，（一般用call来调用函数，call会导致 push EIP，但jmp不会）这样当do_IRQ返回调用ret（ret相当于pop EIP）时，会弹出栈中最后一个元素到EIP，很显然这里就是 ret_from_intr，也就是说，从do_IRQ中返回后，会跳转到ret_from_intr处继续执行；
+2. 来到do_IRQ：
+a. 首先给硬中断计数加1,irq_enter(cpu, irq)也就是：++local_irq_count(cpu)；每进入一个硬中断处理函数前，local_irq_count(cpu)计数便被加1，处理完毕后减1；
+b. 如果当前设备中断处理函数可以在中断打开的情况下运行，则调用sti将EFLAGS.IF置位，打开硬中断使能；
+c. 调用request_irq注册的设备硬中断处理函数；
+d. 无论EFLAGS.IF是否为0，都调用cli将EFLAGS.IF清零，将硬中断使能关闭；
+e. 给硬中断计数减1,irq_enter(cpu, irq);该函数其实就是：--local_irq_count(cpu);
+f. 如果此时有软中断需要运行（如在前面的硬中断处理函数中调用__cpu_raise_softirq），则进入do_softirq中处理软中断，关于do_softirq中的处理步骤见3；
+e. do_IRQ执行ret，返回到ret_from_intr。
+3. do_softirq：
+a. 首先判断当前是否还有没有处理完毕的硬中断处理程序或软中断处理程序，如果有，则直接退出该函数。
+b.将软中断处理计数加1，local_bh_disable()也就是local_bh_count(cpu)++；每进入do_softirq准备进 行处理软中断前，local_bh_count(cpu)计数便被加1，软中断处理函数处理完毕后，在do_softirq返回前，将其值减1；
+c. 无论EFLAGS.IF是否为0，都调用cli将EFLAGS.IF清零，将硬中断使能关闭，处理些软中断标志位的问题，随后调用sti将EFLAGS.IF置位，打开硬中断使能；
+d. 执行软中断处理函数；
+e. 调用cli将EFLAGS.IF清零，将硬中断使能关闭，处理些软中断标志位的问题；
+f. 将软中断处理计数减1，local_bh_enable()也就是local_bh_count(cpu)--；
+g. 返回到2.e中；
+4. ret_from_intr：
+ENTRY(ret_from_intr)
+GET_CURRENT(%ebx)
+movl EFLAGS(%esp),%eax
+movb CS(%esp),%al
+testl $(VM_MASK | 3),%eax
+jne ret_with_reschedule
+jmp restore_all
+
+在这段代码中，通过"testl $(VM_MASK |3),%eax"检测中断前夕寄存器EFLAGS的高6位和代码段寄存器CS的内容，来判断中断前夕CPU是否运行于VM86模式、用户空间还是系统空 间，对VM86这里不讲了，但是我们知道CS最低两位代表着中断发生时CPU的运行级别CPL，我们知道Linux只采用两种运行级别，系统为0，用户为 3，所以，如果CS的最低两位为非0，那就说明中断发生于用户空间。如果中断发生于系统空间，控制就直接转移到restore_all，而如果发生于用户 空间，则转移到ret_with_reschedule。在restore_all中恢复1中保存的寄存器，随后调用iret恢复EIP、CS、 EFLAGS返回到中断发生时的状态。
+5. ret_with_reschedule：
+a. 如果发现当前进程的need_resched==1，则会调用schedule；
+b. 如果发现还有待需要处理的软中断，则会调用do_softirq；
+
+说明：能够走到ret_with_reschedule处，从4中可知，该中断前一定位于用户层，而且不可能有可中断的硬中断或软中断没有执行，也就是说 到达这里in_interrupt必然为0。为什么这里要说不可能有可中断的硬中断或软中断没有执行呢？可中断的硬中断或软中断必然是被中断或者异常所打 断的，当后者处理完毕后，从4中可知，由于后者发生前位于内核态（也就是可中断的硬中断或软中断处理过程中的那个点），故控制就直接转移到 restore_all，即返回到了可中断的硬中断或软中断被打断时的那个点，继续处理完毕，可见，到达这里，必然不存在可中断的硬中断或软中断未被执 行。
+附 注：关于in_interrupt宏，也就是(local_irq_count(__cpu) +local_bh_count(__cpu) !=0)。什么情况下会导致进入do_softriq时，in_interrupt不为0呢？第一种，如果当前正在处理可中断的硬中断处理函数，假设此时 来了另一个通道的硬中断，将导致当前硬中断处理函数被中断，进入do_IRQ，随后处理新来的硬中断处理函数，当处理完毕后，到达do_softirq， 由2中可知，此时local_irq_count(__cpu)被原先的硬中断加1，由于其还没有处理完毕，故--local_irq_count (cpu)还没来得及执行，因此local_irq_count(__cpu)&gt;0，也就是in_interrupt！=0；第二种，如果当前正在 do_softirq中处理软中断处理函数，现在来了个硬中断，将导致当前软中断处理函数被中断，进入do_IRQ，随后处理新来的硬中断处理函数，当处 理完毕后，又来带到了do_softirq，由3中可知，此时local_bh_count(cpu)被前一个do_softirq加1了，但是由于其是 中途被中断的，故local_bh_count(cpu)--还没来得及执行，因此local_bh_count(__cpu)&gt;0，也就是 in_interrupt！=0；第三种就是综合第一种和第二种两种情况。
+
+ Linux内核做的工作 (2.6 kernel)：
+首先介绍中断向量的范围:
+0   -   19 (0x0   -   0x13) 非屏蔽中断和异常
+20  -   31 (0x14  -   0x1f) Intel 保留
+32  -  127 (0x20  -   0x7f) 外部中断 (IRQ)
+128         (0x80)            系统调用
+129 -  238 (0x81  -  0xee) 外部中断 (IRQ)
+239         (0xef)          本地APIC时钟中断
+240         (0xf0)          本地APIC高温中断 (P4模型中引人)
+241 -  250 (0xf1  -  0xfa) linux 将来使用
+251 -  253 (0xfb  -  0xfd) 处理器间中断
+254         (0xfe)          本地APIC错误中断
+255         (0xff)          本地APIC伪中断 (CPU屏蔽某个中断是产生)
+
+在init_IRQ中
+for (i = 0; i &lt; (NR_VECTORS - FIRST_EXTERNAL_VECTOR); i++) {
+    int vector = FIRST_EXTERNAL_VECTOR + i;
+    if (i &gt;= NR_IRQS)
+        break;
+    if (vector != SYSCALL_VECTOR)
+        set_intr_gate(vector, interrupt[i]);
+}
+设置了中断函数的入口地址. 那么 interrupt 在哪那？
+在entry.S中有
+    .data
+ENTRY(interrupt)
+    .text
+    vector=0
+ENTRY(irq_entries_start)
+    RING0_INT_FRAME
+    .rept NR_IRQS
+    ALIGN
+    .if vector
+    CFI_ADJUST_CFA_OFFSET -4
+    .endif
+1:      pushl $~(vector)
+    CFI_ADJUST_CFA_OFFSET 4
+    jmp common_interrupt
+    .data
+    .long 1b
+    .text
+    vector=vector+1
+    .endr
+    ALIGN
+    //看interrupt 在此初始化，所有中断都会调用到下面的标记
+    common_interrupt:
+    SAVE_ALL
+    TRACE_IRQS_OFF
+    movl %esp,%eax //栈顶地址被放到eax中
+    call do_IRQ
+    jmp ret_from_intr
+    CFI_ENDPROC
+
+    现在来看 do_IRQ -&gt; __do_IRQ
+    首先: struct irq_desc *desc = irq_desc + irq;
+    struct irq_desc {
+        ......
+        struct irqaction  * action; //IRQ action list
+        ......
+    };
+函数中
+......
+status |= IRQ_PENDING; /* we _want_ to handle it */
+
+action = NULL; // action  NULL
+//如果没有任何cpu正在处理irq且irq线没有被关闭，action才被赋值
+if (likely(!(status &amp; (IRQ_DISABLED | IRQ_INPROGRESS)))) {
+    action = desc-&gt;action;
+    status &amp;= ~IRQ_PENDING; /* we commit to handling */
+    status |= IRQ_INPROGRESS; /* we are handling it */
+}
+desc-&gt;status = status;
+......
+然后不管怎样如果要处理中断会调用 handle_IRQ_event
+其中主循环为
+do {
+    ret = action-&gt;handler(irq, action-&gt;dev_id, regs); //调用具体中断处理函数
+    if (ret == IRQ_HANDLED)
+        status |= action-&gt;flags;
+    retval |= ret;
+    action = action-&gt;next;
+} while (action);
+
+struct irqaction {
+    irqreturn_t (*handler)(int, void *, struct pt_regs *); //中断处理函数
+    unsigned long flags;
+    cpumask_t mask;
+    const char *name;
+    void *dev_id;
+    struct irqaction *next;
+    int irq;
+    struct proc_dir_entry *dir;
+};
+
+下面讲一下怎样安装的中断处理函数.
+安装中断处理程序主要的函数是
+int request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *), unsigned long irqflags, const char *devname, void *dev_id)
+函数中主要会调用 setup_irq 会把分配的 struct irqaction 加入到 struct irq_desc *desc = irq_desc + irq; 中.
+其中
+......
+#if defined(CONFIG_IRQ_PER_CPU)
+if (new-&gt;flags &amp; IRQF_PERCPU) //可以在cpu上嵌套执行中断处理函数
+    desc-&gt;status |= IRQ_PER_CPU;
+#endif
+......</pre> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

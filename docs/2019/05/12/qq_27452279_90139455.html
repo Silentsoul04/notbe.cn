@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>g2o入门：曲线拟合代码分析 « NotBeCN</title>
+  <meta name="description" content="                  今天第三边跟着slam十四讲敲了g2o的曲线拟合代码，对g2o的认识也更进一步 首先，附上参考网址，最通俗易懂的教程没有之一：http://www.cnblogs.com/CV-life/p/10286037.html 这是ros上关于g2o库的文档，和g2o差别不大：http...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/qq_27452279_90139455.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">g2o入门：曲线拟合代码分析</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-dracula"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>今天第三边跟着slam十四讲敲了g2o的曲线拟合代码，对g2o的认识也更进一步<br> 首先，附上参考网址，最通俗易懂的教程没有之一：<a href="http://www.cnblogs.com/CV-life/p/10286037.html" rel="nofollow">http://www.cnblogs.com/CV-life/p/10286037.html</a><br> 这是ros上关于g2o库的文档，和g2o差别不大：<a href="http://docs.ros.org/fuerte/api/re_vision/html/namespaceg2o.html" rel="nofollow">http://docs.ros.org/fuerte/api/re_vision/html/namespaceg2o.html</a></p> 
+  <p>进入正题，学习如何使用g2o库，重点是理解下面这张图：<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512125458737.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3FxXzI3NDUyMjc5,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述">注意里面的箭头，实线表示类的继承关系，一般我们只用最上层的类，虚线表示箭头所指的东西属于箭头尾部的东西的对象（即我们可以用前者去初始化后者），编程时，由底部向顶部开始构造求解器：先构造线性求解器，再构造优化算法，最后构造优化器<br> 附上代码：</p> 
+  <pre><code class="prism language-C++">#include&lt;iostream&gt;
+#include&lt;g2o/core/base_vertex.h&gt;
+#include&lt;g2o/core/base_unary_edge.h&gt;
+#include&lt;g2o/core/block_solver.h&gt;
+#include&lt;g2o/core/optimization_algorithm_levenberg.h&gt;
+#include&lt;g2o/core/optimization_algorithm_gauss_newton.h&gt;
+#include&lt;g2o/core/optimization_algorithm_dogleg.h&gt;
+#include&lt;g2o/solvers/dense/linear_solver_dense.h&gt;
+#include&lt;Eigen/Core&gt;
+#include&lt;opencv2/core/core.hpp&gt;
+#include&lt;cmath&gt;
+#include&lt;chrono&gt;
+using namespace std;
+
+class CurveFittingVertex:public g2o::BaseVertex&lt;3,Eigen::Vector3d&gt;
+{
+public:
+ // EIGEN_MAKE_ALIGEND_OPERATOR_NEW
+  virtual void setToOriginImpl()
+  {
+    _estimate&lt;&lt;0,0,0;
+  }
+  
+  virtual void oplusImpl(const double*update)
+  {
+    _estimate=_estimate+Eigen::Vector3d(update);
+  }
+  
+virtual bool read(istream&amp; in){}
+virtual bool write(ostream&amp; out) const {}
+};
+
+class CurveFittingEdge:public g2o::BaseUnaryEdge&lt;1,double,CurveFittingVertex&gt;{
+public:
+  //EIGEN_MAKE_ALIGEND_OPERATOR_NEW
+  //构造函数：
+  CurveFittingEdge(double x):BaseUnaryEdge(),_x(x) {}
+  
+  //计算误差
+  void computeError()
+  {
+    const CurveFittingVertex *v=static_cast&lt;CurveFittingVertex*&gt;(_vertices[0]); //初始化节点
+    //typedef std::vector&lt;Vextex*&gt; VertexVector
+    //VertexVector _vertices
+    
+    const Eigen::Vector3d abc=v-&gt;estimate(); //得到估计量
+    _error(0,0)=_measurement-std::exp(abc(0,0)*_x*_x+abc(1,0)*_x+abc(2,0)); //y值为_measurement
+     //typedef Eigen::Matrix&lt;double, D, 1, Eigen::ColMajor&gt; ErrorVector;
+    //ErrorVector _error;
+  }
+  virtual bool read(istream&amp; in) {}
+  virtual bool write(ostream&amp; out) const{} //不能少了const
+public:
+  double _x;  //_x用来传入估计点的x值
+};
+
+int main(int argc,char** argv)
+{
+  double a=1,b=2,c=3;
+  int N=100;
+  double w_sigma=1.0;
+  cv::RNG rng;
+  double abc[3]={0,0,0};
+  
+  vector&lt;double&gt; x_data,y_data;
+  //产生观测数据
+  for(int i=0;i&lt;N;i++)
+  {
+    double x=i/100.0;
+    x_data.push_back(x);
+    double y=rng.gaussian(w_sigma)+std::exp(a*x*x+b*x+c);
+    y_data.push_back(y);
+  }
+    //矩阵块：优化变量维度为3,误差值维度为1
+   typedef g2o::BlockSolver&lt;g2o::BlockSolverTraits&lt;3,1&gt;&gt; Block;
+   
+     //初始化线性求解器
+   Block::LinearSolverType *linearSolver= new g2o::LinearSolverDense&lt;Block::PoseMatrixType&gt;();
+   Block* solver_ptr=new Block(linearSolver);
+   
+   g2o::OptimizationAlgorithmLevenberg* solver=new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+   g2o::SparseOptimizer optimizer;
+   optimizer.setAlgorithm(solver);
+    //g2o::OptimizationAlgorithmLevenberg solver(solver_ptr);
+    //optimizer.setAlgorithm(&amp;solver);
+   optimizer.setVerbose(true);
+   
+   //往图中增加顶点
+   CurveFittingVertex *v=new CurveFittingVertex();
+   v-&gt;setEstimate(Eigen::Vector3d(0,0,0));
+   v-&gt;setId(0);
+   optimizer.addVertex(v);
+   
+   //往图中增加边
+   for(int i=0;i&lt;N;i++)
+   {
+     CurveFittingEdge *edge=new CurveFittingEdge(x_data[i]);
+     edge-&gt;setId(i);
+     edge-&gt;setVertex(0,v);
+     //void setVertex(size_t i, Vertex* v) { assert(i &lt; _vertices.size() &amp;&amp; "index out of bounds"); 
+//_vertices[i]=v;}
+     edge-&gt;setMeasurement(y_data[i]);
+     //信息矩阵：协方差矩阵之逆
+     edge-&gt;setInformation(Eigen::Matrix&lt;double,1,1&gt;::Identity()*1/(w_sigma*w_sigma));
+     optimizer.addEdge(edge);
+   }
+//执行优化
+std::cout&lt;&lt;"start optimization"&lt;&lt;std::endl;
+optimizer.initializeOptimization();
+optimizer.optimize(100);
+Eigen::Vector3d abc_estimate=v-&gt;estimate();
+cout&lt;&lt;abc_estimate.transpose()&lt;&lt;endl;
+return 0;
+}
+</code></pre> 
+  <p>CMakeLists.txt：</p> 
+  <pre><code>cmake_minimum_required(VERSION 2.6)
+set(CMAKE_CXX_FLAGS "-std=c++11 -O3")
+project(g2o_curve_fitting)
+
+list( APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake_modules )
+find_package(G2O REQUIRED)
+include_directories("/usr/include/eigen3" ${G2O_INCLUDE_DIRS})
+
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
+
+add_executable(g2o_curve_fitting g2o_curve_fitting.cpp)
+
+target_link_libraries( g2o_curve_fitting 
+    ${OpenCV_LIBS}
+    g2o_core g2o_stuff  
+    #改成${G2O_LIBS}报错
+)
+</code></pre> 
+  <p>下面是我在调代码时遇到的一些问题：</p> 
+  <ol> 
+   <li>我在构造求解器的时候，尝试做了如下修改：</li> 
+  </ol> 
+  <pre><code> g2o::OptimizationAlgorithmLevenberg* solver=new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+   g2o::SparseOptimizer optimizer;
+ optimizer.setAlgorithm(solver);
+ optimizer.setVerbose(true);
+
+改成：
+	g2o::OptimizationAlgorithmLevenberg solver(solver_ptr);
+	g2o::SparseOptimizer optimizer;
+	optimizer.setAlgorithm(&amp;solver);
+	optimizer.setVerbose(true)
+</code></pre> 
+  <p>结果倒是也能求解出正确结果，但是报了一堆我看不懂的错：</p> 
+  <pre><code>*** Error in `/home/safsafsa/projects/g2o_curve_fitting/build/g2o_curve_fitting': double free or corruption (out): 0x00007ffe0d554e80 ***
+======= Backtrace: =========
+/lib/x86_64-linux-gnu/libc.so.6(+0x777e5)[0x7fe7ff93c7e5]
+/lib/x86_64-linux-gnu/libc.so.6(+0x8037a)[0x7fe7ff94537a]
+/lib/x86_64-linux-gnu/libc.so.6(cfree+0x4c)[0x7fe7ff94953c]
+/usr/local/lib/libg2o_core.so(_ZN3g2o15SparseOptimizerD1Ev+0x24)[0x7fe8016a3014]
+/home/safsafsa/projects/g2o_curve_fitting/build/g2o_curve_fitting(main+0x618)[0x408c68]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf0)[0x7fe7ff8e5830]
+/home/safsafsa/projects/g2o_curve_fitting/build/g2o_curve_fitting(_start+0x29)[0x408da9]
+======= Memory map: ========
+00400000-00426000 r-xp 00000000 07:00 1836                               /home/safsafsa/projects/g2o_curve_fitting/build/g2o_curve_fitting
+00625000-00626000 r--p 00025000 07:00 1836                               /home/safsafsa/projects/g2o_curve_fitting/build/g2o_curve_fitting
+00626000-00627000 rw-p 00026000 07:00 1836                               /home/safsafsa/projects/g2o_curve_fitting/build/g2o_curve_fitting
+0181c000-0184e000 rw-p 00000000 00:00 0                                  [heap]
+7fe7f8000000-7fe7f8021000 rw-p 00000000 00:00 0 
+</code></pre> 
+  <ol start="2"> 
+   <li>我一开始运行出来的结果是这个：</li> 
+  </ol> 
+  <pre><code>      0       0 3.00351
+</code></pre> 
+  <p>反复检查代码，发现是问题出在这里：</p> 
+  <pre><code>double x=i/100; //错误
+double x=i/100.00;//正确
+</code></pre> 
+  <p>所以在使用double类型的数据时一定要注意小数点啊</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

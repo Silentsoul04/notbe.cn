@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>DPDK : 进程间通信以及在内存管理的应用 « NotBeCN</title>
+  <meta name="description" content="                  说明   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;这一篇文章主要是对DPDK中的进程间通信(Inter-Process Communication)进行介绍。 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/pcokk_90138043.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">DPDK : 进程间通信以及在内存管理的应用</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <h4><a id="_1"></a>说明</h4> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;这一篇文章主要是对DPDK中的进程间通信(Inter-Process Communication)进行介绍。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;由于个人水平所限，若所写的博文中存在错误，希望大家能帮忙指出。</p> 
+  <h4><a id="DPDK_5"></a>一，DPDK的进程间通信</h4> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;前面的文章<a href="https://blog.csdn.net/pcokk/article/details/89737592" rel="nofollow">&lt;DPDK内存的初始化过程&gt;</a>提到，DPDK将进程分为两种 : primary process 和secondary process。并且DPDK在单机上是一个集中式控制的系统，即主要由primary process对系统的资源(如内存，vfio container等)进行控制，而secondary process若需要申请资源，则向primary process发送申请的请求，由promary process处理请求后，将结果通知secondary process。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;涉及到多个进程之间的相互协作，就必然会涉及到进程间通信(Inter-Process Communication, 缩写为IPC), 就目前阅读到的代码而言，主要采用了两种IPC的方式：<strong>共享内存通信(memory share)</strong>，<strong>Socket</strong>。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;DPDK在初始化时创建一个<strong>控制线程</strong>用来监听来自其他进程的消息，接收到消息后，会根据消息的类型(同步或者异步)进行不同的处理，详情见<strong>rte_mp_channel_init(), process_msg()(位于文件lib/librte_eal/common/eal_common_proc.c)</strong>。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://blog.csdn.net/pcokk/article/details/89737592" rel="nofollow">&lt;DPDK内存的初始化过程&gt;</a>提到，primary process对内存初始化后，会将一部分初始化信息写入到文件中，而secondary process在初始化时能读取此文件，这就是使用了共享内存通信的方式。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;这一篇博文主要介绍DPDK中采用<strong>Socket</strong>的进程间通信方式。</p> 
+  <h4><a id="_15"></a>二，相关结构体的说明</h4> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;下面还是先对一些结构体作简单的说明 :</p> 
+  <pre><code>********************rte_eal.h********************
+struct rte_mp_msg {
+    char name[RTE_MP_MAX_NAME_LEN]; //用来指明消息的类型
+    int len_param; //指明param的长度
+    int num_fds; //指明fds的长度
+    uint8_t param[RTE_MP_MAX_PARAM_LEN]; //用来存放消息的相关参数
+    int fds[RTE_MP_MAX_FD_NUM]; //用于进程间传递fd
+};
+
+struct rte_mp_reply {
+    int nb_sent; //发送出去的消息的个数
+    int nb_received; //收到回复的消息的个数
+    struct rte_mp_msg *msgs; /* caller to free */ //用于存放收到回复的消息
+};
+
+********************eal_common_proc.c********************
+//消息的四种类型
+enum mp_type {
+    MP_MSG, /* Share message with peers, will not block */
+    MP_REQ, /* Request for information, Will block for a reply */
+    MP_REP, /* Response to previously-received request */
+    MP_IGN, /* Response telling requester to ignore this response */
+};
+
+struct mp_msg_internal {
+    int type; //消息的类型
+    struct rte_mp_msg msg; //对应的消息
+};
+
+//用于pending request中的async
+struct async_request_param {
+    rte_mp_async_reply_t clb;	 //收到异步消息的reply时，所调用的callback函数
+	struct rte_mp_reply user_reply;	//用于记录消息的发送次数和接收次数，存放接收到的reply
+    struct timespec end;  //用于记录异步消息超时的时间点
+    int n_responses_processed; //用于记录已经处理的reply个数
+};
+
+//进程在发送一个消息时，需要将这个消息封装到pengding_request中， 并且保留在一个pending request list
+//等收到reply后，再从list找到对应的pending_request，调用callback(异步通信机制)或者唤醒对应的线程(同步通信机制)
+struct pending_request {
+    TAILQ_ENTRY(pending_request) next;
+    enum {
+        REQUEST_TYPE_SYNC,
+        REQUEST_TYPE_ASYNC
+    } type;
+    char dst[PATH_MAX];
+    struct rte_mp_msg *request;//用于存放request消息
+    struct rte_mp_msg *reply; 	 //用于存放一个reply消息
+    int reply_received; 	//用于指示是否正确接收到了reply
+    RTE_STD_C11
+    union {
+        struct {
+            struct async_request_param *param;  //对应于异步通信，用于记录相关的信息
+        } async;
+        struct {
+            pthread_cond_t cond;	//对应于同步通信，用于唤醒对应的线程
+        } sync;
+    };
+};
+</code></pre> 
+  <h4><a id="_79"></a>三，通信过程的协议栈</h4> 
+  <p>下面给出进程间通信过程的协议栈：<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512104435700.jpg" alt="在这里插入图片描述"><br> 主要的过程如下:</p> 
+  <pre><code>	1，将上层的消息(对于内存分配是struct malloc_mp_req)封装到struct rte_mp_msg的param字段中。
+	2，再继续封装在struct mp_msg_internal的msg字段。
+	3，最后将struct mp_msg_internal封装在 struct msghdr(而struct rte_mp_msg的fds作为msghdr控制信息)中。
+	4，使用系统提供的接口 sendmsg() 发送出去。
+</code></pre> 
+  <p>(由于是本机的IPC，所以会在msghdr中指定一个<strong>目的路径</strong>，这样接收者就能通过读取对应的文件描述符来获得信息)</p> 
+  <h4><a id="DPDK_92"></a>四，DPDK的通信方式以及实现</h4> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;DPDK的IPC通信过程实现了<strong>同步通信</strong>和<strong>异步通信</strong></p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;下面介绍一下pending_request的作用 :</p> 
+  <pre><code>		在一次事务的过程中，发送方发送消息时会将未完成的请求封装到pending reuqest中，
+	并且将其加入到pending request list。然后就收到回复时，根据对应的pending request采用对应的操作，
+	然后将回复加入到对应的位置(如果是同步通信，则由用户在调用rte_mp_request_sync()，有一个参数
+	用于指定位置，如果是异步通信，则会创建一个struct async_request_param作为消息存放的位置)。
+</code></pre> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;在<strong>同步通信</strong>的场景下 :</p> 
+  <pre><code>		1，发送消息时会阻塞，直到收到回复以后才继续执行后面的指令。
+		2，若primary process同时给多个secondary process发送消息，则每发送一个消息，则会阻塞，
+	直到收到回复后才给下一个secondary process发送消息。
+</code></pre> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<strong>同步消息的实现</strong>：</p> 
+  <pre><code>		1，某个线程调用rte_mp_request_sync（）, 会创建一个类型为REQUEST_TYPE_SYNC的pending request。
+	并加入到pending request list中。 
+		2，发送同步消息后，会阻塞在pending request中cond字段(条件变量)。
+		3，在接收消息的线程接收到回复时，根据回复查找相应的penging request, 将回复消息存放在pending request的reply字段。
+	并通过条件变量唤醒对应的线程。
+		4，被唤醒的线程继续执行后面的指令，将回复消息(即pending request中的reply字段)复制到用户指定的位置。
+</code></pre> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;在<strong>异步通信</strong>的场景下 :</p> 
+  <pre><code>		发送消息时会将所有消息都发送出去，然后继续执行后面的指令，或者其他功能。
+</code></pre> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<strong>异步消息的实现</strong> :</p> 
+  <pre><code>		1，某个线程调用rte_mp_request_async()会传入一个callback和超时时长。
+	接着创建一个类型为REQUEST_TYPE_ASYNC的pending request并加入到pending request list中。
+		2，发送异步消息后（会设置一个alarm用于处理超时），线程可以继续执行后面的指令。
+		3，在接收消息的线程接收到回复时，根据回复查找相应的pending request，将回复消息存放在pending request的reply字段。
+	最后会将回复消息复制到async-&gt;param.user_reply中。
+		4，若已经收到了全部的消息，则会触发callback函数，将user_reply作为函数，处理所有的回复消息。
+</code></pre> 
+  <p>(一个技巧，若全部消息发送失败,则会加入一个dummy pending request, 用于触发callback，保证异步通信一定能够触发callback函数的执行。但是本人目前尚未找到触发dummy pending request的代码在哪一块)</p> 
+  <h4><a id="DPDKIPC_132"></a>五，一个DPDK的IPC应用场景的说明</h4> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;下面通过一个内存管理的场景(其他场景如hotplug设备移除时通知其他process，或者使用vfio中container，iommu type同步时都会使用IPC)说明DPDK中IPC的应用。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;下面给出<strong>secondary process向primary process申请内存</strong>的全部过程：</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;一），若secondary process在调用rte_malloc()分配内存时，此时需要向OS申请更多的内存页，那么会<strong>调用request_to_primary()发送一个RTE_TYPE_ALLOC请求给primary process(下图第1步)</strong>。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;二），<strong>primary process接收到请求后，会向OS申请更多的内存页，并更新其rte_memseg_list的信息(下图第2步)</strong>。若申请失败，则发送一个fail消息给secondary process, <strong>否则发送一个sync request(下图第3步)</strong>，让secondary process将其local rte_memseg_list 与 primary process的rte_memseg_list进行同步。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;三），若secondary process收到失败的消息，直接退出。<strong>若收到sync request, 则进行同步操作，若同步成功，则发送sync success的请求，否则发送sync failure的请求(下图第4,5步)</strong>。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;四) ，若primary process接收到sync success的请求，则发送alloc success的消息。否则，<strong>primary process执行rollback操作，释放第二步向OS申请的内存(下图第6步)，然后继续向secondary proocess发送rollback request(下图第7步)</strong>。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;五）， 若secondary process收到sync success, 直接退出。<strong>若收到rollback request, 则将其local rte_memseg_list 与 primary process的rte_memseg_list进行同步。然后将同步的结果发送给primary process(下图第8,9步)</strong>。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;六），<strong>primary process收到同步的结果后，无论成功与否，将结果发送给secondary process(下图第10步)</strong>。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;七）， secondary process收到结果后，退出。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;下面的图展示了上面加粗的字体的过程(其他过程比较简单，在此不给出图例)：</p> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512112839373.jpg?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3Bjb2tr,size_16,color_FFFFFF,t_70" alt="secondary process向primary process申请内存的过程"><br> <br><br></p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;下面给出<strong>secondary process请求primary process释放内存页</strong>的过程：</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;一）， 若secondary process在调用rte_malloc()释放内存时，此时若能够将某些内存页归还给OS，那么会<strong>调用request_to_primary()发送一个RTE_TYPE_FREE请求给primary process(下图第1步)</strong>。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;二）， primary process接收到请求后，会<strong>将内存页释放给OS(下图第2步)</strong>，并更新其rte_memseg_list的信息。若释放失败，则发送一个fail消息给secondary process, 否则<strong>发送一个sync request(下图第3步)</strong>，让secondary process将其local rte_memseg_list 与 primary process的rte_memseg_list进行同步。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;三），若secondary process收到失败的消息，直接退出。<strong>若收到sync request, 则进行同步操作，若同步成功，则发送sync success的请求，否则发送sync failure的请求(下图第4,5步)</strong>。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;四）， <strong>primary process收到同步的结果后，无论成功与否，将结果发送给secondary process(下图第6步)</strong>。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;五）， secondary process收到结果后，退出.</p> 
+  <p>下面的图展示了上面加粗的字体的过程：<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512110122177.jpg?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3Bjb2tr,size_16,color_FFFFFF,t_70" alt="secondary process请求primary process释放内存页"></p> 
+  <h4><a id="_163"></a>六，总结</h4> 
+  <p>本文简单地介绍了DPDK的进程间通信机制：<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;1，DPDK系统中使用了多种IPC方式，本文主要介绍了socket这一种方式。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;2，DPDK通信过程自定义了一套消息格式，向用户隐藏了处理消息的方式。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3，DPDK中支持同步通信和异步通信，并且在secondary process向primary process申请/释放内存时，两种通信方式都会使用。<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;4，对内存管理的一个通信场景进行了说明（其他的通信场景相对于内存管理的通信场景而言比较简单）。</p> 
+  <h4><a id="_169"></a>七，函数调用图</h4> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;下面给出的是进程间通信，以及内存管理的进程通信过程相关的代码的函数调用图(所阅读的代码是来自DPDK官方最新的代码<a href="https://github.com/DPDK/dpdk" rel="nofollow">https://github.com/DPDK/dpdk</a>, 如果官方代码更新，文章也会尽快地更新)<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;1，eal_common_proc ： <a href="http://naotu.baidu.com/file/6f6d2149caf10b47c8063238ccb3161f?token=08dd7291ce6cb49c" rel="nofollow">http://naotu.baidu.com/file/6f6d2149caf10b47c8063238ccb3161f?token=08dd7291ce6cb49c</a><br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;2，malloc_mp ： <a href="http://naotu.baidu.com/file/d9b0035af29d5f065383f96a3f8d0c8a?token=6c8dade8235b6a62" rel="nofollow">http://naotu.baidu.com/file/d9b0035af29d5f065383f96a3f8d0c8a?token=6c8dade8235b6a62</a></p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>基于多线程的高性能异步日志管理机制与实现 « NotBeCN</title>
+  <meta name="description" content="                  通常在日志写的过程，每次写日志时，都是直接写入文件中。当数据量不大的时候，完成可以这样做，不会有什么问题。但是当数据量大时，每次写数据则会由于IO的瓶颈造成很大的性能问题。   为了解决这个问题，本文设计了一套基于多线程的在内存中追加日志后再写入文件的缓冲机制，从而解决这个问题...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/weixin_43145361_90139480.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">基于多线程的高性能异步日志管理机制与实现</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-light"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>通常在日志写的过程，每次写日志时，都是直接写入文件中。当数据量不大的时候，完成可以这样做，不会有什么问题。但是当数据量大时，每次写数据则会由于IO的瓶颈造成很大的性能问题。</p> 
+  <p>为了解决这个问题，本文设计了一套基于多线程的在内存中追加日志后再写入文件的缓冲机制，从而解决这个问题。经测试，在没有任何特别文件读写优化的情况下，每秒可以实现20万条长度为30字节的日志的硬盘（SSD）写入。</p> 
+  <h1><a id="_4"></a>基本原理</h1> 
+  <ol> 
+   <li>内存日志列表<br> 首先建立一个缓冲列表用于保存日志。当日志在生成以后，先写入缓冲中，从而利用高速的内存可以以极高的速度写入数据。</li> 
+   <li>多线程写入<br> 多线程用于日志数据的收集和写入文件。本机制采用一个独立的线程，每隔一定的时间，根据日志列表中是否有新的数据，再决定向指定的文件追加日志信息。</li> 
+  </ol> 
+  <h1><a id="_9"></a>源代码</h1> 
+  <h2><a id="_10"></a>使用示例</h2> 
+  <pre><code class="prism language-csharp"><span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">Main</span><span class="token punctuation">(</span><span class="token keyword">string</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+    LogManager<span class="token punctuation">.</span><span class="token function">Log</span><span class="token punctuation">(</span>LogType<span class="token punctuation">.</span>L101001_UserLogin<span class="token punctuation">,</span> <span class="token string">"10232"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    LogManager<span class="token punctuation">.</span><span class="token function">Log</span><span class="token punctuation">(</span>LogType<span class="token punctuation">.</span>L101002_UserLogout<span class="token punctuation">,</span> <span class="token string">"10232"</span><span class="token punctuation">,</span> DateTime<span class="token punctuation">.</span>Now<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    LogManager<span class="token punctuation">.</span><span class="token function">Log</span><span class="token punctuation">(</span>LogType<span class="token punctuation">.</span>L415001_Debug<span class="token punctuation">,</span> <span class="token string">"MyLog.Program"</span><span class="token punctuation">,</span> <span class="token keyword">true</span><span class="token punctuation">,</span> <span class="token number">135.2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// Simulates this program running for 5 seconds.</span>
+    Thread<span class="token punctuation">.</span><span class="token function">Sleep</span><span class="token punctuation">(</span><span class="token number">5000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>写入的结果</p> 
+  <pre><code>1136515010100110232
+11365150101002102322019-05-12 12:59:10
+11365150415001MyLog.ProgramTrue135.2
+</code></pre> 
+  <h1><a id="_28"></a>源代码</h1> 
+  <h2><a id="LogManager__29"></a>LogManager 类</h2> 
+  <pre><code class="prism language-csharp">    <span class="token comment">/// &lt;summary&gt;</span>
+    <span class="token comment">/// This class is used to manage logs from the same program.</span>
+    <span class="token comment">/// It has a key method AddLog to receive log. This is a </span>
+    <span class="token comment">/// multi-threading class to save logs into a file in specified </span>
+    <span class="token comment">/// seconds to avoid save logs too frequently. </span>
+    <span class="token comment">/// &lt;/summary&gt;</span>
+    <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">LogManager</span>
+    <span class="token punctuation">{</span>
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// The file path to store log.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">public</span> <span class="token keyword">string</span> LogPath <span class="token punctuation">{</span> <span class="token keyword">get</span><span class="token punctuation">;</span> <span class="token keyword">private</span> <span class="token keyword">set</span><span class="token punctuation">;</span> <span class="token punctuation">}</span> <span class="token operator">=</span> <span class="token string">"system.log"</span><span class="token punctuation">;</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// The interval (in second) of saving logs into file.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">public</span> <span class="token keyword">int</span> SaveInterval <span class="token punctuation">{</span> <span class="token keyword">get</span><span class="token punctuation">;</span> <span class="token keyword">set</span><span class="token punctuation">;</span> <span class="token punctuation">}</span> <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// To contronl the running status of the thread</span>
+        <span class="token keyword">bool</span> isRunning <span class="token operator">=</span> <span class="token keyword">false</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// Teporary log list for holding current logs.</span>
+        List<span class="token operator">&lt;</span>Log<span class="token operator">&gt;</span> logs <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token generic-method"><span class="token function">List</span><span class="token punctuation">&lt;</span><span class="token class-name">Log</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// The thread to perform method process() </span>
+        <span class="token class-name">Thread</span> thread<span class="token punctuation">;</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Construct a LogManager object.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">public</span> <span class="token function">LogManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Construct a LogManager object.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token comment">/// &lt;param name="logPath"&gt;The file path to store logs.&lt;/param&gt;</span>
+        <span class="token comment">/// &lt;param name="saveInterval"&gt;Writing intervl.&lt;/param&gt;</span>
+        <span class="token keyword">public</span> <span class="token function">LogManager</span><span class="token punctuation">(</span><span class="token keyword">string</span> logPath<span class="token punctuation">,</span> <span class="token keyword">int</span> saveInterval <span class="token operator">=</span> <span class="token number">10</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            LogPath <span class="token operator">=</span> logPath<span class="token punctuation">;</span>
+            SaveInterval <span class="token operator">=</span> saveInterval<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Add a new log.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token comment">/// &lt;param name="logType"&gt;The type of this log.&lt;/param&gt;</span>
+        <span class="token comment">/// &lt;param name="args"&gt;The arguments of this log.&lt;/param&gt;</span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">AddLog</span><span class="token punctuation">(</span><span class="token class-name">LogType</span> logType<span class="token punctuation">,</span> <span class="token keyword">object</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            <span class="token function">AddLog</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Log</span><span class="token punctuation">(</span>logType<span class="token punctuation">,</span> args<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Add a new log.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token comment">/// &lt;param name="log"&gt;The log to be added.&lt;/param&gt;</span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">AddLog</span><span class="token punctuation">(</span><span class="token class-name">Log</span> log<span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            <span class="token keyword">lock</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span>
+            <span class="token punctuation">{</span>
+                logs<span class="token punctuation">.</span><span class="token function">Add</span><span class="token punctuation">(</span>log<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// main method to process logs.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">process</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            isRunning <span class="token operator">=</span> <span class="token keyword">true</span><span class="token punctuation">;</span>
+            <span class="token keyword">while</span> <span class="token punctuation">(</span>isRunning<span class="token punctuation">)</span>
+            <span class="token punctuation">{</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>logs<span class="token punctuation">.</span>Count <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+                <span class="token punctuation">{</span>
+                    <span class="token comment">// Obtain all logs and release lock</span>
+                    List<span class="token operator">&lt;</span>Log<span class="token operator">&gt;</span> loglist <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token generic-method"><span class="token function">List</span><span class="token punctuation">&lt;</span><span class="token class-name">Log</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">lock</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">{</span>
+                        loglist<span class="token punctuation">.</span><span class="token function">AddRange</span><span class="token punctuation">(</span>logs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        logs<span class="token punctuation">.</span><span class="token function">Clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    <span class="token comment">// append new logs into log file.</span>
+                    <span class="token keyword">using</span> <span class="token punctuation">(</span><span class="token class-name">StreamWriter</span> fw <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">StreamWriter</span><span class="token punctuation">(</span>LogPath<span class="token punctuation">,</span> <span class="token keyword">true</span><span class="token punctuation">,</span> Encoding<span class="token punctuation">.</span>UTF8<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">{</span>
+                        <span class="token keyword">foreach</span> <span class="token punctuation">(</span><span class="token class-name">Log</span> log <span class="token keyword">in</span> loglist<span class="token punctuation">)</span>
+                            fw<span class="token punctuation">.</span><span class="token function">WriteLine</span><span class="token punctuation">(</span>log<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    System<span class="token punctuation">.</span>Console<span class="token punctuation">.</span><span class="token function">WriteLine</span><span class="token punctuation">(</span>DateTime<span class="token punctuation">.</span>Now <span class="token operator">+</span> <span class="token string">" Saved."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token comment">// Sleep SaveInterval seconds for no waisting CPU resource.</span>
+                Thread<span class="token punctuation">.</span><span class="token function">Sleep</span><span class="token punctuation">(</span>SaveInterval<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Starts thread of this log manager. </span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">Start</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>thread <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+
+            thread <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Thread</span><span class="token punctuation">(</span>process<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            thread<span class="token punctuation">.</span>IsBackground <span class="token operator">=</span> <span class="token keyword">true</span><span class="token punctuation">;</span>
+            thread<span class="token punctuation">.</span><span class="token function">Start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Stops the thread of this log manager. </span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">Stop</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            isRunning <span class="token operator">=</span> <span class="token keyword">false</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// used in static</span>
+        <span class="token keyword">static</span> <span class="token class-name">LogManager</span> logManager<span class="token punctuation">;</span>
+        <span class="token comment">// a static method to save logs.</span>
+        <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">Log</span><span class="token punctuation">(</span><span class="token class-name">LogType</span> logType<span class="token punctuation">,</span> <span class="token keyword">params</span> <span class="token keyword">object</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>logManager <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+            <span class="token punctuation">{</span>
+                logManager <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LogManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                logManager<span class="token punctuation">.</span><span class="token function">Start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            logManager<span class="token punctuation">.</span><span class="token function">AddLog</span><span class="token punctuation">(</span>logType<span class="token punctuation">,</span> args<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+  <h2><a id="Log_168"></a>Log类</h2> 
+  <pre><code class="prism language-csharp">    <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Log</span>
+    <span class="token punctuation">{</span>
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// The occuring time.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">public</span> <span class="token class-name">DateTime</span> Time <span class="token punctuation">{</span> <span class="token keyword">get</span><span class="token punctuation">;</span> <span class="token keyword">set</span><span class="token punctuation">;</span> <span class="token punctuation">}</span> <span class="token operator">=</span> DateTime<span class="token punctuation">.</span>Now<span class="token punctuation">;</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// The type of the log.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">public</span> <span class="token class-name">LogType</span> LogType <span class="token punctuation">{</span> <span class="token keyword">get</span><span class="token punctuation">;</span> <span class="token keyword">set</span><span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Arguements of a log.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token keyword">public</span> <span class="token keyword">string</span><span class="token punctuation">[</span><span class="token punctuation">]</span> Arguments <span class="token punctuation">{</span> <span class="token keyword">get</span><span class="token punctuation">;</span> <span class="token keyword">set</span><span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+
+        <span class="token comment">// Used to separate data fields of a log when serializing.</span>
+        <span class="token keyword">char</span> separator <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token punctuation">)</span><span class="token number">6</span><span class="token punctuation">;</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Construct a Log object.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token comment">/// &lt;param name="logType"&gt;The type of log.&lt;/param&gt;</span>
+        <span class="token comment">/// &lt;param name="args"&gt;Argument list.&lt;/param&gt;</span>
+        <span class="token keyword">public</span> <span class="token function">Log</span><span class="token punctuation">(</span><span class="token class-name">LogType</span> logType<span class="token punctuation">,</span> <span class="token keyword">object</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            LogType <span class="token operator">=</span> logType<span class="token punctuation">;</span>
+            Arguments <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token keyword">string</span><span class="token punctuation">[</span>args <span class="token operator">==</span> <span class="token keyword">null</span> <span class="token operator">?</span> <span class="token number">0</span> <span class="token punctuation">:</span> args<span class="token punctuation">.</span>Length<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> Arguments<span class="token punctuation">.</span>Length<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+                Arguments<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> args<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token keyword">null</span> <span class="token operator">?</span> <span class="token string">""</span> <span class="token punctuation">:</span> args<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">ToString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Format: yyyyMMddHHmmss|LogType|Arguments</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token comment">/// &lt;returns&gt;&lt;/returns&gt;</span>
+        <span class="token keyword">public</span> <span class="token keyword">override</span> <span class="token keyword">string</span> <span class="token function">ToString</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+            <span class="token class-name">StringBuilder</span> sb <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">StringBuilder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            sb<span class="token punctuation">.</span><span class="token function">Append</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span><span class="token punctuation">(</span>Time <span class="token operator">-</span> <span class="token keyword">new</span> <span class="token class-name">DateTime</span><span class="token punctuation">(</span><span class="token number">2019</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>TotalSeconds<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            sb<span class="token punctuation">.</span><span class="token function">Append</span><span class="token punctuation">(</span>separator<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            sb<span class="token punctuation">.</span><span class="token function">Append</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span>LogType<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            sb<span class="token punctuation">.</span><span class="token function">Append</span><span class="token punctuation">(</span>separator<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            sb<span class="token punctuation">.</span><span class="token function">Append</span><span class="token punctuation">(</span><span class="token keyword">string</span><span class="token punctuation">.</span><span class="token function">Join</span><span class="token punctuation">(</span>separator<span class="token punctuation">.</span><span class="token function">ToString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> Arguments<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> sb<span class="token punctuation">.</span><span class="token function">ToString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">/// &lt;summary&gt;</span>
+        <span class="token comment">/// Parses a string into a Log object.</span>
+        <span class="token comment">/// &lt;/summary&gt;</span>
+        <span class="token comment">/// &lt;param name="str"&gt;Input string.&lt;/param&gt;</span>
+        <span class="token comment">/// &lt;returns&gt;&lt;/returns&gt;</span>
+        <span class="token keyword">public</span> <span class="token class-name">Log</span> <span class="token function">Parse</span><span class="token punctuation">(</span><span class="token keyword">string</span> str<span class="token punctuation">)</span>
+        <span class="token punctuation">{</span>
+
+            <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+  <h2><a id="LogType__232"></a>LogType 类</h2> 
+  <pre><code class="prism language-csharp">    <span class="token comment">/// &lt;summary&gt;</span>
+    <span class="token comment">/// Used to represent different types of logs based on Integers.</span>
+    <span class="token comment">/// &lt;/summary&gt;</span>
+    <span class="token keyword">public</span> <span class="token keyword">enum</span> LogType <span class="token punctuation">:</span> <span class="token keyword">int</span>
+    <span class="token punctuation">{</span>
+        L101001_UserLogin <span class="token operator">=</span> <span class="token number">101001</span><span class="token punctuation">,</span>
+        L101002_UserLogout <span class="token operator">=</span> <span class="token number">101002</span><span class="token punctuation">,</span>
+        L415001_Debug <span class="token operator">=</span> <span class="token number">415001</span><span class="token punctuation">,</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

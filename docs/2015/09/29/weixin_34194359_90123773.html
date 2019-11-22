@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux的软中断处理实现 【转】 « NotBeCN</title>
+  <meta name="description" content="                 转自：    http://blog.chinaunix.net/uid-25909619-id-3070190.html            一、概念           &nbsp;           首先我们要知道为什么中断需要下半部&nbsp;。我们可以想象一下，如果...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/09/29/weixin_34194359_90123773.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux的软中断处理实现 【转】</h1>
+    <p class="post-meta">Sep 29, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div>
+    转自：
+    <a href="http://blog.chinaunix.net/uid-25909619-id-3070190.html" rel="nofollow">http://blog.chinaunix.net/uid-25909619-id-3070190.html</a> 
+   </div> 
+   <div>
+    一、概念
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    首先我们要知道为什么中断需要下半部&nbsp;。我们可以想象一下，如果没有下半部的概念，一个网卡中断过来了以后会是什么样的情况。首先，我们会从网卡硬件buffer中把网卡收到的packet拷贝到系统内存中，然后对这个packet进行TCP/IP协议栈的处理。我们知道TCP/IP协议栈是一个比较复杂的软件模块，里面对packet的处理会经过非常多的步骤，首先是链路层，然后是IP层（这里又包括分片，奇偶校验之类的），然后是TCP层（TCP层的实现相当复杂，会花费比较长的时间对packet进行一些状态或者内容的分析处理），最后通过socket把packet传入用户空间。在传入用户空间之间的这些动作，都必须在中断处理中完成，因为这些操作都是在kernel中的，并且这些操作会花费比较长的时间。在这段时间里，cpu由于进入了中断门，会自动关中断，也就是说cpu不会去响应在这段时间里网卡另外发过来的中断，这样的话很有可能网卡硬件buffer会由于网卡自身的缓存不足而导致丢包&nbsp;&nbsp;&nbsp;。所以linux为了解决这样的问题，把copy packet这样比较紧急的动作放在了上半部去处理（上半部默认情况下是在关中断中完成的），把协议栈这些不是特别紧急的任务放到了下半部去处理（下半部是在开中断中进行的，有就是说，处理下半部的过程中，允许cpu被其他中断打断）。
+   </div> 
+   <p>&nbsp;</p> 
+   <p>二、软件构架和实现</p> 
+   <p>1.&nbsp;一些基础数据结构</p> 
+   <p>文件softirq.c</p> 
+   <p align="left">/*PER-CPU变量，每个cpu对应一个，描述当前cpu中关于softirq的一些状态，比如是否有softirq挂起需要执行等等*/</p> 
+   <p>irq_cpustat_t irq_stat[NR_CPUS] ____cacheline_aligned;</p> 
+   <p>typedef struct {</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;unsigned int __softirq_pending; /*32位，对应Linux中32种softirq是否被上半部触发了(为1表示被触发，为0表示未被触发)*/</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;unsigned long idle_timestamp;</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;unsigned int __nmi_count;&nbsp;&nbsp;&nbsp;/* arch dependent */</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;unsigned int apic_timer_irqs;&nbsp;&nbsp;&nbsp;/* arch dependent */</p> 
+   <p align="left">} ____cacheline_aligned irq_cpustat_t;</p> 
+   <p>&nbsp;</p> 
+   <p align="left">/*表示softirq最多有32种类型，实际上Linux只用了6种，见文件interrupt.h*/</p> 
+   <p align="left">static struct softirq_action softirq_vec[32] __cacheline_aligned_in_smp;</p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">/* PLEASE, avoid to allocate new softirqs, if you need not _really_ high</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;frequency threaded job scheduling. For almost all the purposes</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;tasklets are more than enough. F.e. all serial device BHs et</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;al. should be converted to tasklets, not to softirqs.</p> 
+   <p align="left">&nbsp;*/</p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">enum</p> 
+   <p align="left">{</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;HI_SOFTIRQ=0,&nbsp;&nbsp;&nbsp;/*用于高优先级的tasklet*/</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;TIMER_SOFTIRQ, /*用于定时器的下半部*/</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;NET_TX_SOFTIRQ,/*用于网络层发包*/</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;NET_RX_SOFTIRQ, /*用于网络层收包*/</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;SCSI_SOFTIRQ,&nbsp;&nbsp;&nbsp;/*用于SCSI设备*/</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;TASKLET_SOFTIRQ /*用于低优先级的tasklet*/</p> 
+   <p align="left">};&nbsp;</p> 
+   <p align="left">struct softirq_action</p> 
+   <p align="left">{</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;void&nbsp;&nbsp;&nbsp;&nbsp;(*action)(struct softirq_action *);&nbsp;&nbsp;/*softirq的回调函数*/</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;void&nbsp;&nbsp;&nbsp;&nbsp;*data; /*传入action的参数*/</p> 
+   <p align="left">};</p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">Struct softirq_action是每个softirq的配置结构，一般在系统启动的时候，6个不同的softirq，会通过函数open_softirq()来注册自己的softirq_action，实现很简单：</p> 
+   <p align="left">void open_softirq(int nr, void (*action)(struct softirq_action*), void *data)</p> 
+   <p align="left">{</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;softirq_vec[nr].data = data;</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;softirq_vec[nr].action = action;</p> 
+   <p align="left">}</p> 
+   <p align="left">关键是传入的函数指针，具体指明了该softirq要实现的功能或要做的动作。</p> 
+   <p align="left">这里分开看下这六个注册点：</p> 
+   <p align="left">Net/core/dev.c中的net_dev_init()里面注册了网络层需要用到的收包和发包的两个softirq：</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;open_softirq(NET_TX_SOFTIRQ, net_tx_action, NULL);</p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;open_softirq(NET_RX_SOFTIRQ, net_rx_action, NULL);</p> 
+   <p align="left">对应的函数指针为net_tx_action和net_rx_action,具体功能就不在本文的范围之内的。</p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">Driver/scsi/scsi.c中init_scsi()注册了SCSI_SOFTIRQ</p> 
+   <p align="left">open_softirq(SCSI_SOFTIRQ, scsi_softirq, NULL);</p> 
+   <p>&nbsp;</p> 
+   <p>start_kernel()&nbsp;àsiftirq_init()&nbsp;中注册了两种tasklet，一种是高优先级的tasklet，一直是低优先级的tasklet：</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open_softirq(TASKLET_SOFTIRQ, tasklet_action, NULL);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open_softirq(HI_SOFTIRQ, tasklet_hi_action, NULL);</p> 
+   <p>&nbsp;</p> 
+   <p>start_kernel()&nbsp;àinit_timers()&nbsp;中注册了TIMER_SOFTIRQ</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open_softirq(TIMER_SOFTIRQ, run_timer_softirq, NULL);</p> 
+   <p>&nbsp;</p> 
+   <p>2.&nbsp;softirq运行时机：</p> 
+   <p>系统在运行过程中，会在合适的地方使用函数local_softirq_pending()检查系统是否有softirq需要处理；需要时会调用函数do_softirq()进行处理。这些检查点主要包括以下几个地方：</p> 
+   <p>(1)中断过程退出函数irq_exit()；</p> 
+   <p>(2)内核线程ksoftirqd；</p> 
+   <p>(3)内核网络子系统中显示调用；</p> 
+   <p>(4)函数local_bh_enable().</p> 
+   <p>&nbsp;</p> 
+   <p>先前我们分析irq_cpustat_t结构的时候，看到__softirq_pending字段。这是一个32位无符号的变量，对应Linux中32种softirq是否被上半部触发了(为1表示被触发，为0表示未被触发)。那么在softirq运行之前肯定就有地方设置了这个变量的各个位，才会触发到softirq运行。这个触发动作一般是在上半部中进行的，即上半部通过系统，还有下半部需要运行。触发函数如下：</p> 
+   <p>#define __raise_softirq_irqoff(nr) do { or_softirq_pending(1UL &lt;&lt; (nr)); } while (0)</p> 
+   <p>#define or_softirq_pending(x)&nbsp;&nbsp;(local_softirq_pending() |= (x))</p> 
+   <p>#define local_softirq_pending() \</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__IRQ_STAT(smp_processor_id(), __softirq_pending)</p> 
+   <p>#define __IRQ_STAT(cpu, member)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(irq_stat[cpu].member)</p> 
+   <p>由此可以看出，&nbsp;&nbsp;__raise_softirq_irqoff(nr)实际上是把当前cpu的per-cpu变量irq_stat的__softirq_pending&nbsp;的从右往左数的第nr位置1，这样系统就知道某个softirq需要在某个时刻运行了。</p> 
+   <p>&nbsp;</p> 
+   <p>当然，__raise_sofritq_irqoff()被很多地方封装过，不同子系统用自己封装的函数，比如网络子系统就用netif_rx_reschedule和net_rx_action来激活softirq。</p> 
+   <p>&nbsp;3.softirq的执行分析：</p> 
+   <p>我们先提到了softirq在四个地方有可能运行，最常见的就是中断过程退出函数irq_exit()，我们下面分析之，其他的触发点请大家对照代码自行分析：</p> 
+   <p>&nbsp;</p> 
+   <p>void irq_exit(void)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;account_system_vtime(current);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sub_preempt_count(IRQ_EXIT_OFFSET);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*如果在上半部中设置了per-cpu变量irq_stat的__softirq_pending字段，则运行下半部的处理函数，&nbsp;从这里也可以看出，上半部和下半部一定是运行在同一个cpu上，因为上半部中是设置了per-cpu变量irq_stat本地cpu副本中的__softirq_pending中的位，而下半部也只是判断本地cpu的__sofrirq_pending中的位。这样有效的利用了cpu cache的特性*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (!in_interrupt() &amp;&amp; local_softirq_pending())</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;invoke_softirq();</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;preempt_enable_no_resched();</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;Invoke_sofirq()àdo_softirq()</p> 
+   <p>&nbsp;</p> 
+   <p>asmlinkage void do_softirq(void)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__u32 pending;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;unsigned long flags;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*本地cpu中，softirq不能在中断环境中运行，这个中断环境包括了上半部和下半部，所以这里保证了同一个cpu上，下半部是不会被重入的，但不能保证其他cpu上的同时运行同一个softirq处理。所以编程人员必须让自己编写的softirq处理函数可重入，以防SMP系统中同时运行这些softirq导致数据出现不一致性*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (in_interrupt())</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_save(flags);&nbsp;&nbsp;/*关中断*/</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pending = local_softirq_pending(); /*取得per-cpu变量irq_stat本地cpu副本的__softirq_pending的值*/</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (pending) /*如果有本地cpu有softirq挂起需要处理，则通过__do_softirq()运行之,否则恢复中断并退出*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__do_softirq();</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_restore(flags);&nbsp;&nbsp;/*恢复开中断*/</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>关键是__do_softirq()</p> 
+   <p>asmlinkage void __do_softirq(void)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;struct softirq_action *h;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__u32 pending;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;int max_restart = MAX_SOFTIRQ_RESTART;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;int cpu;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pending = local_softirq_pending();</p> 
+   <p>&nbsp;/*这个地方加local_bh_disable的原因是softirq的处理必须是串行的，又因为softirq的执行期间中断是打开的，所以当另一个中断被执行的话在in_interrupt函数上面就会发现这里已经有在执行了，就会自动退出*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_bh_disable();</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cpu = smp_processor_id();</p> 
+   <p>restart:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* Reset the pending bitmask before enabling irqs */</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*把per-cpu变量&nbsp;irq_stat的本地cpu副本的__softirq_pengding字段清0，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;表示代码有信心在这一次处理中把本地cpu上挂起的所有softirq都处理掉(有信心只是开个玩笑;)*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;set_softirq_pending(0);</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_enable(); /*保证下半部要在中断打开的情况下进行，否则下半部就失去意义了*/</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;h = softirq_vec; /*softirq_vec是一个全局数组(有32个元素)，存放了32种softirq的处理函数*/</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*遍历unsigned int pengding的每一位，如果有被置为1，则运行对应的下半部处理函数action*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;do {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (pending &amp; 1) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*action是一个处理队列，对于非tasklet的softirq来说只有一个元素，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;但对于tasklet来说，就有N个函数需要处理*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;h-&gt;action(h);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rcu_bh_qsctr_inc(cpu);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;h++;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pending &gt;&gt;= 1;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;} while (pending);</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_disable();&nbsp;&nbsp;/*关闭中断*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*因为下半部是在开中断的环境中运行的，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;所以有可能在运行了softirq A以后，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;然后在运行其他的softirq B，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;这时又产生A的硬件中断(A和B在同一个cpu中产生)，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;而在A的上半部中又设置了per-cpu变量irq_stat的本地</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cpu副本的irq_stat的__softirq_pending的对应的bit，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;所以代码运行到这里又发现__softirq_pending不0，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;所以要重做处理。这样的情况最多执行max_restart次，因为</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;如果不限次数的运行下去，中断就一直不返回，那么进程</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;就得不到调度，系统性能会大大受影响。所以运行max_restart次以后，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;如果这样的情况还在一直发生，那么就唤醒per-cpu thread来专门执行</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;这些下半部，注意，在per-cpu thread中处理的中断下半部，是可以睡眠</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;的，但是编程人员无法掌握他编写的softirq处理程序是在irq_exit()中处理还是</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;在per-cpu thread中处理，所以一般都不会有睡眠的可能(编程人员需要保证</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;这一点)*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pending = local_softirq_pending();</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (pending &amp;&amp; --max_restart)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;goto restart;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (pending)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;wakeup_softirqd();</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__local_bh_enable(); /*enable下半部运行*/</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>这里就不画流程图了，关键是要仔细的分析几个中断关闭和中断使能的时机，以及softirq是否可以重入的问题。</p> 
+   <p>&nbsp;</p> 
+   <p>三总结</p> 
+   <p>本文分析了softirq运行的时间点，以及softirq是怎样被cpu调度的。后面还要继续分析tasklet的实现，tasklet实际上就是凌驾在softirq机制上的，它占用了Linux现有6种softirq的2种（优先级最高的和优先级最低的）。</p> 
+   <p>要特别注意的是：softirq处理函数也不能睡眠，因为它也是运行在中断上下文环境中的（不考虑ksoftirqd线程）。</p> 
+   <p>一、为什么要进入tasklet</p> 
+   <p>我们在softirq的文章中分析过，在SMP系统中，任何一个处理器在响应外设中断请求，完成中断上半部处理后，都可以调用函数do_softirq()来处理构建在softirq机制上的下半部。也就是说，softirq处理函数在SMP系统中是可以并行执行的，这要求使用softirq机制的下半部必须是多处理器可重入的。这对于一般的驱动程序开发者而言，&nbsp;事情会变得复杂化、难度增大。为了降低驱动开发难度必须提供一套有效的机制，tasklet就是为了解决这一问题而出现的。</p> 
+   <p>&nbsp;</p> 
+   <p>二、tasklet实现分析</p> 
+   <p>1.&nbsp;一个实例</p> 
+   <p>#include</p> 
+   <p>#include</p> 
+   <p>#include</p> 
+   <p>#include</p> 
+   <p>#include</p> 
+   <p>#include</p> 
+   <p>#include</p> 
+   <p>&nbsp;</p> 
+   <p>static struct tasklet_struct my_tasklet;&nbsp;&nbsp;/*定义自己的tasklet_struct变量*/</p> 
+   <p>&nbsp;</p> 
+   <p>static void tasklet_handler (unsigned long data)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_ALERT “tasklet_handler is running.\n”);</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>static int __init test_init(void)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tasklet_init(&amp;my_tasklet, tasklet_handler, 0); /*挂入钩子函数tasklet_handler*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tasklet_schedule(&amp;my_tasklet); /*&nbsp;触发softirq的TASKLET_SOFTIRQ,在下一次运行softirq时运行这个tasklet*/&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return 0;</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>static void __exit test_exit(void)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tasklet_kill(&amp;my_tasklet); /*禁止该tasklet的运行*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printk(KERN_ALERT “test_exit running.\n”);</p> 
+   <p>}</p> 
+   <p>MODULE_LICENSE(“GPL”);</p> 
+   <p>&nbsp;</p> 
+   <p>module_init(test_init);</p> 
+   <p>module_exit(test_exit);</p> 
+   <p>&nbsp;</p> 
+   <p>运行结果如图：</p> 
+   <p>&nbsp;</p> 
+   <div>
+    &nbsp;
+   </div> 
+   <p>&nbsp;</p> 
+   <p>2.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;实现分析</p> 
+   <p>我们就从上面这个实例入手来分析tasklet的实现，</p> 
+   <p>在init中，通过函数tasklet_init()来初始化自己需要注册到系统中的tasklet结构：</p> 
+   <p>void tasklet_init(struct tasklet_struct *t,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;void (*func)(unsigned long), unsigned long data)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;t-&gt;next = NULL;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;t-&gt;state = 0;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;atomic_set(&amp;t-&gt;count, 0);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;t-&gt;func = func;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;t-&gt;data = data;</p> 
+   <p>}</p> 
+   <p>很简单，只是初始化tasklet_struct的各个字段，挂上钩子函数。</p> 
+   <p>&nbsp;</p> 
+   <p>然后，通过函数tasklet_schedule()来触发该tasklet</p> 
+   <p>static inline void tasklet_schedule(struct tasklet_struct *t)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*如果需要调度的tasklet的state不为TASKLET_STATE_SCHED，则触发之。这样，就保证了多个cpu不可能同时运行同一个tasklet，因为如果一个tasklet被调度过一次，那么它的state字段就会被设置TASKLET_STATE_SCHED标记，然后插入per-cpu变量的链表中。如果这时另外一个cpu也去调度该tasklet，那么就会在下面的if语句中被挡掉，不会运行到__tasklet_schedule()，从而不会插入到另外这个cpu的per-cpu变量的链表中，就不会被运行到。所以这里是保证了tasklet编写的函数不用是可重入的，这样就方便了编程人员。(注意，softirq机制需要编写可重入的函数)*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (!test_and_set_bit(TASKLET_STATE_SCHED, &amp;t-&gt;state))</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__tasklet_schedule(t);</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>我们来看__tasklet_schedule()的实现：</p> 
+   <p>void fastcall __tasklet_schedule(struct tasklet_struct *t)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;unsigned long flags;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_save(flags);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*把需要添加进系统的自己编写的struct tasklet_struc加入</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;到per-cpu变量tasklet_vec的本地副本的链表的表头中*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;t-&gt;next = __get_cpu_var(tasklet_vec).list;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__get_cpu_var(tasklet_vec).list = t;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;raise_softirq_irqoff(TASKLET_SOFTIRQ); /*触发softirq的TASKLET_SOFTIRQ*/&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_restore(flags);</p> 
+   <p>}</p> 
+   <p>这段代码也非常简单，只是把自己要注册到系统中的tasklet_struct挂入到per-cpu变量tasklet_vec的list中而已，这里是挂到链表首部。因为需要修改per-cpu变量tasklet_vec的list的值，为了防止中断处理程序也去修改这个值，所以要加自旋锁，为了保持数据的一致性。</p> 
+   <p>然后通过raise_softirq_irqoff()设置低优先级的tasklet对应的softirq标记，以便cpu在运行softirq的时候运行到tasklet，因为tasklet是凌驾在softirq机制之上的。</p> 
+   <p>&nbsp;</p> 
+   <p>OK，这里就完成了我们自己的my_tasklet的注册和触发对应的softirq，那我们现在就应该分析tasklet的运行了。</p> 
+   <p>我们前面提到，tasklet是凌驾在softirq机制之上的。还记得前面说到了Linux中有六种softirq，优先级最高的是HI_SOFTIRQ，优先级最低的是TASKLET_SOFTIRQ,一般情况下我们是利用TASKLET_SOFTIRQ来实现tasklet的功能。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open_softirq(TASKLET_SOFTIRQ, tasklet_action, NULL);中定义了处理tasklet的处理函数tasklet_action.所以我们要分析这个函数的实现：</p> 
+   <p>&nbsp;</p> 
+   <p>static void tasklet_action(struct softirq_action *a)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;struct tasklet_struct *list;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*把per-cpu变量tasklet_vec的本地副本上的list设置为NULL,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;由于这里要修改per-cpu变量，为了防止中断处理程序</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;或者内核抢占造成该数据的不一致性，所以这里禁止中断再修改数据</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;，然后再开启中断.(注意，关闭本地中断的副作用就是禁止内核抢占，</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;因为内核抢占只有两个时间点: 1.中断返回到内核态;2.手动使能内核抢占。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;明显程序员不会在临界区内手动使能内核抢占，所以关闭本地中断的</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;副作用就是禁止内核抢占)*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_disable();</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;list = __get_cpu_var(tasklet_vec).list;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__get_cpu_var(tasklet_vec).list = NULL;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_enable();</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*遍历tasklet链表，让链表上挂入的函数全部执行完成*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;while (list) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;struct tasklet_struct *t = list;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;list = list-&gt;next;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (tasklet_trylock(t)) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (!atomic_read(&amp;t-&gt;count)) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (!test_and_clear_bit(TASKLET_STATE_SCHED, &amp;t-&gt;state))</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;BUG();</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;t-&gt;func(t-&gt;data); /*真正运行user注册的tasklet函数的地方*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tasklet_unlock(t);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;continue;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tasklet_unlock(t);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*这里相当于把tasklet的list指针从链表中后移了(可以自行画图分析),</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;所以刚才运行过的tasklet回调函数以后不会再次运行，除非用于再次</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;通过tasklet_schedule()注册之*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_disable();</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;t-&gt;next = __get_cpu_var(tasklet_vec).list;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__get_cpu_var(tasklet_vec).list = t;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__raise_softirq_irqoff(TASKLET_SOFTIRQ);&nbsp;&nbsp;/*再一次触发tasklet对应的softirq，使下次系统运行softirq时能运行到tasklet*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;local_irq_enable();</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>}</p> 
+   <p>运行流程是不是很简单呢？呵呵。只要注意到加锁的时机就OK了！</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>三、总结</p> 
+   <p>Tasklet与一般的softirq的比较重要的一个区别在于: softirq处理函数需要被编写成可重入的，因为多个cpu可能同时执行同一个softirq处理函数，为了防止数据出现不一致性，所以softirq的处理函数必须被编写成可重入。最典型的就是要在softirq处理函数中用spinlock保护一些共享资源。而tasklet机制本身就保证了tasklet处理函数不会同时被多个cpu调度到。因为在tasklet_schedule()中，就保证了多个cpu不可能同时调度到同一个tasklet处理函数，这样tasklet就不用编写成可重入的处理函数，这样就大大减轻了kernel编程人员的负担。</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

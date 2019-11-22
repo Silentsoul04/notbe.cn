@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux异步IO【转】 « NotBeCN</title>
+  <meta name="description" content="             &nbsp;    转自：http://blog.chinaunix.net/uid-24567872-id-87676.html    Linux® 中最常用的输入/输出（I/O）模型是同步 I/O。在这个模型中，当请求发出之后，应用程序就会阻塞，直到请求满足为止。这是很好的一种解决方...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/09/06/weixin_34168700_90132933.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux异步IO【转】</h1>
+    <p class="post-meta">Sep 6, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>&nbsp;</p> 
+   <p>转自：<a href="http://blog.chinaunix.net/uid-24567872-id-87676.html" rel="nofollow">http://blog.chinaunix.net/uid-24567872-id-87676.html</a></p> 
+   <p><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">Linux® 中最常用的输入/输出（I/O）模型是同步 I/O。在这个模型中，当请求发出之后，应用程序就会阻塞，直到请求满足为止。这是很好的一种解决方案，因为调用应用程序在等待 I/O 请求完成时不需要使用任何中央处理单元（CPU）。但是在某些情况中，I/O 请求可能需要与其他进程产生交叠。可移植操作系统接口（POSIX）异步 I/O（AIO）应用程序接口（API）就提供了这种功能。在本文中，我们将对这个 API 概要进行介绍，并来了解一下如何使用它。</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N10056"></a>AIO 简介</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">Linux 异步 I/O 是 Linux 内核中提供的一个相当新的增强。它是 2.6 版本内核的一个标准特性，但是我们在 2.4 版本内核的补丁中也可以找到它。AIO 背后的基本思想是允许进程发起很多 I/O 操作，而不用阻塞或等待任何操作完成。稍后或在接收到 I/O 操作完成的通知时，进程就可以检索 I/O 操作的结果。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N10060"></a>I/O 模型</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在深入介绍 AIO API 之前，让我们先来探索一下 Linux 上可以使用的不同 I/O 模型。这并不是一个详尽的介绍，但是我们将试图介绍最常用的一些模型来解释它们与异步 I/O 之间的区别。图 1 给出了同步和异步模型，以及阻塞和非阻塞的模型。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="fig1"></a><strong>图 1. 基本 Linux I/O 模型的简单矩阵</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_62da0c7a07594deebfee5e538995fe34.gif" alt="基本 Linux I/O 模型的简单矩阵" width="386" height="225"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">每个 I/O 模型都有自己的使用模式，它们对于特定的应用程序都有自己的优点。本节将简要对其一一进行介绍。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N1007C"></a>同步阻塞 I/O</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="10" height="1"></td> 
+      <td> 
+       <table border="1">
+        <tbody>
+         <tr>
+          <td> <a style="color:#565656;" name="N10086"></a><strong>I/O 密集型与 CPU 密集型进程的比较</strong><br><p>I/O 密集型进程所执行的 I/O 操作比执行的处理操作更多。CPU 密集型的进程所执行的处理操作比 I/O 操作更多。Linux 2.6 的调度器实际上更加偏爱 I/O 密集型的进程，因为它们通常会发起一个 I/O 操作，然后进行阻塞，这就意味着其他工作都可以在两者之间有效地交错进行。</p> </td> 
+         </tr>
+        </tbody>
+       </table></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">最常用的一个模型是同步阻塞 I/O 模型。在这个模型中，用户空间的应用程序执行一个系统调用，这会导致应用程序阻塞。这意味着应用程序会一直阻塞，直到系统调用完成为止（数据传输完成或发生错误）。调用应用程序处于一种不再消费 CPU 而只是简单等待响应的状态，因此从处理的角度来看，这是非常有效的。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">图 2 给出了传统的阻塞 I/O 模型，这也是目前应用程序中最为常用的一种模型。其行为非常容易理解，其用法对于典型的应用程序来说都非常有效。在调用&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;系统调用时，应用程序会阻塞并对内核进行上下文切换。然后会触发读操作，当响应返回时（从我们正在从中读取的设备中返回），数据就被移动到用户空间的缓冲区中。然后应用程序就会解除阻塞（<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用返回）。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="fig2"></a><strong>图 2. 同步阻塞 I/O 模型的典型流程</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_c05bd7fe7750d435051e48205722b9f4.gif" alt="同步阻塞 I/O 模型的典型流程" width="538" height="340"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">从应用程序的角度来说，<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用会延续很长时间。实际上，在内核执行读操作和其他工作时，应用程序的确会被阻塞。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N100B3"></a>同步非阻塞 I/O</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">同步阻塞 I/O 的一种效率稍低的变种是同步非阻塞 I/O。在这种模型中，设备是以非阻塞的形式打开的。这意味着 I/O 操作不会立即完成，<code><span style="font-family:NSimsun;">read</span></code>&nbsp;操作可能会返回一个错误代码，说明这个命令不能立即满足（<code><span style="font-family:NSimsun;">EAGAIN</span></code>&nbsp;或<code><span style="font-family:NSimsun;">EWOULDBLOCK</span></code>），如图 3 所示。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="fig3"></a><strong>图 3. 同步非阻塞 I/O 模型的典型流程</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_2f338438542ce34e2fceb10966ef7a71.gif" alt="同步非阻塞 I/O 模型的典型流程" width="474" height="340"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">非阻塞的实现是 I/O 命令可能并不会立即满足，需要应用程序调用许多次来等待操作完成。这可能效率不高，因为在很多情况下，当内核执行这个命令时，应用程序必须要进行忙碌等待，直到数据可用为止，或者试图执行其他工作。正如图 3 所示的一样，这个方法可以引入 I/O 操作的延时，因为数据在内核中变为可用到用户调用&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;返回数据之间存在一定的间隔，这会导致整体数据吞吐量的降低。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N100DF"></a>异步阻塞 I/O</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">另外一个阻塞解决方案是带有阻塞通知的非阻塞 I/O。在这种模型中，配置的是非阻塞 I/O，然后使用阻塞&nbsp;<code><span style="font-family:NSimsun;">select</span></code>&nbsp;系统调用来确定一个 I/O 描述符何时有操作。使&nbsp;<code><span style="font-family:NSimsun;">select</span></code>&nbsp;调用非常有趣的是它可以用来为多个描述符提供通知，而不仅仅为一个描述符提供通知。对于每个提示符来说，我们可以请求这个描述符可以写数据、有读数据可用以及是否发生错误的通知。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="fig4"></a><strong>图 4. 异步阻塞 I/O 模型的典型流程 (select)</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_0855a1508418e6ca6cb4b933f2dc3e61.gif" alt="异步阻塞 I/O 模型的典型流程" width="541" height="340"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">select</span></code>&nbsp;调用的主要问题是它的效率不是非常高。尽管这是异步通知使用的一种方便模型，但是对于高性能的 I/O 操作来说不建议使用。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N10106"></a>异步非阻塞 I/O（AIO）</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">最后，异步非阻塞 I/O 模型是一种处理与 I/O 重叠进行的模型。读请求会立即返回，说明&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;请求已经成功发起了。在后台完成读操作时，应用程序然后会执行其他处理操作。当&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;的响应到达时，就会产生一个信号或执行一个基于线程的回调函数来完成这次 I/O 处理过程。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="fig5"></a><strong>图 5. 异步非阻塞 I/O 模型的典型流程</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_1d5d9ee387fab4bc680d85f9489ca1b7.gif" alt="异步非阻塞 I/O 模型的典型流程" width="481" height="340"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在一个进程中为了执行多个 I/O 请求而对计算操作和 I/O 处理进行重叠处理的能力利用了处理速度与 I/O 速度之间的差异。当一个或多个 I/O 请求挂起时，CPU 可以执行其他任务；或者更为常见的是，在发起其他 I/O 的同时对已经完成的 I/O 进行操作。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">下一节将深入介绍这种模型，探索这种模型使用的 API，然后展示几个命令。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N1012D"></a>异步 I/O 的动机</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">从前面 I/O 模型的分类中，我们可以看出 AIO 的动机。这种阻塞模型需要在 I/O 操作开始时阻塞应用程序。这意味着不可能同时重叠进行处理和 I/O 操作。同步非阻塞模型允许处理和 I/O 操作重叠进行，但是这需要应用程序根据重现的规则来检查 I/O 操作的状态。这样就剩下异步非阻塞 I/O 了，它允许处理和 I/O 操作重叠进行，包括 I/O 操作完成的通知。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">除了需要阻塞之外，<code><span style="font-family:NSimsun;">select</span></code>&nbsp;函数所提供的功能（异步阻塞 I/O）与 AIO 类似。不过，它是对通知事件进行阻塞，而不是对 I/O 调用进行阻塞。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N1013D"></a>Linux 上的 AIO 简介</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">本节将探索 Linux 的异步 I/O 模型，从而帮助我们理解如何在应用程序中使用这种技术。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在传统的 I/O 模型中，有一个使用惟一句柄标识的 I/O 通道。在 UNIX® 中，这些句柄是文件描述符（这对等同于文件、管道、套接字等等）。在阻塞 I/O 中，我们发起了一次传输操作，当传输操作完成或发生错误时，系统调用就会返回。</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="10" height="1"></td> 
+      <td> 
+       <table border="1">
+        <tbody>
+         <tr>
+          <td> <a style="color:#565656;" name="N1014F"></a><strong>Linux 上的 AIO</strong><br><p>AIO 在 2.5 版本的内核中首次出现，现在已经是 2.6 版本的产品内核的一个标准特性了。</p> </td> 
+         </tr>
+        </tbody>
+       </table></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在异步非阻塞 I/O 中，我们可以同时发起多个传输操作。这需要每个传输操作都有惟一的上下文，这样我们才能在它们完成时区分到底是哪个传输操作完成了。在 AIO 中，这是一个&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>（AIO I/O Control Block）结构。这个结构包含了有关传输的所有信息，包括为数据准备的用户缓冲区。在产生 I/O （称为完成）通知时，<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;结构就被用来惟一标识所完成的 I/O 操作。这个 API 的展示显示了如何使用它。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N10163"></a>AIO API</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">AIO 接口的 API 非常简单，但是它为数据传输提供了必需的功能，并给出了两个不同的通知模型。表 1 给出了 AIO 的接口函数，本节稍后会更详细进行介绍。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="table1"></a><strong>表 1. AIO 接口 API</strong></p> 
+   <table class="data-table-2" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <th>API 函数</th> 
+      <th>说明</th> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_read</span></code></td> 
+      <td>请求异步读操作</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_error</span></code></td> 
+      <td>检查异步请求的状态</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_return</span></code></td> 
+      <td>获得完成的异步请求的返回状态</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_write</span></code></td> 
+      <td>请求异步写操作</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_suspend</span></code></td> 
+      <td>挂起调用进程，直到一个或多个异步请求已经完成（或失败）</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_cancel</span></code></td> 
+      <td>取消异步 I/O 请求</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">lio_listio</span></code></td> 
+      <td>发起一系列 I/O 操作</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">每个 API 函数都使用&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;结构开始或检查。这个结构有很多元素，但是清单 1 仅仅给出了需要（或可以）使用的元素。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="listing1"></a><strong>清单 1. aiocb 结构中相关的域&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>struct aiocb {<br><br>  int aio_fildes;               // File Descriptor<br>  int aio_lio_opcode;           // Valid only for lio_listio (r/w/nop)<br>  volatile void *aio_buf;       // Data Buffer<br>  size_t aio_nbytes;            // Number of Bytes in Data Buffer<br>  struct sigevent aio_sigevent; // Notification Structure<br><br>  /* Internal fields */<br>  ...<br><br>};</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">sigevent</span></code>&nbsp;结构告诉 AIO 在 I/O 操作完成时应该执行什么操作。我们将在 AIO 的展示中对这个结构进行探索。现在我们将展示各个 AIO 的 API 函数是如何工作的，以及我们应该如何使用它们。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N101F0"></a>aio_read</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;函数请求对一个有效的文件描述符进行异步读操作。这个文件描述符可以表示一个文件、套接字甚至管道。<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;函数的原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_read</span>( struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;函数在请求进行排队之后会立即返回。如果执行成功，返回值就为 0；如果出现错误，返回值就为 -1，并设置&nbsp;<code><span style="font-family:NSimsun;">errno</span></code>&nbsp;的值。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">要执行读操作，应用程序必须对&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;结构进行初始化。下面这个简短的例子就展示了如何填充&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;请求结构，并使用&nbsp;<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;来执行异步读请求（现在暂时忽略通知）操作。它还展示了&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;的用法，不过我们将稍后再作解释。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="listing2"></a><strong>清单 2. 使用 aio_read 进行异步读操作的例子&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>#include <br><br>...<br><br>  int fd, ret;<br>  struct aiocb my_aiocb;<br><br>  fd = open( "file.txt", O_RDONLY );<br>  if (fd &lt; 0) perror("open");<br><br>  /* Zero out the aiocb structure (recommended) */<br>  bzero( (char *)&amp;my_aiocb, sizeof(struct aiocb) );<br><br>  /* Allocate a data buffer for the aiocb request */<br>  my_aiocb.aio_buf = malloc(BUFSIZE+1);<br>  if (!my_aiocb.aio_buf) perror("malloc");<br><br>  /* Initialize the necessary fields in the aiocb */<br>  my_aiocb.aio_fildes = fd;<br>  my_aiocb.aio_nbytes = BUFSIZE;<br>  my_aiocb.aio_offset = 0;<br><br>  ret = <span class="boldcode">aio_read</span>( &amp;my_aiocb );<br>  if (ret &lt; 0) perror("aio_read");<br><br>  while ( <span class="boldcode">aio_error</span>( &amp;my_aiocb ) == EINPROGRESS ) ;<br><br>  if ((ret = aio_return( &amp;my_iocb )) &gt; 0) {<br>    /* got ret bytes on the read */<br>  } else {<br>    /* read failed, consult errno */<br>  }<br><br></pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在清单 2 中，在打开要从中读取数据的文件之后，我们就清空了&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;结构，然后分配一个数据缓冲区。并将对这个数据缓冲区的引用放到&nbsp;<code><span style="font-family:NSimsun;">aio_buf</span></code>&nbsp;中。然后，我们将&nbsp;<code><span style="font-family:NSimsun;">aio_nbytes</span></code>&nbsp;初始化成缓冲区的大小。并将<code><span style="font-family:NSimsun;">aio_offset</span></code>&nbsp;设置成 0（该文件中的第一个偏移量）。我们将&nbsp;<code><span style="font-family:NSimsun;">aio_fildes</span></code>&nbsp;设置为从中读取数据的文件描述符。在设置这些域之后，就调用&nbsp;<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;请求进行读操作。我们然后可以调用&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;来确定&nbsp;<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;的状态。只要状态是&nbsp;<code><span style="font-family:NSimsun;">EINPROGRESS</span></code>，就一直忙碌等待，直到状态发生变化为止。现在，请求可能成功，也可能失败。</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="10" height="1"></td> 
+      <td> 
+       <table border="1">
+        <tbody>
+         <tr>
+          <td> <a style="color:#565656;" name="N10260"></a><strong>使用 AIO 接口来编译程序</strong><br><p>我们可以在&nbsp;<code><span style="font-family:NSimsun;">aio.h</span></code>&nbsp;头文件中找到函数原型和其他需要的符号。在编译使用这种接口的程序时，我们必须使用 POSIX 实时扩展库（<code><span style="font-family:NSimsun;">librt</span></code>）。</p> </td> 
+         </tr>
+        </tbody>
+       </table></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">注意使用这个 API 与标准的库函数从文件中读取内容是非常相似的。除了&nbsp;<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;的一些异步特性之外，另外一个区别是读操作偏移量的设置。在传统的&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用中，偏移量是在文件描述符上下文中进行维护的。对于每个读操作来说，偏移量都需要进行更新，这样后续的读操作才能对下一块数据进行寻址。对于异步 I/O 操作来说这是不可能的，因为我们可以同时执行很多读请求，因此必须为每个特定的读请求都指定偏移量。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N1027C"></a>aio_error</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;函数被用来确定请求的状态。其原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_error</span>( struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">这个函数可以返回以下内容：</p> 
+   <ul style="list-style:none;color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <li style="list-style:disc outside;"> <code><span style="font-family:NSimsun;">EINPROGRESS</span></code>，说明请求尚未完成</li> 
+    <li style="list-style:disc outside;"> <code><span style="font-family:NSimsun;">ECANCELLED</span></code>，说明请求被应用程序取消了</li> 
+    <li style="list-style:disc outside;"> <code><span style="font-family:NSimsun;">-1</span></code>，说明发生了错误，具体错误原因可以查阅&nbsp;<code><span style="font-family:NSimsun;">errno</span></code> </li> 
+   </ul>
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N102AC"></a>aio_return</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">异步 I/O 和标准块 I/O 之间的另外一个区别是我们不能立即访问这个函数的返回状态，因为我们并没有阻塞在&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用上。在标准的&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用中，返回状态是在该函数返回时提供的。但是在异步 I/O 中，我们要使用<code><span style="font-family:NSimsun;">aio_return</span></code>&nbsp;函数。这个函数的原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">ssize_t <span class="boldcode">aio_return</span>( struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">只有在&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;调用确定请求已经完成（可能成功，也可能发生了错误）之后，才会调用这个函数。<code><span style="font-family:NSimsun;">aio_return</span></code>&nbsp;的返回值就等价于同步情况中&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;或&nbsp;<code><span style="font-family:NSimsun;">write</span></code>&nbsp;系统调用的返回值（所传输的字节数，如果发生错误，返回值就为&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>）。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N102E1"></a>aio_write</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_write</span></code>&nbsp;函数用来请求一个异步写操作。其函数原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_write</span>( struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_write</span></code>&nbsp;函数会立即返回，说明请求已经进行排队（成功时返回值为&nbsp;<code><span style="font-family:NSimsun;">0</span></code>，失败时返回值为&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>，并相应地设置&nbsp;<code><span style="font-family:NSimsun;">errno</span></code>）。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">这与&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;系统调用类似，但是有一点不一样的行为需要注意。回想一下对于&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用来说，要使用的偏移量是非常重要的。然而，对于&nbsp;<code><span style="font-family:NSimsun;">write</span></code>&nbsp;来说，这个偏移量只有在没有设置&nbsp;<code><span style="font-family:NSimsun;">O_APPEND</span></code>&nbsp;选项的文件上下文中才会非常重要。如果设置了&nbsp;<code><span style="font-family:NSimsun;">O_APPEND</span></code>，那么这个偏移量就会被忽略，数据都会被附加到文件的末尾。否则，<code><span style="font-family:NSimsun;">aio_offset</span></code>&nbsp;域就确定了数据在要写入的文件中的偏移量。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N10323"></a>aio_suspend</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">我们可以使用&nbsp;<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;函数来挂起（或阻塞）调用进程，直到异步请求完成为止，此时会产生一个信号，或者发生其他超时操作。调用者提供了一个&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用列表，其中任何一个完成都会导致&nbsp;<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;返回。<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;的函数原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_suspend</span>( const struct aiocb *const cblist[],<br>                  int n, const struct timespec *timeout );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;的使用非常简单。我们要提供一个&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用列表。如果任何一个完成了，这个调用就会返回&nbsp;<code><span style="font-family:NSimsun;">0</span></code>。否则就会返回&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>，说明发生了错误。请参看清单 3。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="listing3"></a><strong>清单 3. 使用 aio_suspend 函数阻塞异步 I/O&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>struct aioct *cblist[MAX_LIST]<br><br>/* Clear the list. */<br>bzero( (char *)cblist, sizeof(cblist) );<br><br>/* Load one or more references into the list */<br>cblist[0] = &amp;my_aiocb;<br><br>ret = <span class="boldcode">aio_read</span>( &amp;my_aiocb );<br><br>ret = <span class="boldcode">aio_suspend</span>( cblist, MAX_LIST, NULL );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">注意，<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;的第二个参数是&nbsp;<code><span style="font-family:NSimsun;">cblist</span></code>&nbsp;中元素的个数，而不是&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用的个数。<code><span style="font-family:NSimsun;">cblist</span></code>&nbsp;中任何&nbsp;<code><span style="font-family:NSimsun;">NULL</span></code>&nbsp;元素都会被&nbsp;<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;忽略。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">如果为&nbsp;<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;提供了超时，而超时情况的确发生了，那么它就会返回&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>，<code><span style="font-family:NSimsun;">errno</span></code>&nbsp;中会包含&nbsp;<code><span style="font-family:NSimsun;">EAGAIN</span></code>。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N10395"></a>aio_cancel</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_cancel</span></code>&nbsp;函数允许我们取消对某个文件描述符执行的一个或所有 I/O 请求。其原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_cancel</span>( int fd, struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">要取消一个请求，我们需要提供文件描述符和&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用。如果这个请求被成功取消了，那么这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_CANCELED</span></code>。如果请求完成了，这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_NOTCANCELED</span></code>。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">要取消对某个给定文件描述符的所有请求，我们需要提供这个文件的描述符，以及一个对&nbsp;<code><span style="font-family:NSimsun;">aiocbp</span></code>&nbsp;的&nbsp;<code><span style="font-family:NSimsun;">NULL</span></code>&nbsp;引用。如果所有的请求都取消了，这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_CANCELED</span></code>；如果至少有一个请求没有被取消，那么这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_NOT_CANCELED</span></code>；如果没有一个请求可以被取消，那么这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_ALLDONE</span></code>。我们然后可以使用&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;来验证每个 AIO 请求。如果这个请求已经被取消了，那么&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;就会返回&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>，并且&nbsp;<code><span style="font-family:NSimsun;">errno</span></code>&nbsp;会被设置为&nbsp;<code><span style="font-family:NSimsun;">ECANCELED</span></code>。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N103E4"></a>lio_listio</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">最后，AIO 提供了一种方法使用&nbsp;<code><span style="font-family:NSimsun;">lio_listio</span></code>&nbsp;API 函数同时发起多个传输。这个函数非常重要，因为这意味着我们可以在一个系统调用（一次内核上下文切换）中启动大量的 I/O 操作。从性能的角度来看，这非常重要，因此值得我们花点时间探索一下。<code><span style="font-family:NSimsun;">lio_listio</span></code>&nbsp;API 函数的原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">lio_listio</span>( int mode, struct aiocb *list[], int nent,<br>                   struct sigevent *sig );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">mode</span></code>&nbsp;参数可以是&nbsp;<code><span style="font-family:NSimsun;">LIO_WAIT</span></code>&nbsp;或&nbsp;<code><span style="font-family:NSimsun;">LIO_NOWAIT</span></code>。<code><span style="font-family:NSimsun;">LIO_WAIT</span></code>&nbsp;会阻塞这个调用，直到所有的 I/O 都完成为止。在操作进行排队之后，<code><span style="font-family:NSimsun;">LIO_NOWAIT</span></code>&nbsp;就会返回。<code><span style="font-family:NSimsun;">list</span></code>&nbsp;是一个&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用的列表，最大元素的个数是由&nbsp;<code><span style="font-family:NSimsun;">nent</span></code>&nbsp;定义的。注意&nbsp;<code><span style="font-family:NSimsun;">list</span></code>&nbsp;的元素可以为&nbsp;<code><span style="font-family:NSimsun;">NULL</span></code>，<code><span style="font-family:NSimsun;">lio_listio</span></code>&nbsp;会将其忽略。<code><span style="font-family:NSimsun;">sigevent</span></code>&nbsp;引用定义了在所有 I/O 操作都完成时产生信号的方法。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">对于&nbsp;<code><span style="font-family:NSimsun;">lio_listio</span></code>&nbsp;的请求与传统的&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;或&nbsp;<code><span style="font-family:NSimsun;">write</span></code>&nbsp;请求在必须指定的操作方面稍有不同，如清单 4 所示。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="listing4"></a><strong>清单 4. 使用 lio_listio 函数发起一系列请求&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br><br>struct aiocb aiocb1, aiocb2;<br>struct aiocb *list[MAX_LIST];<br><br>...<br><br>/* Prepare the first aiocb */<br>aiocb1.aio_fildes = fd;<br>aiocb1.aio_buf = malloc( BUFSIZE+1 );<br>aiocb1.aio_nbytes = BUFSIZE;<br>aiocb1.aio_offset = next_offset;<br>aiocb1.aio_lio_opcode = LIO_READ;<br><br>...<br><br>bzero( (char *)list, sizeof(list) );<br>list[0] = &amp;aiocb1;<br>list[1] = &amp;aiocb2;<br><br>ret = <span class="boldcode">lio_listio</span>( LIO_WAIT, list, MAX_LIST, NULL );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">对于读操作来说，<code><span style="font-family:NSimsun;">aio_lio_opcode</span></code>&nbsp;域的值为&nbsp;<code><span style="font-family:NSimsun;">LIO_READ</span></code>。对于写操作来说，我们要使用&nbsp;<code><span style="font-family:NSimsun;">LIO_WRITE</span></code>，不过&nbsp;<code><span style="font-family:NSimsun;">LIO_NOP</span></code>&nbsp;对于不执行操作来说也是有效的。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N1045F"></a>AIO 通知</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">现在我们已经看过了可用的 AIO 函数，本节将深入介绍对异步通知可以使用的方法。我们将通过信号和函数回调来探索异步函数的通知机制。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N10469"></a>使用信号进行异步通知</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">使用信号进行进程间通信（IPC）是 UNIX 中的一种传统机制，AIO 也可以支持这种机制。在这种范例中，应用程序需要定义信号处理程序，在产生指定的信号时就会调用这个处理程序。应用程序然后配置一个异步请求将在请求完成时产生一个信号。作为信号上下文的一部分，特定的&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;请求被提供用来记录多个可能会出现的请求。清单 5 展示了这种通知方法。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="listing5"></a><strong>清单 5. 使用信号作为 AIO 请求的通知&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>void setup_io( ... )<br>{<br>  int fd;<br>  struct sigaction sig_act;<br>  struct aiocb my_aiocb;<br><br>  ...<br><br>  /* Set up the signal handler */<br>  sigemptyset(&amp;sig_act.sa_mask);<br>  sig_act.sa_flags = SA_SIGINFO;<br>  sig_act.sa_sigaction = aio_completion_handler;<br><br><br>  /* Set up the AIO request */<br>  bzero( (char *)&amp;my_aiocb, sizeof(struct aiocb) );<br>  my_aiocb.aio_fildes = fd;<br>  my_aiocb.aio_buf = malloc(BUF_SIZE+1);<br>  my_aiocb.aio_nbytes = BUF_SIZE;<br>  my_aiocb.aio_offset = next_offset;<br><br>  /* Link the AIO request with the Signal Handler */<br>  my_aiocb.aio_sigevent.sigev_notify = SIGEV_SIGNAL;<br>  my_aiocb.aio_sigevent.sigev_signo = SIGIO;<br>  my_aiocb.aio_sigevent.sigev_value.sival_ptr = &amp;my_aiocb;<br><br>  /* Map the Signal to the Signal Handler */<br>  ret = sigaction( SIGIO, &amp;sig_act, NULL );<br><br>  ...<br><br>  ret = <span class="boldcode">aio_read</span>( &amp;my_aiocb );<br><br>}<br><br><br>void aio_completion_handler( int signo, siginfo_t *info, void *context )<br>{<br>  struct aiocb *req;<br><br><br>  /* Ensure it's our signal */<br>  if (info-&gt;si_signo == SIGIO) {<br><br>    req = (struct aiocb *)info-&gt;si_value.sival_ptr;<br><br>    /* Did the request complete? */<br>    if (<span class="boldcode">aio_error</span>( req ) == 0) {<br><br>      /* Request completed successfully, get the return status */<br>      ret = <span class="boldcode">aio_return</span>( req );<br><br>    }<br><br>  }<br><br>  return;<br>}</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在清单 5 中，我们在&nbsp;<code><span style="font-family:NSimsun;">aio_completion_handler</span></code>&nbsp;函数中设置信号处理程序来捕获&nbsp;<code><span style="font-family:NSimsun;">SIGIO</span></code>&nbsp;信号。然后初始化&nbsp;<code><span style="font-family:NSimsun;">aio_sigevent</span></code>&nbsp;结构产生&nbsp;<code><span style="font-family:NSimsun;">SIGIO</span></code>&nbsp;信号来进行通知（这是通过&nbsp;<code><span style="font-family:NSimsun;">sigev_notify</span></code>&nbsp;中的&nbsp;<code><span style="font-family:NSimsun;">SIGEV_SIGNAL</span></code>&nbsp;定义来指定的）。当读操作完成时，信号处理程序就从该信号的&nbsp;<code><span style="font-family:NSimsun;">si_value</span></code>&nbsp;结构中提取出&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>，并检查错误状态和返回状态来确定 I/O 操作是否完成。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">对于性能来说，这个处理程序也是通过请求下一次异步传输而继续进行 I/O 操作的理想地方。采用这种方式，在一次数据传输完成时，我们就可以立即开始下一次数据传输操作。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N104B0"></a>使用回调函数进行异步通知</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">另外一种通知方式是系统回调函数。这种机制不会为通知而产生一个信号，而是会调用用户空间的一个函数来实现通知功能。我们在&nbsp;<code><span style="font-family:NSimsun;">sigevent</span></code>&nbsp;结构中设置了对&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;的引用，从而可以惟一标识正在完成的特定请求。请参看清单 6。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;" name="listing6"></a><strong>清单 6. 对 AIO 请求使用线程回调通知&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>void setup_io( ... )<br>{<br>  int fd;<br>  struct aiocb my_aiocb;<br><br>  ...<br><br>  /* Set up the AIO request */<br>  bzero( (char *)&amp;my_aiocb, sizeof(struct aiocb) );<br>  my_aiocb.aio_fildes = fd;<br>  my_aiocb.aio_buf = malloc(BUF_SIZE+1);<br>  my_aiocb.aio_nbytes = BUF_SIZE;<br>  my_aiocb.aio_offset = next_offset;<br><br>  /* Link the AIO request with a thread callback */<br>  my_aiocb.aio_sigevent.sigev_notify = SIGEV_THREAD;<br>  my_aiocb.aio_sigevent.notify_function = aio_completion_handler;<br>  my_aiocb.aio_sigevent.notify_attributes = NULL;<br>  my_aiocb.aio_sigevent.sigev_value.sival_ptr = &amp;my_aiocb;<br><br>  ...<br><br>  ret = <span class="boldcode">aio_read</span>( &amp;my_aiocb );<br><br>}<br><br><br>void aio_completion_handler( sigval_t sigval )<br>{<br>  struct aiocb *req;<br><br>  req = (struct aiocb *)sigval.sival_ptr;<br><br>  /* Did the request complete? */<br>  if (<span class="boldcode">aio_error</span>( req ) == 0) {<br><br>    /* Request completed successfully, get the return status */<br>    ret = <span class="boldcode">aio_return</span>( req );<br><br>  }<br><br>  return;<br>}</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在清单 6 中，在创建自己的&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;请求之后，我们使用&nbsp;<code><span style="font-family:NSimsun;">SIGEV_THREAD</span></code>&nbsp;请求了一个线程回调函数来作为通知方法。然后我们将指定特定的通知处理程序，并将要传输的上下文加载到处理程序中（在这种情况中，是个对<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;请求自己的引用）。在这个处理程序中，我们简单地引用到达的&nbsp;<code><span style="font-family:NSimsun;">sigval</span></code>&nbsp;指针并使用 AIO 函数来验证请求已经完成。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N104E8"></a>对 AIO 进行系统优化</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">proc 文件系统包含了两个虚拟文件，它们可以用来对异步 I/O 的性能进行优化：</p> 
+   <ul style="list-style:none;color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <li style="list-style:disc outside;">/proc/sys/fs/aio-nr 文件提供了系统范围异步 I/O 请求现在的数目。</li> 
+    <li style="list-style:disc outside;">/proc/sys/fs/aio-max-nr 文件是所允许的并发请求的最大个数。最大个数通常是 64KB，这对于大部分应用程序来说都已经足够了。</li> 
+   </ul>
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="N104FA"></a>结束语</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">使用异步 I/O 可以帮助我们构建 I/O 速度更快、效率更高的应用程序。如果我们的应用程序可以对处理和 I/O 操作重叠进行，那么 AIO 就可以帮助我们构建可以更高效地使用可用 CPU 资源的应用程序。尽管这种 I/O 模型与在大部分 Linux 应用程序中使用的传统阻塞模式都不同，但是异步通知模型在概念上来说却非常简单，可以简化我们的设计。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;" name="resources"></a>参考资料</p> 
+   <p><strong style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">学习</strong></p> 
+   <ul style="list-style:none;color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <li style="list-style:disc outside;"> <a style="text-decoration:none;color:#565656;" href="http://www.gnu.org/software/libc/manual/html_node/Asynchronous-I_002fO.html" rel="nofollow"><span style="color:#0000ff;">POSIX.1b 实现</span></a>&nbsp;从 GNU Library 的角度介绍了 AIO 的详细内幕。&nbsp;</li> 
+    <li style="list-style:disc outside;"> <a style="text-decoration:none;color:#565656;" href="http://www.mnis.fr/en/support/doc/rtos/c1150.html" rel="nofollow"><span style="color:#0000ff;">Realtime Support in Linux</span></a>&nbsp;解释了更多有关 AIO 和很多实时扩展的信息，内容从调度、POSIX I/O 到 POSIX 线程和高分辨率的定时器（HRT）。&nbsp;</li> 
+    <li style="list-style:disc outside;">在为 2.5 版本内核集成而编写的&nbsp;<a style="text-decoration:none;color:#565656;" href="http://lse.sourceforge.net/io/aionotes.txt" rel="nofollow"><span style="color:#0000ff;">Design Notes</span></a>&nbsp;中，我们可以学习有关 Linux 中 AIO 的设计和实现的知识。&nbsp;</li> 
+   </ul>
+   <p>&nbsp;</p> 
+   <hr style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+   <p><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">设备驱动的aio怎么实现呢？</span></p> 
+   <p><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">Linux® 中最常用的输入/输出（I/O）模型是同步 I/O。在这个模型中，当请求发出之后，应用程序就会阻塞，直到请求满足为止。这是很好的一种解决方案，因为调用应用程序在等待 I/O 请求完成时不需要使用任何中央处理单元（CPU）。但是在某些情况中，I/O 请求可能需要与其他进程产生交叠。可移植操作系统接口（POSIX）异步 I/O（AIO）应用程序接口（API）就提供了这种功能。在本文中，我们将对这个 API 概要进行介绍，并来了解一下如何使用它。</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>AIO 简介</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">Linux 异步 I/O 是 Linux 内核中提供的一个相当新的增强。它是 2.6 版本内核的一个标准特性，但是我们在 2.4 版本内核的补丁中也可以找到它。AIO 背后的基本思想是允许进程发起很多 I/O 操作，而不用阻塞或等待任何操作完成。稍后或在接收到 I/O 操作完成的通知时，进程就可以检索 I/O 操作的结果。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>I/O 模型</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在深入介绍 AIO API 之前，让我们先来探索一下 Linux 上可以使用的不同 I/O 模型。这并不是一个详尽的介绍，但是我们将试图介绍最常用的一些模型来解释它们与异步 I/O 之间的区别。图 1 给出了同步和异步模型，以及阻塞和非阻塞的模型。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>图 1. 基本 Linux I/O 模型的简单矩阵</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_62da0c7a07594deebfee5e538995fe34.gif" alt="基本 Linux I/O 模型的简单矩阵" width="386" height="225"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">每个 I/O 模型都有自己的使用模式，它们对于特定的应用程序都有自己的优点。本节将简要对其一一进行介绍。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>同步阻塞 I/O</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="10" height="1"></td> 
+      <td> 
+       <table border="1">
+        <tbody>
+         <tr>
+          <td> <a style="color:#565656;"></a><strong>I/O 密集型与 CPU 密集型进程的比较</strong><br><p>I/O 密集型进程所执行的 I/O 操作比执行的处理操作更多。CPU 密集型的进程所执行的处理操作比 I/O 操作更多。Linux 2.6 的调度器实际上更加偏爱 I/O 密集型的进程，因为它们通常会发起一个 I/O 操作，然后进行阻塞，这就意味着其他工作都可以在两者之间有效地交错进行。</p> </td> 
+         </tr>
+        </tbody>
+       </table></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">最常用的一个模型是同步阻塞 I/O 模型。在这个模型中，用户空间的应用程序执行一个系统调用，这会导致应用程序阻塞。这意味着应用程序会一直阻塞，直到系统调用完成为止（数据传输完成或发生错误）。调用应用程序处于一种不再消费 CPU 而只是简单等待响应的状态，因此从处理的角度来看，这是非常有效的。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">图 2 给出了传统的阻塞 I/O 模型，这也是目前应用程序中最为常用的一种模型。其行为非常容易理解，其用法对于典型的应用程序来说都非常有效。在调用&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;系统调用时，应用程序会阻塞并对内核进行上下文切换。然后会触发读操作，当响应返回时（从我们正在从中读取的设备中返回），数据就被移动到用户空间的缓冲区中。然后应用程序就会解除阻塞（<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用返回）。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>图 2. 同步阻塞 I/O 模型的典型流程</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_c05bd7fe7750d435051e48205722b9f4.gif" alt="同步阻塞 I/O 模型的典型流程" width="538" height="340"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">从应用程序的角度来说，<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用会延续很长时间。实际上，在内核执行读操作和其他工作时，应用程序的确会被阻塞。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>同步非阻塞 I/O</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">同步阻塞 I/O 的一种效率稍低的变种是同步非阻塞 I/O。在这种模型中，设备是以非阻塞的形式打开的。这意味着 I/O 操作不会立即完成，<code><span style="font-family:NSimsun;">read</span></code>&nbsp;操作可能会返回一个错误代码，说明这个命令不能立即满足（<code><span style="font-family:NSimsun;">EAGAIN</span></code>&nbsp;或<code><span style="font-family:NSimsun;">EWOULDBLOCK</span></code>），如图 3 所示。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>图 3. 同步非阻塞 I/O 模型的典型流程</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_2f338438542ce34e2fceb10966ef7a71.gif" alt="同步非阻塞 I/O 模型的典型流程" width="474" height="340"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">非阻塞的实现是 I/O 命令可能并不会立即满足，需要应用程序调用许多次来等待操作完成。这可能效率不高，因为在很多情况下，当内核执行这个命令时，应用程序必须要进行忙碌等待，直到数据可用为止，或者试图执行其他工作。正如图 3 所示的一样，这个方法可以引入 I/O 操作的延时，因为数据在内核中变为可用到用户调用&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;返回数据之间存在一定的间隔，这会导致整体数据吞吐量的降低。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>异步阻塞 I/O</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">另外一个阻塞解决方案是带有阻塞通知的非阻塞 I/O。在这种模型中，配置的是非阻塞 I/O，然后使用阻塞&nbsp;<code><span style="font-family:NSimsun;">select</span></code>&nbsp;系统调用来确定一个 I/O 描述符何时有操作。使&nbsp;<code><span style="font-family:NSimsun;">select</span></code>&nbsp;调用非常有趣的是它可以用来为多个描述符提供通知，而不仅仅为一个描述符提供通知。对于每个提示符来说，我们可以请求这个描述符可以写数据、有读数据可用以及是否发生错误的通知。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>图 4. 异步阻塞 I/O 模型的典型流程 (select)</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_0855a1508418e6ca6cb4b933f2dc3e61.gif" alt="异步阻塞 I/O 模型的典型流程" width="541" height="340"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">select</span></code>&nbsp;调用的主要问题是它的效率不是非常高。尽管这是异步通知使用的一种方便模型，但是对于高性能的 I/O 操作来说不建议使用。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>异步非阻塞 I/O（AIO）</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">最后，异步非阻塞 I/O 模型是一种处理与 I/O 重叠进行的模型。读请求会立即返回，说明&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;请求已经成功发起了。在后台完成读操作时，应用程序然后会执行其他处理操作。当&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;的响应到达时，就会产生一个信号或执行一个基于线程的回调函数来完成这次 I/O 处理过程。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>图 5. 异步非阻塞 I/O 模型的典型流程</strong><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><img style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" src="https://yqfile.alicdn.com/img_1d5d9ee387fab4bc680d85f9489ca1b7.gif" alt="异步非阻塞 I/O 模型的典型流程" width="481" height="340"><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">&nbsp;</span></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在一个进程中为了执行多个 I/O 请求而对计算操作和 I/O 处理进行重叠处理的能力利用了处理速度与 I/O 速度之间的差异。当一个或多个 I/O 请求挂起时，CPU 可以执行其他任务；或者更为常见的是，在发起其他 I/O 的同时对已经完成的 I/O 进行操作。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">下一节将深入介绍这种模型，探索这种模型使用的 API，然后展示几个命令。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>异步 I/O 的动机</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">从前面 I/O 模型的分类中，我们可以看出 AIO 的动机。这种阻塞模型需要在 I/O 操作开始时阻塞应用程序。这意味着不可能同时重叠进行处理和 I/O 操作。同步非阻塞模型允许处理和 I/O 操作重叠进行，但是这需要应用程序根据重现的规则来检查 I/O 操作的状态。这样就剩下异步非阻塞 I/O 了，它允许处理和 I/O 操作重叠进行，包括 I/O 操作完成的通知。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">除了需要阻塞之外，<code><span style="font-family:NSimsun;">select</span></code>&nbsp;函数所提供的功能（异步阻塞 I/O）与 AIO 类似。不过，它是对通知事件进行阻塞，而不是对 I/O 调用进行阻塞。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>Linux 上的 AIO 简介</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">本节将探索 Linux 的异步 I/O 模型，从而帮助我们理解如何在应用程序中使用这种技术。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在传统的 I/O 模型中，有一个使用惟一句柄标识的 I/O 通道。在 UNIX® 中，这些句柄是文件描述符（这对等同于文件、管道、套接字等等）。在阻塞 I/O 中，我们发起了一次传输操作，当传输操作完成或发生错误时，系统调用就会返回。</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="10" height="1"></td> 
+      <td> 
+       <table border="1">
+        <tbody>
+         <tr>
+          <td> <a style="color:#565656;"></a><strong>Linux 上的 AIO</strong><br><p>AIO 在 2.5 版本的内核中首次出现，现在已经是 2.6 版本的产品内核的一个标准特性了。</p> </td> 
+         </tr>
+        </tbody>
+       </table></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在异步非阻塞 I/O 中，我们可以同时发起多个传输操作。这需要每个传输操作都有惟一的上下文，这样我们才能在它们完成时区分到底是哪个传输操作完成了。在 AIO 中，这是一个&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>（AIO I/O Control Block）结构。这个结构包含了有关传输的所有信息，包括为数据准备的用户缓冲区。在产生 I/O （称为完成）通知时，<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;结构就被用来惟一标识所完成的 I/O 操作。这个 API 的展示显示了如何使用它。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>AIO API</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">AIO 接口的 API 非常简单，但是它为数据传输提供了必需的功能，并给出了两个不同的通知模型。表 1 给出了 AIO 的接口函数，本节稍后会更详细进行介绍。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>表 1. AIO 接口 API</strong></p> 
+   <table class="data-table-2" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <th>API 函数</th> 
+      <th>说明</th> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_read</span></code></td> 
+      <td>请求异步读操作</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_error</span></code></td> 
+      <td>检查异步请求的状态</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_return</span></code></td> 
+      <td>获得完成的异步请求的返回状态</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_write</span></code></td> 
+      <td>请求异步写操作</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_suspend</span></code></td> 
+      <td>挂起调用进程，直到一个或多个异步请求已经完成（或失败）</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">aio_cancel</span></code></td> 
+      <td>取消异步 I/O 请求</td> 
+     </tr>
+     <tr>
+      <td class="tb-row"><code><span style="font-family:NSimsun;">lio_listio</span></code></td> 
+      <td>发起一系列 I/O 操作</td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">每个 API 函数都使用&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;结构开始或检查。这个结构有很多元素，但是清单 1 仅仅给出了需要（或可以）使用的元素。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>清单 1. aiocb 结构中相关的域&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>struct aiocb {<br><br>  int aio_fildes;               // File Descriptor<br>  int aio_lio_opcode;           // Valid only for lio_listio (r/w/nop)<br>  volatile void *aio_buf;       // Data Buffer<br>  size_t aio_nbytes;            // Number of Bytes in Data Buffer<br>  struct sigevent aio_sigevent; // Notification Structure<br><br>  /* Internal fields */<br>  ...<br><br>};</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">sigevent</span></code>&nbsp;结构告诉 AIO 在 I/O 操作完成时应该执行什么操作。我们将在 AIO 的展示中对这个结构进行探索。现在我们将展示各个 AIO 的 API 函数是如何工作的，以及我们应该如何使用它们。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>aio_read</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;函数请求对一个有效的文件描述符进行异步读操作。这个文件描述符可以表示一个文件、套接字甚至管道。<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;函数的原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_read</span>( struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;函数在请求进行排队之后会立即返回。如果执行成功，返回值就为 0；如果出现错误，返回值就为 -1，并设置&nbsp;<code><span style="font-family:NSimsun;">errno</span></code>&nbsp;的值。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">要执行读操作，应用程序必须对&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;结构进行初始化。下面这个简短的例子就展示了如何填充&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;请求结构，并使用&nbsp;<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;来执行异步读请求（现在暂时忽略通知）操作。它还展示了&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;的用法，不过我们将稍后再作解释。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>清单 2. 使用 aio_read 进行异步读操作的例子&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>#include <br><br>...<br><br>  int fd, ret;<br>  struct aiocb my_aiocb;<br><br>  fd = open( "file.txt", O_RDONLY );<br>  if (fd &lt; 0) perror("open");<br><br>  /* Zero out the aiocb structure (recommended) */<br>  bzero( (char *)&amp;my_aiocb, sizeof(struct aiocb) );<br><br>  /* Allocate a data buffer for the aiocb request */<br>  my_aiocb.aio_buf = malloc(BUFSIZE+1);<br>  if (!my_aiocb.aio_buf) perror("malloc");<br><br>  /* Initialize the necessary fields in the aiocb */<br>  my_aiocb.aio_fildes = fd;<br>  my_aiocb.aio_nbytes = BUFSIZE;<br>  my_aiocb.aio_offset = 0;<br><br>  ret = <span class="boldcode">aio_read</span>( &amp;my_aiocb );<br>  if (ret &lt; 0) perror("aio_read");<br><br>  while ( <span class="boldcode">aio_error</span>( &amp;my_aiocb ) == EINPROGRESS ) ;<br><br>  if ((ret = aio_return( &amp;my_iocb )) &gt; 0) {<br>    /* got ret bytes on the read */<br>  } else {<br>    /* read failed, consult errno */<br>  }<br><br></pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在清单 2 中，在打开要从中读取数据的文件之后，我们就清空了&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;结构，然后分配一个数据缓冲区。并将对这个数据缓冲区的引用放到&nbsp;<code><span style="font-family:NSimsun;">aio_buf</span></code>&nbsp;中。然后，我们将&nbsp;<code><span style="font-family:NSimsun;">aio_nbytes</span></code>&nbsp;初始化成缓冲区的大小。并将<code><span style="font-family:NSimsun;">aio_offset</span></code>&nbsp;设置成 0（该文件中的第一个偏移量）。我们将&nbsp;<code><span style="font-family:NSimsun;">aio_fildes</span></code>&nbsp;设置为从中读取数据的文件描述符。在设置这些域之后，就调用&nbsp;<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;请求进行读操作。我们然后可以调用&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;来确定&nbsp;<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;的状态。只要状态是&nbsp;<code><span style="font-family:NSimsun;">EINPROGRESS</span></code>，就一直忙碌等待，直到状态发生变化为止。现在，请求可能成功，也可能失败。</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="10" height="1"></td> 
+      <td> 
+       <table border="1">
+        <tbody>
+         <tr>
+          <td> <a style="color:#565656;"></a><strong>使用 AIO 接口来编译程序</strong><br><p>我们可以在&nbsp;<code><span style="font-family:NSimsun;">aio.h</span></code>&nbsp;头文件中找到函数原型和其他需要的符号。在编译使用这种接口的程序时，我们必须使用 POSIX 实时扩展库（<code><span style="font-family:NSimsun;">librt</span></code>）。</p> </td> 
+         </tr>
+        </tbody>
+       </table></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">注意使用这个 API 与标准的库函数从文件中读取内容是非常相似的。除了&nbsp;<code><span style="font-family:NSimsun;">aio_read</span></code>&nbsp;的一些异步特性之外，另外一个区别是读操作偏移量的设置。在传统的&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用中，偏移量是在文件描述符上下文中进行维护的。对于每个读操作来说，偏移量都需要进行更新，这样后续的读操作才能对下一块数据进行寻址。对于异步 I/O 操作来说这是不可能的，因为我们可以同时执行很多读请求，因此必须为每个特定的读请求都指定偏移量。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>aio_error</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;函数被用来确定请求的状态。其原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_error</span>( struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">这个函数可以返回以下内容：</p> 
+   <ul style="list-style:none;color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <li style="list-style:disc outside;"> <code><span style="font-family:NSimsun;">EINPROGRESS</span></code>，说明请求尚未完成</li> 
+    <li style="list-style:disc outside;"> <code><span style="font-family:NSimsun;">ECANCELLED</span></code>，说明请求被应用程序取消了</li> 
+    <li style="list-style:disc outside;"> <code><span style="font-family:NSimsun;">-1</span></code>，说明发生了错误，具体错误原因可以查阅&nbsp;<code><span style="font-family:NSimsun;">errno</span></code> </li> 
+   </ul>
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>aio_return</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">异步 I/O 和标准块 I/O 之间的另外一个区别是我们不能立即访问这个函数的返回状态，因为我们并没有阻塞在&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用上。在标准的&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用中，返回状态是在该函数返回时提供的。但是在异步 I/O 中，我们要使用<code><span style="font-family:NSimsun;">aio_return</span></code>&nbsp;函数。这个函数的原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">ssize_t <span class="boldcode">aio_return</span>( struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">只有在&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;调用确定请求已经完成（可能成功，也可能发生了错误）之后，才会调用这个函数。<code><span style="font-family:NSimsun;">aio_return</span></code>&nbsp;的返回值就等价于同步情况中&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;或&nbsp;<code><span style="font-family:NSimsun;">write</span></code>&nbsp;系统调用的返回值（所传输的字节数，如果发生错误，返回值就为&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>）。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>aio_write</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_write</span></code>&nbsp;函数用来请求一个异步写操作。其函数原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_write</span>( struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_write</span></code>&nbsp;函数会立即返回，说明请求已经进行排队（成功时返回值为&nbsp;<code><span style="font-family:NSimsun;">0</span></code>，失败时返回值为&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>，并相应地设置&nbsp;<code><span style="font-family:NSimsun;">errno</span></code>）。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">这与&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;系统调用类似，但是有一点不一样的行为需要注意。回想一下对于&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;调用来说，要使用的偏移量是非常重要的。然而，对于&nbsp;<code><span style="font-family:NSimsun;">write</span></code>&nbsp;来说，这个偏移量只有在没有设置&nbsp;<code><span style="font-family:NSimsun;">O_APPEND</span></code>&nbsp;选项的文件上下文中才会非常重要。如果设置了&nbsp;<code><span style="font-family:NSimsun;">O_APPEND</span></code>，那么这个偏移量就会被忽略，数据都会被附加到文件的末尾。否则，<code><span style="font-family:NSimsun;">aio_offset</span></code>&nbsp;域就确定了数据在要写入的文件中的偏移量。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>aio_suspend</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">我们可以使用&nbsp;<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;函数来挂起（或阻塞）调用进程，直到异步请求完成为止，此时会产生一个信号，或者发生其他超时操作。调用者提供了一个&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用列表，其中任何一个完成都会导致&nbsp;<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;返回。<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;的函数原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_suspend</span>( const struct aiocb *const cblist[],<br>                  int n, const struct timespec *timeout );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;的使用非常简单。我们要提供一个&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用列表。如果任何一个完成了，这个调用就会返回&nbsp;<code><span style="font-family:NSimsun;">0</span></code>。否则就会返回&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>，说明发生了错误。请参看清单 3。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>清单 3. 使用 aio_suspend 函数阻塞异步 I/O&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>struct aioct *cblist[MAX_LIST]<br><br>/* Clear the list. */<br>bzero( (char *)cblist, sizeof(cblist) );<br><br>/* Load one or more references into the list */<br>cblist[0] = &amp;my_aiocb;<br><br>ret = <span class="boldcode">aio_read</span>( &amp;my_aiocb );<br><br>ret = <span class="boldcode">aio_suspend</span>( cblist, MAX_LIST, NULL );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">注意，<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;的第二个参数是&nbsp;<code><span style="font-family:NSimsun;">cblist</span></code>&nbsp;中元素的个数，而不是&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用的个数。<code><span style="font-family:NSimsun;">cblist</span></code>&nbsp;中任何&nbsp;<code><span style="font-family:NSimsun;">NULL</span></code>&nbsp;元素都会被&nbsp;<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;忽略。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">如果为&nbsp;<code><span style="font-family:NSimsun;">aio_suspend</span></code>&nbsp;提供了超时，而超时情况的确发生了，那么它就会返回&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>，<code><span style="font-family:NSimsun;">errno</span></code>&nbsp;中会包含&nbsp;<code><span style="font-family:NSimsun;">EAGAIN</span></code>。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>aio_cancel</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">aio_cancel</span></code>&nbsp;函数允许我们取消对某个文件描述符执行的一个或所有 I/O 请求。其原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">aio_cancel</span>( int fd, struct aiocb *aiocbp );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">要取消一个请求，我们需要提供文件描述符和&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用。如果这个请求被成功取消了，那么这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_CANCELED</span></code>。如果请求完成了，这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_NOTCANCELED</span></code>。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">要取消对某个给定文件描述符的所有请求，我们需要提供这个文件的描述符，以及一个对&nbsp;<code><span style="font-family:NSimsun;">aiocbp</span></code>&nbsp;的&nbsp;<code><span style="font-family:NSimsun;">NULL</span></code>&nbsp;引用。如果所有的请求都取消了，这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_CANCELED</span></code>；如果至少有一个请求没有被取消，那么这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_NOT_CANCELED</span></code>；如果没有一个请求可以被取消，那么这个函数就会返回&nbsp;<code><span style="font-family:NSimsun;">AIO_ALLDONE</span></code>。我们然后可以使用&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;来验证每个 AIO 请求。如果这个请求已经被取消了，那么&nbsp;<code><span style="font-family:NSimsun;">aio_error</span></code>&nbsp;就会返回&nbsp;<code><span style="font-family:NSimsun;">-1</span></code>，并且&nbsp;<code><span style="font-family:NSimsun;">errno</span></code>&nbsp;会被设置为&nbsp;<code><span style="font-family:NSimsun;">ECANCELED</span></code>。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>lio_listio</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">最后，AIO 提供了一种方法使用&nbsp;<code><span style="font-family:NSimsun;">lio_listio</span></code>&nbsp;API 函数同时发起多个传输。这个函数非常重要，因为这意味着我们可以在一个系统调用（一次内核上下文切换）中启动大量的 I/O 操作。从性能的角度来看，这非常重要，因此值得我们花点时间探索一下。<code><span style="font-family:NSimsun;">lio_listio</span></code>&nbsp;API 函数的原型如下：</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">int <span class="boldcode">lio_listio</span>( int mode, struct aiocb *list[], int nent,<br>                   struct sigevent *sig );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><code><span style="font-family:NSimsun;">mode</span></code>&nbsp;参数可以是&nbsp;<code><span style="font-family:NSimsun;">LIO_WAIT</span></code>&nbsp;或&nbsp;<code><span style="font-family:NSimsun;">LIO_NOWAIT</span></code>。<code><span style="font-family:NSimsun;">LIO_WAIT</span></code>&nbsp;会阻塞这个调用，直到所有的 I/O 都完成为止。在操作进行排队之后，<code><span style="font-family:NSimsun;">LIO_NOWAIT</span></code>&nbsp;就会返回。<code><span style="font-family:NSimsun;">list</span></code>&nbsp;是一个&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;引用的列表，最大元素的个数是由&nbsp;<code><span style="font-family:NSimsun;">nent</span></code>&nbsp;定义的。注意&nbsp;<code><span style="font-family:NSimsun;">list</span></code>&nbsp;的元素可以为&nbsp;<code><span style="font-family:NSimsun;">NULL</span></code>，<code><span style="font-family:NSimsun;">lio_listio</span></code>&nbsp;会将其忽略。<code><span style="font-family:NSimsun;">sigevent</span></code>&nbsp;引用定义了在所有 I/O 操作都完成时产生信号的方法。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">对于&nbsp;<code><span style="font-family:NSimsun;">lio_listio</span></code>&nbsp;的请求与传统的&nbsp;<code><span style="font-family:NSimsun;">read</span></code>&nbsp;或&nbsp;<code><span style="font-family:NSimsun;">write</span></code>&nbsp;请求在必须指定的操作方面稍有不同，如清单 4 所示。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>清单 4. 使用 lio_listio 函数发起一系列请求&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br><br>struct aiocb aiocb1, aiocb2;<br>struct aiocb *list[MAX_LIST];<br><br>...<br><br>/* Prepare the first aiocb */<br>aiocb1.aio_fildes = fd;<br>aiocb1.aio_buf = malloc( BUFSIZE+1 );<br>aiocb1.aio_nbytes = BUFSIZE;<br>aiocb1.aio_offset = next_offset;<br>aiocb1.aio_lio_opcode = LIO_READ;<br><br>...<br><br>bzero( (char *)list, sizeof(list) );<br>list[0] = &amp;aiocb1;<br>list[1] = &amp;aiocb2;<br><br>ret = <span class="boldcode">lio_listio</span>( LIO_WAIT, list, MAX_LIST, NULL );</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">对于读操作来说，<code><span style="font-family:NSimsun;">aio_lio_opcode</span></code>&nbsp;域的值为&nbsp;<code><span style="font-family:NSimsun;">LIO_READ</span></code>。对于写操作来说，我们要使用&nbsp;<code><span style="font-family:NSimsun;">LIO_WRITE</span></code>，不过&nbsp;<code><span style="font-family:NSimsun;">LIO_NOP</span></code>&nbsp;对于不执行操作来说也是有效的。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>AIO 通知</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">现在我们已经看过了可用的 AIO 函数，本节将深入介绍对异步通知可以使用的方法。我们将通过信号和函数回调来探索异步函数的通知机制。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>使用信号进行异步通知</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">使用信号进行进程间通信（IPC）是 UNIX 中的一种传统机制，AIO 也可以支持这种机制。在这种范例中，应用程序需要定义信号处理程序，在产生指定的信号时就会调用这个处理程序。应用程序然后配置一个异步请求将在请求完成时产生一个信号。作为信号上下文的一部分，特定的&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;请求被提供用来记录多个可能会出现的请求。清单 5 展示了这种通知方法。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>清单 5. 使用信号作为 AIO 请求的通知&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>void setup_io( ... )<br>{<br>  int fd;<br>  struct sigaction sig_act;<br>  struct aiocb my_aiocb;<br><br>  ...<br><br>  /* Set up the signal handler */<br>  sigemptyset(&amp;sig_act.sa_mask);<br>  sig_act.sa_flags = SA_SIGINFO;<br>  sig_act.sa_sigaction = aio_completion_handler;<br><br><br>  /* Set up the AIO request */<br>  bzero( (char *)&amp;my_aiocb, sizeof(struct aiocb) );<br>  my_aiocb.aio_fildes = fd;<br>  my_aiocb.aio_buf = malloc(BUF_SIZE+1);<br>  my_aiocb.aio_nbytes = BUF_SIZE;<br>  my_aiocb.aio_offset = next_offset;<br><br>  /* Link the AIO request with the Signal Handler */<br>  my_aiocb.aio_sigevent.sigev_notify = SIGEV_SIGNAL;<br>  my_aiocb.aio_sigevent.sigev_signo = SIGIO;<br>  my_aiocb.aio_sigevent.sigev_value.sival_ptr = &amp;my_aiocb;<br><br>  /* Map the Signal to the Signal Handler */<br>  ret = sigaction( SIGIO, &amp;sig_act, NULL );<br><br>  ...<br><br>  ret = <span class="boldcode">aio_read</span>( &amp;my_aiocb );<br><br>}<br><br><br>void aio_completion_handler( int signo, siginfo_t *info, void *context )<br>{<br>  struct aiocb *req;<br><br><br>  /* Ensure it's our signal */<br>  if (info-&gt;si_signo == SIGIO) {<br><br>    req = (struct aiocb *)info-&gt;si_value.sival_ptr;<br><br>    /* Did the request complete? */<br>    if (<span class="boldcode">aio_error</span>( req ) == 0) {<br><br>      /* Request completed successfully, get the return status */<br>      ret = <span class="boldcode">aio_return</span>( req );<br><br>    }<br><br>  }<br><br>  return;<br>}</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在清单 5 中，我们在&nbsp;<code><span style="font-family:NSimsun;">aio_completion_handler</span></code>&nbsp;函数中设置信号处理程序来捕获&nbsp;<code><span style="font-family:NSimsun;">SIGIO</span></code>&nbsp;信号。然后初始化&nbsp;<code><span style="font-family:NSimsun;">aio_sigevent</span></code>&nbsp;结构产生&nbsp;<code><span style="font-family:NSimsun;">SIGIO</span></code>&nbsp;信号来进行通知（这是通过&nbsp;<code><span style="font-family:NSimsun;">sigev_notify</span></code>&nbsp;中的&nbsp;<code><span style="font-family:NSimsun;">SIGEV_SIGNAL</span></code>&nbsp;定义来指定的）。当读操作完成时，信号处理程序就从该信号的&nbsp;<code><span style="font-family:NSimsun;">si_value</span></code>&nbsp;结构中提取出&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>，并检查错误状态和返回状态来确定 I/O 操作是否完成。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">对于性能来说，这个处理程序也是通过请求下一次异步传输而继续进行 I/O 操作的理想地方。采用这种方式，在一次数据传输完成时，我们就可以立即开始下一次数据传输操作。</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>使用回调函数进行异步通知</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">另外一种通知方式是系统回调函数。这种机制不会为通知而产生一个信号，而是会调用用户空间的一个函数来实现通知功能。我们在&nbsp;<code><span style="font-family:NSimsun;">sigevent</span></code>&nbsp;结构中设置了对&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;的引用，从而可以惟一标识正在完成的特定请求。请参看清单 6。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#565656;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></a><strong>清单 6. 对 AIO 请求使用线程回调通知&nbsp;</strong></p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td class="code-outline"> <pre class="displaycode">  <br>void setup_io( ... )<br>{<br>  int fd;<br>  struct aiocb my_aiocb;<br><br>  ...<br><br>  /* Set up the AIO request */<br>  bzero( (char *)&amp;my_aiocb, sizeof(struct aiocb) );<br>  my_aiocb.aio_fildes = fd;<br>  my_aiocb.aio_buf = malloc(BUF_SIZE+1);<br>  my_aiocb.aio_nbytes = BUF_SIZE;<br>  my_aiocb.aio_offset = next_offset;<br><br>  /* Link the AIO request with a thread callback */<br>  my_aiocb.aio_sigevent.sigev_notify = SIGEV_THREAD;<br>  my_aiocb.aio_sigevent.notify_function = aio_completion_handler;<br>  my_aiocb.aio_sigevent.notify_attributes = NULL;<br>  my_aiocb.aio_sigevent.sigev_value.sival_ptr = &amp;my_aiocb;<br><br>  ...<br><br>  ret = <span class="boldcode">aio_read</span>( &amp;my_aiocb );<br><br>}<br><br><br>void aio_completion_handler( sigval_t sigval )<br>{<br>  struct aiocb *req;<br><br>  req = (struct aiocb *)sigval.sival_ptr;<br><br>  /* Did the request complete? */<br>  if (<span class="boldcode">aio_error</span>( req ) == 0) {<br><br>    /* Request completed successfully, get the return status */<br>    ret = <span class="boldcode">aio_return</span>( req );<br><br>  }<br><br>  return;<br>}</pre> </td> 
+     </tr>
+    </tbody>
+   </table>
+   <p>&nbsp;</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">在清单 6 中，在创建自己的&nbsp;<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;请求之后，我们使用&nbsp;<code><span style="font-family:NSimsun;">SIGEV_THREAD</span></code>&nbsp;请求了一个线程回调函数来作为通知方法。然后我们将指定特定的通知处理程序，并将要传输的上下文加载到处理程序中（在这种情况中，是个对<code><span style="font-family:NSimsun;">aiocb</span></code>&nbsp;请求自己的引用）。在这个处理程序中，我们简单地引用到达的&nbsp;<code><span style="font-family:NSimsun;">sigval</span></code>&nbsp;指针并使用 AIO 函数来验证请求已经完成。</p> 
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>对 AIO 进行系统优化</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">proc 文件系统包含了两个虚拟文件，它们可以用来对异步 I/O 的性能进行优化：</p> 
+   <ul style="list-style:none;color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <li style="list-style:disc outside;">/proc/sys/fs/aio-nr 文件提供了系统范围异步 I/O 请求现在的数目。</li> 
+    <li style="list-style:disc outside;">/proc/sys/fs/aio-max-nr 文件是所允许的并发请求的最大个数。最大个数通常是 64KB，这对于大部分应用程序来说都已经足够了。</li> 
+   </ul>
+   <p>&nbsp;</p> 
+   <table style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;" border="0">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_1cc7a6c595b11491663fcd880868be5a.gif" alt="" height="1"><br><img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" width="8" height="6"></td> 
+     </tr>
+    </tbody>
+   </table>
+   <table class="no-print" style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <tbody>
+     <tr>
+      <td> <img src="https://yqfile.alicdn.com/img_fc94fb0c3ed8a8f909dbc7630a0987ff.gif" alt="" height="4"><br><br></td> 
+     </tr>
+    </tbody>
+   </table>
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>结束语</p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">使用异步 I/O 可以帮助我们构建 I/O 速度更快、效率更高的应用程序。如果我们的应用程序可以对处理和 I/O 操作重叠进行，那么 AIO 就可以帮助我们构建可以更高效地使用可用 CPU 资源的应用程序。尽管这种 I/O 模型与在大部分 Linux 应用程序中使用的传统阻塞模式都不同，但是异步通知模型在概念上来说却非常简单，可以简化我们的设计。</p> 
+   <p><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><br style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"></p> 
+   <p style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;"><a style="color:#19599b;"></a>参考资料</p> 
+   <p><strong style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">学习</strong></p> 
+   <ul style="list-style:none;color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+    <li style="list-style:disc outside;"> <a style="text-decoration:none;color:#565656;" href="http://www.gnu.org/software/libc/manual/html_node/Asynchronous-I_002fO.html" rel="nofollow"><span style="color:#0000ff;">POSIX.1b 实现</span></a>&nbsp;从 GNU Library 的角度介绍了 AIO 的详细内幕。&nbsp;</li> 
+    <li style="list-style:disc outside;"> <a style="text-decoration:none;color:#565656;" href="http://www.mnis.fr/en/support/doc/rtos/c1150.html" rel="nofollow"><span style="color:#0000ff;">Realtime Support in Linux</span></a>&nbsp;解释了更多有关 AIO 和很多实时扩展的信息，内容从调度、POSIX I/O 到 POSIX 线程和高分辨率的定时器（HRT）。&nbsp;</li> 
+    <li style="list-style:disc outside;">在为 2.5 版本内核集成而编写的&nbsp;<a style="text-decoration:none;color:#565656;" href="http://lse.sourceforge.net/io/aionotes.txt" rel="nofollow"><span style="color:#0000ff;">Design Notes</span></a>&nbsp;中，我们可以学习有关 Linux 中 AIO 的设计和实现的知识。&nbsp;</li> 
+   </ul>
+   <p>&nbsp;</p> 
+   <hr style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">
+   <p><span style="color:#666666;font-family:'宋体', Arial;font-size:16px;line-height:26px;">设备驱动的aio怎么实现呢？</span></p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

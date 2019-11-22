@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Android输入系统IMS（1）--基础知识epoll和notify « NotBeCN</title>
+  <meta name="description" content="          做Android系统三年多，量产项目也有3~4个了，却从来没写过相关博客，最近换工作到新东家报道前这段时间比较闲写写博客总结一下这些年对Android系统的了解。先挑个相对简单的ims下手。   &nbsp;   epoll产生的背景：   &nbsp; &nbsp; &nbsp;在信息高速发...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/longruic_90139504.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Android输入系统IMS（1）--基础知识epoll和notify</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <h3><em><strong>做Android系统三年多，量产项目也有3~4个了，却从来没写过相关博客，最近换工作到新东家报道前这段时间比较闲写写博客总结一下这些年对Android系统的了解。先挑个相对简单的ims下手。</strong></em></h3> 
+  <p>&nbsp;</p> 
+  <h1>epoll产生的背景：</h1> 
+  <p>&nbsp; &nbsp; &nbsp;在信息高速发展的时代对服务器的高并发性能要求越来越高，传统的select 、poll等IO多路复用的方法来实现并发服务程序已经无法满足现代化大数据，高并发，集群等应用场景。</p> 
+  <p>使用select的缺点：</p> 
+  <ol>
+   <li>监视的文件描述符的数量存在限制通常是1024，当然可以修改内核源码更改数量。select是使用轮询的方式扫描文件描述符，监控的文件描述符数量越多，性能越差反应越慢；</li> 
+   <li>内核 / 用户空间内存拷贝问题，select需要复制大量的句柄数据结构，产生巨大的开销；</li> 
+   <li>select返回的是含有整个句柄的数组，应用程序需要遍历整个数组才能发现哪些句柄发生了事件；</li> 
+   <li>select的触发方式是水平触发，应用程序如果没有完成对一个已经就绪的文件描述符进行IO操作，那么之后每次select调用还是会将这些文件描述符通知进程。</li> 
+  </ol>
+  <p>使用poll的缺点：</p> 
+  <p>&nbsp; &nbsp; poll机制与select一脉相承的，与select在本质上没有多大差别也是进行轮询，根据描述符的状态进行处理，但是poll没有最大文件描述符数量的限制。也就是说，poll只解决了上面的问题1。</p> 
+  <h1>强大的epoll（enhance poll）闪亮登场了：</h1> 
+  <p>&nbsp; &nbsp; &nbsp;在Linux2.6内核版本正式提出epoll，是基于事件驱动的I/O方式，比起select，epoll没有描述符个数限制，使用一个文件描述符（可以理解为大的）管理多个描述符，将用户关心的文件描述符的事件存放到内核的一个事件表中，这样在用户空间和内核空间的copy只需一次。它是poll的增强版本，它能显著提高程序在大量并发连接中只有少量活跃的情况下的系统CPU利用率。原因就是获取事件的时候，它无须遍历整个被侦听的描述符集，只要遍历那些被内核IO事件异步唤醒而加入Ready队列的描述符集合就行了。</p> 
+  <p>使用相关函数：</p> 
+  <pre class="has">
+<code class="language-cpp">1.epoll_create 
+/*
+* epoll_create 函数创建一个epoll句柄，参数size表明要监听的描述符数量。
+* 调用成功时返回一个句柄描述符，失败时返回-1。
+*/
+int epoll_create(int size);
+
+2.epoll_ctl
+/*
+epoll的事件注册函数，它不同与select()是在监听事件时告诉内核要监听什么类型的事件，而是在这里先注册要监听的事件类型。
+第一个参数是epoll_create()的返回值，第二个参数表示动作，用三个宏来表示：
+EPOLL_CTL_ADD：注册新的fd到epfd中；
+EPOLL_CTL_MOD：修改已经注册的fd的监听事件；
+EPOLL_CTL_DEL：从epfd中删除一个fd；
+第三个参数是需要监听的fd，第四个参数是告诉内核需要监听什么事，struct epoll_event 结构如下：
+typedef union epoll_data {
+    void *ptr;
+    int fd;
+    __uint32_t u32;
+    __uint64_t u64;
+} epoll_data_t;
+struct epoll_event {
+    __uint32_t events; // Epoll events 
+    epoll_data_t data; // User data variable 
+};
+events 可以是以下几个宏的集合：
+EPOLLIN ：表示对应的文件描述符可以读（包括对端SOCKET正常关闭）；
+EPOLLOUT：表示对应的文件描述符可以写；
+EPOLLPRI：表示对应的文件描述符有紧急的数据可读（这里应该表示有带外数据到来）；
+EPOLLERR：表示对应的文件描述符发生错误；
+EPOLLHUP：表示对应的文件描述符被挂断；
+EPOLLET： 将EPOLL设为边缘触发(Edge Triggered)模式，这是相对于水平触发(Level Triggered)来说的。
+EPOLLONESHOT：只监听一次事件，当监听完这次事件之后，如果还需要继续监听这个socket的话，需要再次把这个socket加入到EPOLL队列里
+*/
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+
+3.epoll_wait
+/*
+等待事件的产生,参数 events 用来从内核得到事件的集合，maxevents告之内核这个events有多大，这个 maxevents 的值不能大于创建epoll_create()时的size，参数timeout是超时时间（毫秒，0会立即返回，-1将不确定，也有说法说是永久阻塞）。该函数返回需要处理的事件数目，如返回0表示已超时。
+*/
+int epoll_wait(int epfd, struct epoll_event * events, int maxevents, int timeout);</code></pre> 
+  <h1>Epoll DEMO程序代码：</h1> 
+  <p>&nbsp; &nbsp; 关于epoll更详细的实现细节感兴趣的老铁可以看看其它博客，其实epoll是基于红黑树，rdlist双链表实现的。这里只介绍大招原理偏重于用户层如何使用。</p> 
+  <p>使用方法：</p> 
+  <p>1.新建main.c文件；</p> 
+  <p>2.gcc -o mian main.c编译文件；<br> 3.新建文件mkdir tmp ；mkfifo &nbsp;tmp/1 tmp/2 tmp/3<br> 4. 后台执行程序./main tmp/1 tmp/2 tmp/3 &amp;<br> 5.往其中一个文件写内容echo 2 &gt; tmp/1</p> 
+  <p>此时可以看见终端打印：</p> 
+  <p><img alt="" class="has" height="79" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/2019051214215594.JPG" width="272"></p> 
+  <p>pollResult=1<br> Reason: 0x1&nbsp;//1是可读取的意思<br> read event get data: 2</p> 
+  <p>代码如下：</p> 
+  <pre class="has">
+<code class="language-cpp">#include &lt;sys/epoll.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/types.h&gt;
+#include &lt;sys/stat.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;string.h&gt;
+
+#define DATA_MAX_LEN 500
+#define EPOLL_MAX_EVENTS 16
+void add_to_epoll(int fd, int epollFd)
+{
+    int result;
+    struct epoll_event eventItem;
+    memset(&amp;eventItem, 0, sizeof(eventItem));
+    eventItem.events = EPOLLIN;
+    eventItem.data.fd = fd;
+    result = epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &amp;eventItem);
+}
+
+void rm_from_epoll(int fd, int epollFd)
+{
+    epoll_ctl(epollFd, EPOLL_CTL_DEL, fd, NULL);
+}
+
+
+int main(int argc, char **argv)
+{
+	int mEpollFd;
+	int i;
+	char buf[DATA_MAX_LEN];
+    struct epoll_event mPendingEventItems[EPOLL_MAX_EVENTS];
+	
+	if (argc &lt; 2)
+	{
+		printf("Usage: %s &lt;file1&gt; [file2] [file3] ...\n", argv[0]);
+		return -1;
+	}
+
+	  mEpollFd = epoll_create(EPOLL_MAX_EVENTS+1);
+	/*
+	 *打开每一个文件得到fd，把fd添加注册到epoll
+	 */
+	for (i = 1; i &lt; argc; i++)	 
+	{
+		int tmpFd = open(argv[i], O_RDWR);
+		add_to_epoll(tmpFd, mEpollFd);
+	}
+
+	/* epoll_wait */
+	for(;;)
+	{	
+        int pollResult = epoll_wait(mEpollFd, mPendingEventItems, EPOLL_MAX_EVENTS, -1);//-1表示永远检查
+		if(pollResult) {
+			printf("pollResult=%d \n",pollResult);
+			for (i = 0; i &lt; pollResult; i++)
+			{
+				printf("Reason: 0x%x\n", mPendingEventItems[i].events);
+				if((mPendingEventItems[i].events &amp; EPOLLIN)) {// read event  
+				 	int len = read(mPendingEventItems[i].data.fd, buf, DATA_MAX_LEN);
+					buf[len] = '\0';
+				    printf("read event get data: %s\n", buf);
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+</code></pre> 
+  <p>之后要分析的Android输入子系统中的c++类InputReader就是通过EventHub使用epoll监测输入设备节点（如：/dev/input/event0）是否有数据可以读取。InputReader::loopOnce() -&gt; [mEventHub-&gt;getEvents] EventHub::getEvents-&gt;if (eventItem.events &amp; EPOLLIN) {int32_t readSize = read(device-&gt;fd, readBuffer,sizeof(struct input_event) * capacity);</p> 
+  <p><span style="color:#f33b45;">注意 ：C++层Thread类内建了线程循环，threadLoop()就是一次循环而已，只要返回值为true，threadLoop()将会不断地被循环调用。</span></p> 
+  <p>inotify：</p> 
+  <p>参考：<a href="https://www.ibm.com/developerworks/cn/linux/l-inotify/index.html?ca=drs-" rel="nofollow">https://www.ibm.com/developerworks/cn/linux/l-inotify/index.html?ca=drs-</a></p> 
+  <p>&nbsp; &nbsp; &nbsp; 从文件管理器到安全工具，文件系统监控对于的许多程序来说都是必不可少的。从 Linux 2.6.13 内核开始，Linux 就推出了&nbsp;<em>inotify</em>，允许监控程序打开一个独立文件描述符，并针对事件集监控一个或者多个文件，例如打开、关闭、移动/重命名、删除、创建或者改变属性.Inotify 能够监视文件或者目录变化如新增，删除。</p> 
+  <h2 id="N100A1">用于 inotify 的 API</h2> 
+  <p>Inotify 提供一个简单的 API，使用最小的文件描述符，并且允许细粒度监控。与 inotify 的通信是通过系统调用实现。可用的函数如下所示：</p> 
+  <p><strong>inotify_init</strong></p> 
+  <p>是用于创建一个 inotify 实例的系统调用，并返回一个指向该实例的文件描述符。</p> 
+  <p><strong>inotify_init1</strong></p> 
+  <p>与&nbsp;<code>inotify_init</code>&nbsp;相似，并带有附加标志。如果这些附加标志没有指定，将采用与&nbsp;<code>inotify_init</code>&nbsp;相同的值。</p> 
+  <p><strong>inotify_add_watch</strong></p> 
+  <p>增加对文件或者目录的监控，并指定需要监控哪些事件。标志用于控制是否将事件添加到已有的监控中，是否只有路径代表一个目录才进行监控，是否要追踪符号链接，是否进行一次性监控，当首次事件出现后就停止监控。</p> 
+  <p><strong>inotify_rm_watch</strong></p> 
+  <p>从监控列表中移出监控项目。</p> 
+  <p><strong>read</strong></p> 
+  <p>读取包含一个或者多个事件信息的缓存。</p> 
+  <p><strong>close</strong></p> 
+  <p>关闭文件描述符，并且移除所有在该描述符上的所有监控。当关于某实例的所有文件描述符都关闭时，资源和下层对象都将释放，以供内核再次使用。</p> 
+  <p>因此，典型的监控程序需要进行如下操作：</p> 
+  <ol>
+   <li>使用 inotify_init 打开一个文件描述符</li> 
+   <li>添加一个或者多个监控</li> 
+   <li>等待事件</li> 
+   <li>处理事件，然后返回并等待更多事件</li> 
+   <li>当监控不再活动时，或者接到某个信号之后，关闭文件描述符，清空，然后退出。</li> 
+  </ol>
+  <h1>inotify DEMO程序：</h1> 
+  <p>1.新建inotifydemo.c；<br> 2.编译gcc -o inotifydemo inotifydemo.c；<br> 3.运行./inotifydemotmp &amp; 在后台监测tmp目录；</p> 
+  <p>4.echo 4 tmp/4;rm tmp/1</p> 
+  <p>终端打印：</p> 
+  <p>create file: 4 by crl6<br> crl6@crl6:~$ rm tmp/1&nbsp;<br> delete file: 1 by crl6</p> 
+  <p>代码：</p> 
+  <pre class="has">
+<code class="language-cpp">#include &lt;unistd.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;sys/inotify.h&gt;
+#include &lt;string.h&gt;
+#include &lt;errno.h&gt;
+
+
+int read_process_inotify_fd(int fd)
+{
+	int res;
+    char event_buf[512];
+    int event_size;
+    int event_pos = 0;
+    struct inotify_event *event;
+	
+    res = read(fd, event_buf, sizeof(event_buf));
+
+    if(res &lt; (int)sizeof(*event)) {
+        if(errno == EINTR)
+            return 0;
+        printf("could not get event, %s\n", strerror(errno));
+        return -1;
+    }
+
+	/* process
+	 * 读到的数据是1个或多个inotify_event
+	 * 它们的长度不一样
+	 * 逐个处理
+	 */
+
+    while(res &gt;= (int)sizeof(*event)) {
+        event = (struct inotify_event *)(event_buf + event_pos);
+        if(event-&gt;len) {
+            if(event-&gt;mask &amp; IN_CREATE) {
+                printf("create file: %s by crl6\n", event-&gt;name);
+            } else {
+                printf("delete file: %s by crl6\n", event-&gt;name);
+            }
+        }
+        event_size = sizeof(*event) + event-&gt;len;
+        res -= event_size;
+        event_pos += event_size;
+    }
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	int mINotifyFd;
+	int result;
+
+	if (argc != 2)
+	{
+		printf("Usage: %s &lt;dir&gt;\n", argv[0]);
+		return -1;
+	}
+
+	/* inotify_init 初始化*/
+
+    mINotifyFd = inotify_init();
+
+	/* add watch添加监测对象 */
+    result = inotify_add_watch(mINotifyFd, argv[1], IN_DELETE | IN_CREATE);
+
+	while (1)
+	{
+		read_process_inotify_fd(mINotifyFd);//检测目录下的文件变化
+	}
+
+	return 0;
+}
+
+</code></pre> 
+  <p>&nbsp;</p> 
+  <p><span style="color:#ffbb66;">有了监控文件目录变化的功能后对Android系统输入系统有什么作用了？一般的Android手机输入设备就是触摸屏和几个固定的按键，上电后设备节点都是固定的其实这种情况也用不上inotify功能。但还是有很多Android终端设备是需要支持输入设备热插拔的如usb键盘，鼠标，usb触摸屏，串口屏。当这里插入机器后就会加载驱动从而在/dev/input/目录产生设备节点，由于EventHub在初始化的时候已经使用inotify机制监测/dev/input/目录了，当监测到有新的文件产生EventHub就会open这个文件得到fd，然后再把fd加到epoll中监测是否有数据可读，这样在Android framework的c++层中就实现了输入设备的热插拔了。相关核心代码：</span></p> 
+  <pre class="has">
+<code>//EventHub.cpp
+static const char *DEVICE_PATH = "/dev/input";
+.......................................
+EventHub::EventHub(void) :
+        mBuiltInKeyboardId(NO_BUILT_IN_KEYBOARD), mNextDeviceId(1), mControllerNumbers(),
+        mOpeningDevices(0), mClosingDevices(0),
+        mNeedToSendFinishedDeviceScan(false),
+        mNeedToReopenDevices(false), mNeedToScanDevices(true),
+        mPendingEventCount(0), mPendingEventIndex(0), mPendingINotify(false) {
+    acquire_wake_lock(PARTIAL_WAKE_LOCK, WAKE_LOCK_ID);
+    //监测具体文件节点是否有数据可读
+    mEpollFd = epoll_create(EPOLL_SIZE_HINT);
+    LOG_ALWAYS_FATAL_IF(mEpollFd &lt; 0, "Could not create epoll instance.  errno=%d", errno);
+    //监测目录变化
+    mINotifyFd = inotify_init();
+    int result = inotify_add_watch(mINotifyFd, DEVICE_PATH, IN_DELETE | IN_CREATE);
+    LOG_ALWAYS_FATAL_IF(result &lt; 0, "Could not register INotify for %s.  errno=%d",
+            DEVICE_PATH, errno);
+
+    struct epoll_event eventItem;
+    memset(&amp;eventItem, 0, sizeof(eventItem));
+......................................................
+
+status_t EventHub::readNotifyLocked() {
+...................................
+            if(event-&gt;mask &amp; IN_CREATE) {
+                openDeviceLocked(devname);
+            }
+.........................................
+}
+
+status_t EventHub::openDeviceLocked(const char *devicePath) {
+    char buffer[80];
+
+    ALOGV("Opening device: %s", devicePath);
+
+    int fd = open(devicePath, O_RDWR | O_CLOEXEC);
+.........................................................
+    // Allocate device.  (The device object takes ownership of the fd at this point.)
+    int32_t deviceId = mNextDeviceId++;
+    Device* device = new Device(fd, deviceId, String8(devicePath), identifier);
+..............................................
+   if (epoll_ctl(mEpollFd, EPOLL_CTL_ADD, fd, &amp;eventItem)) {
+        ALOGE("Could not add device fd to epoll instance.  errno=%d", errno);
+        delete device;
+        return -1;
+    }
+}</code></pre> 
+  <p>&nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

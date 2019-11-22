@@ -1,0 +1,1475 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Kudu 原理、API使用、代码 « NotBeCN</title>
+  <meta name="description" content="          大数据组件使用 总文章&nbsp;     链接：https://pan.baidu.com/s/1jRbq0pVgDsf7ILTZsJjaAw&nbsp; 提取码：0kri&nbsp;     	1、KUDU分区数必须预先预定&nbsp;	2、在内存中对每个Tablet分区维护一个MemRo...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/11/zimiao552147572_90116395.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Kudu 原理、API使用、代码</h1>
+    <p class="post-meta">May 11, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <h1><u><strong><a href="https://blog.csdn.net/zimiao552147572/article/details/88602959" rel="nofollow"><span style="color:#f33b45;">大数据组件使用 总文章&nbsp;</span></a></strong></u></h1> 
+  <hr>
+  <h3><span style="color:#3399ea;"><strong>链接：<u>https://pan.baidu.com/s/1jRbq0pVgDsf7ILTZsJjaAw&nbsp;</u><br> 提取码：0kri&nbsp;</strong></span></h3> 
+  <hr>
+  <pre class="has">
+<code>	1、KUDU分区数必须预先预定&nbsp;
+	2、在内存中对每个Tablet分区维护一个MemRowSet来管理最新更新的数据，默认是1G刷新一次或者是2分钟。后Flush到磁盘上形成DiskRowSet，
+	   多个DiskRowSet在适当的时候进行归并处理&nbsp;
+	3、和HBase采用的LSM（LogStructured Merge，很难对数据进行特殊编码，所以处理效率不高）方案不同的是，Kudu对同一行的数据更新记录的合并工作，
+	   不是在查询的时候发生的（HBase会将多条更新记录先后Flush到不同的Storefile中，所以读取时需要扫描多个文件，比较rowkey，比较版本等，然后进行更新操作），
+	   而是在更新的时候进行，在Kudu中一行数据只会存在于一个DiskRowSet中，避免读操作时的比较合并工作。
+	   那Kudu是怎么做到的呢？ 对于列式存储的数据文件，要原地变更一行数据是很困难的，所以在Kudu中，对于Flush到磁盘上的DiskRowSet（DRS）数据，
+	   实际上是分两种形式存在的，一种是Base的数据，按列式存储格式存在，一旦生成，就不再修改，另一种是Delta文件，存储Base数据中有变更的数据，
+	   一个Base文件可以对应多个Delta文件，这种方式意味着，插入数据时相比HBase，需要额外走一次检索流程来判定对应主键的数据是否已经存在。
+	   因此，Kudu是牺牲了写性能来换取读取性能的提升。&nbsp;
+	   更新、删除操作需要记录到特殊的数据结构里，保存在内存中的DeltaMemStore或磁盘上的DeltaFIle里面。
+	   DeltaMemStore是B-Tree实现的，因此速度快，而且可修改。磁盘上的DeltaFIle是二进制的列式的块，和base数据一样都是不可修改的。
+	   因此当数据频繁删改的时候，磁盘上会有大量的DeltaFiles文件，Kudu借鉴了Hbase的方式，会定期对这些文件进行合并。&nbsp;
+</code></pre> 
+  <hr>
+  <pre class="has">
+<code>impala操作界面里 可以执行 invalidate metadata; 命令刷新元数据。
+
+==================== impala-shell ============================================
+impala-shell
+
+从Impala创建一个新的Kudu表
+	从Impala在Kudu中创建新表类似于将现有Kudu表映射到Impala表，除了您需要自己指定模式和分区信息。
+	使用以下示例作为指导。Impala首先创建表，然后创建映射。
+
+		CREATE TABLE my_first_table
+		(
+		  id BIGINT,
+		  name STRING,
+		  PRIMARY KEY(id)
+		)
+		PARTITION BY HASH PARTITIONS 16
+		STORED AS KUDU;
+
+	在CREATE TABLE语句中，必须首先列出组成主键的列。此外，隐式标记主键列NOT NULL。
+	创建新的Kudu表时，您需要指定分发方案。请参阅分区表：https://kudu.apache.org/docs/kudu_impala_integration.html#partitioning_tables
+	id为简单起见，上面的表创建示例通过散列列分布到16个分区中。有关分区的指导，请参阅 分区规则：https://kudu.apache.org/docs/kudu_impala_integration.html#partitioning_rules_of_thumb
+
+	
+在Impala中查询现有的Kudu表：Impala中创建映射Kudu表的外部映射表
+	通过Kudu API或其他集成（如Apache Spark）创建的表在Impala中不会自动显示。要查询它们，必须首先在Impala中创建外部表，以将Kudu表映射到Impala数据库：
+		CREATE EXTERNAL TABLE `bigData` STORED AS KUDU
+		TBLPROPERTIES(
+			'kudu.table_name' = 'bigData',
+			'kudu.master_addresses' = 'node1:7051,node2:7051,node3:7051')
+		
+
+Kudu中的分区方法主要有两种：partition by hash 和 partition by range 
+	kudu表基于其partition方法被拆分成多个分区，每个分区就是一个tablet，一张kudu表所属的所有tablets均匀分布并存储在tablet servers的磁盘上。
+	因此在创建kudu表的时候需要声明该表的partition方法，同时要指定primary key作为partition的依据。
+	
+基于hash的分区方法的基本原理是：
+	基于primary key的hash值将每个row（行）划分到相应的tablet当中，分区的个数即tablet的个数必须在创建表语句中指定，建表语句示例如下：
+	注：如果未指定基于某个字段的hash值进行分区，默认以主键的hash值进行分区。
+		create table test
+		(
+			name string,
+			age int,
+			primary key (name)
+		)
+		partition by hash (name) partitions 8
+		stored as kudu;
+
+基于range的分区方法的基本原理是：
+	基于指定主键的取值范围将每个row（行）划分到相应的tablet当中，用于range分区的主键以及各个取值范围都必须在建表语句中声明，建表语句示例如下：
+	例子：有班级、姓名、年龄三个字段，表中的每个row将会根据其所在的班级划分成四个分区，每个分区就代表一个班级。
+		create table test
+		(
+			classes int,
+			name string,
+			age int,
+			primary key (classes,name)
+		)
+		partition by range (classes)
+		(
+			partition value = 1,
+			partition value = 2,
+			partition value = 3,
+			partition value = 4
+		)
+		stored as kudu;
+
+kudu表还可以采用基于hash和基于range相结合的分区方式，使用方法与上述类似	
+		
+kudu表支持3种insert语句：
+	1.insert into test values(‘a’,12);
+	2.insert into test values(‘a’,12),(‘b’,13),(‘c’,14);
+	3.insert into test select * from other_table;
+
+update语句
+	kudu表的update操作不能更改主键的值，其他与标准sql语法相同。
+
+upsert 语句
+	对于 upsert into test values (‘a’,12) 
+	如果指定的values中的主键值 在表中已经存在，则执行update语义，反之，执行insert语义。
+
+delete语句
+	与标准sql语法相同。
+
+</code></pre> 
+  <p>&nbsp;</p> 
+  <hr>
+  <pre class="has">
+<code>Kudu 1.9.0文档：https://kudu.apache.org/releases/1.9.0/docs/
+Kudu 1.9.0 Java API文档：https://kudu.apache.org/releases/1.9.0/apidocs/
+
+1.Kudu介绍：Kudu集HDFS的顺序读和HBASE的随机读于一身，同时具备高性能的随机写，以及很强大的可用性（单行事务，一致性协议），支持Impala spark计算引擎。
+2.什么时候使用kudu
+	大规模数据复杂的实时分析，例如大数据量的join。
+	数据有更新
+	查询准实时
+3.存储
+	Kudu的存储是不基于HDFS的，构建集群时，kudu很有可能和HDFS共同占用物理磁盘或者云磁盘，理想情况是独立空间。
+4.表设计
+	10+G a tablet&nbsp;
+	10-100 tablets individual node
+	在配置32C，64G机器上，跑过1000个tablet情况，能正常写入，但在大量查询情况下，出现tablet time out，rpc满了的情况，
+
+5.分区设计
+	hash&nbsp;
+	range
+
+6.参数
+	1、Kudu Tablet Server Maintenance Threads
+	   参数：maintenance_manager_num_threads
+	   解释：Kudu后台对数据进行维护操作，如写入数据时的并发线程数，一般设置为4，官网建议的是数据目录的3倍
+		Kudu Tablet Server Maintenance Threads 这个参数决定了Kudu后台对数据进行维护操作，如写入数据时的并发线程数。并发数越大，吞吐量越高，
+		但对集群计算能力的要求也越高。默认值为1，表示Kudu会采用单线程操作；对于需要大量数据进行快速写入/删除的集群，可以设置更大的值。
+		该值可以设置跟计算节点的数据磁盘数量和CPU核数有关，一般来说，建议设置为4以获取比较均衡的性能，最大不超过8。
+
+	2、Kudu Tablet Server Block Cache Capacity Tablet
+	   参数：block_cache_capacity_mb
+		解释：分配给Kudu Tablet Server块缓存的最大内存量，建议是2-4G
+		Kudu Tablet Server Block Cache Capacity Tablet的Block buffer cache，根据集群内存配置和数据量规模设置。一般建议至少2GB～4GB。
+
+
+	3、Kudu Tablet Server Hard Memory Limit Kudu
+	   参数：memory_limit_hard_bytes
+	   解释：Tablet Server能使用的最大内存量，有多大，设置多大，tablet Server在批量写入数据时并非实时写入磁盘，而是先Cache在内存中，
+		在flush到磁盘。这个值设置过小时，会造成Kudu数据写入性能显著下降。对于写入性能要求比较高的集群，建议设置更大的值（一般是机器内存的百分之80）
+		Kudu Tablet Server Hard Memory Limit Kudu的Tablet Server能使用的最大内存。Tablet Server在批量写入数据时并非实时写入磁盘，
+		而是先Cache在内存中，在flush到磁盘。这个值设置过小时，会造成Kudu数据写入性能显著下降。对于写入性能要求比较高的集群，建议设置更大的值，比如32GB。
+
+
+	4.Maximum Process File Descriptors 
+		这个参数决定了Kudu能够同时打开的操作系统文件数。不设置则使用系统的ulimits值，设置后会覆盖系统的设置。
+		需要根据集群的规模及并发处理能力，非常谨慎的设置这个值。
+
+	5.Default Number of Replicas 
+		这个参数设置了每个Tablet的默认复制因子，默认值为3，表示每个表的数据会在Kudu中存储3份副本。
+		我们可以根据需要修改这个全局默认值，也可以在建表语句中通过’kudu.num_tablet_replicas’属性来设置每个表的副本数，
+		比如：’kudu.num_tablet_replicas’ = ‘1’。
+
+7.建议每个表50columns左右，不能超过300个
+8.hash分区数量 * range分区数量不能超过60个（1.7.0版本之后没限制了）
+9.设置block的管理器为文件管理器（默认是日志服务器）
+	解释：并非所有文件系统格式都需要设置该选项。ext4、xfs格式支持hole punching（打孔），所以不需要设置block_manager=file，但是ext3 格式需要。
+	      可以通过df -Th命令来查看文件系统的格式。
+	参数：--block_manager=file
+
+10.设置ntp服务器的时间误差不超过20s（默认是10s）
+	参数：max_clock_sync_error_usec=20000000
+
+11.设置rpc的连接时长（默认是3s，建议不要设置）
+	参数：--rpc_negotiation_timeout_ms=300000
+
+12.设置rpc一致性选择的连接时长（默认为1s，建议不要设置）
+	参数：--consensus_rpc_timeout_ms=1000
+
+13.记录kudu的crash的信息
+	解释：
+		Kudu在遇到崩溃时，使用Google Breakpad库来生成minidump。这些minidumps的大小通常只有几MB，即使禁用了核心转储生成，也会生成，
+		生成minidumps只能在Linux上建立。
+		minidump文件包含有关崩溃的进程的重要调试信息，包括加载的共享库及其版本，崩溃时运行的线程列表，处理器寄存器的状态和每个线程的堆栈内存副本，
+		以及CPU和操作系统版本信息。
+		Minitump可以通过电子邮件发送给Kudu开发人员或附加到JIRA，以帮助Kudu开发人员调试崩溃。为了使其有用，
+		开发人员将需要知道Kudu的确切版本和发生崩溃的操作系统。请注意，虽然minidump不包含堆内存转储，但它确实包含堆栈内存，
+		因此可以将应用程序数据显示在minidump中。如果机密或个人信息存储在群集上，请不要共享minidump文件。
+	参数：
+		--minidump_path=minidumps              
+		--max_minidumps=9
+		（默认是在设置的log目录下生成minidumps目录，里边包含最多9个以dmp结尾的文件，无法设置为空值，需要注意的是如果自定义minidump文件，
+		在master不能启动的情况下，需要将该目录中的文件删除）
+
+14.Stack WatchLog
+	解释：每个Kudu服务器进程都有一个称为Stack Watchdog的后台线程，它监视服务器中的其他线程，以防它们被阻塞超过预期的时间段。
+	      这些跟踪可以指示操作系统问题或瓶颈存储。通过WARN日志信息的跟踪（Trace）可以用于诊断由于Kudu以下的系统（如磁盘控制器或文件系统）引起的根本原因延迟问题。
+
+15.cdh设置多master
+	参数：--master_addresses=cdh01:7051,cdh02:7051cdh03:7051
+
+
+
+16.kudu出现启动速度特别慢
+	解决办法：
+		1、取消所有配置参数（除了资源、时间同步）
+		2、升级版本到kudu1.6.0
+		3、client必须停止（client不占用io的情况，3台机器，每台机器60G，127分区数量，启动速度3分钟）
+		4、查看io使用情况 iostat -d -x -k 1 200
+
+17.单hash分区最大是60
+
+18.安装kudu过程中，会要求CPU支持ssc4.2指令集，但是我们的虚拟机cpu没有这个执行集，所以无法安装
+
+19.设置client长连接过期时间
+	参数：--authn_token_validity_seconds=12960000（150天）
+	注意：设置到tserver的配置文件中
+
+20.tserver和master的wal和data目录要分隔（或者是目录设置为lvm卷轴）
+	原因：wal目录只能设置为1个
+	参数：--fs_wal_dir_reserved_bytes
+	解释：
+		Number of bytes to reserve on the log directory filesystem for non-Kudu usage. The default,
+		which is represented by -1, is that 1% of the disk space on each disk will be reserved. 	
+		Any other value specified represents the number of bytes reserved and must be greater than or equal to 0. 
+		Explicit percentages to reserve are not currently supported
+		用于非kudu都使用的日志目录文件系统的字节数，默认情况下是-1，每个磁盘上的磁盘空间的1%将被保留，指定的任何其他值表示保留的字节数，必须大于或等于0。
+
+21.设置用户权限，能移动tablet
+	参数：--superuser_acl=*
+
+22.tserver宕掉后，5分钟后没有恢复的情况下，该机器上的tablet会移动到其他机器
+	参数：--follower_unavailable_considered_failed_sec=300
+
+23.超过参数时间的历史数据会被清理，如果是base数据不会被清理。而真实运行时数据大小持续累加，没有被清理。
+	参数：--tablet_history_max_age_sec=900
+
+</code></pre> 
+  <hr>
+  <pre class="has">
+<code>impala + kudu一些优化心得
+	1.一开始需要全量导入kudu，这时候我们先用sqoop把关系数据库数据导入临时表，再用impala从临时表导入kudu目标表
+		由于sqoop从关系型数据直接以parquet格式导入hive会有问题，这里默认hive的表都是text格式；每次导完到临时表，
+	  	需要做invalidate metadata 表操作，不然后面直接导入kudu的时候会查不到数据
+	2.除了查询，建议所有impala操作都在impala-shell而不在hue上面执行
+	3.impala并发写入kudu的时候，数据量比较大的时候
+		这时候kudu配置参数 --memory_limit_hard_bytes能大点就大点，因为kudu写入首先保存再内存里面，到一定阀值才溢写到磁盘，这个是直接最能提高写的方法；
+		当然不是所有机器都有那么多资源，可以把--maintenance_manager_num_threads 这个参数稍微调大，需要调试，提高数据从内存写入磁盘的效率
+	4.impala查询kudu
+		首先所有表做完全量的etl操作，必须得执行compute stats 表名，不然impala执行sql生成的计划执行数评估的内存不准确，容易评估错误导致实际执行不了
+		kudu表最好不要做任何压缩，保证原始扫描性能发挥最好；假如对查询性能要求比存储要求高的话；大部分企业对实时查询效率要求高，而且存储成本毕竟低；
+		kudu针对大表要做好分区，最好range和hash一起使用，前提是主键列包含能hash的id，但range分区一定要做好，经验告诉我一般是基于时间；
+		查询慢的sql，一般要拿出来；方便的话做下explain，看下kudu有没有过滤部分数据关键字kudu predicates；假如sql没问题，那在impala-shell执行这个sql，
+		最后执行summray命令，重点查看单点峰值内存和时间比较大的点，对相关的表做优化，解决数据倾斜问题
+	5.kudu数据删除
+		大表不要delete，不要犹豫直接drop，在create吧；磁盘空间会释放的
+	6.关于impala + kudu 和 impala + parquet
+		网上很多分析impala + kudu 要比 impala + parquet 优越很多；谁信谁XB；
+		首先两个解决的场景不一样，kudu一般解决实时，hive解决的是离线（通常是T + 1或者 T -1）
+		hive基于hdfs，hdfs已经提供一套较为完善的存储机制，底层数据和文件操作便利；安全性，可扩展性都比kudu强很多，
+		最重要parquet + impala效率要比kudu高，数仓首选是它
+		kudu最大优势是能做类似关系型数据库一样的操作，insert, update, delete，这样热点的数据可以存储在kudu里面并随时做更新
+	7.最后谈到的实时同步工具
+		同步工具我们这里使用streamsets，一个拖拉拽的工具，非常好用；但内存使用率高，通过jconsole我们发现，所有任务同时启动；
+		JVM新生代的内容几乎都跑到老年代了，GC没来的及，就内存溢出了；后面单独拿几台服务器出来做这个ETL工具，jvm配置G1垃圾回收器
+
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>1.kudu的产生背景和应用场景</strong></span></h1> 
+  <pre class="has">
+<code>1.在 kudu 之前，大数据主要以两种方式存储：
+	第一种是静态数据：以 HDFS 引擎作为存储引擎，适用于高吞吐量的离线大数据分析场景。
+			这类存储的局限性是数据无法进行随机的读写和批量的更新操作。
+	第二种是动态数据：以 HBase作为存储引擎，适用于大数据随机读写场景。这类存储的局限性是批量读取吞吐量远不如 HDFS、不适用于批量数据分析的场景。
+
+2.从上面分析可知，这两种数据在存储方式上完全不同，进而导致使用场景完全不同，但在真实的场景中，边界可能没有那么清晰，面对既需要随机读写，
+  又需要批量分析的大数据场景，该如何选择呢？
+
+3.这个场景中，单种存储引擎无法满足业务需求，我们需要通过多种大数据组件组合来满足这一需求，一个常见的方案是：
+	数据实时写入 HBase，实时的数据更新也在 HBase 完成，为了应对 OLAP 需求，我们定时（通常是 T+1 或者 T+H）将 HBase的 数据写成静态的文件（Parquet）
+	导入到 OLAP 引擎（HDFS）。这一架构能满足既需要随机读写，又可以支持 OLAP 分析的场景。
+  但他有如下缺点：
+	第一：架构复杂。从架构上看，数据在 HBase、消息队列Kafka、HDFS 间流转，涉及环节太多，运维成本很高。
+	      并且每个环节需要保证高可用、维护多个副本、存储空间浪费。最后数据在多个系统上，对数据安全策略、监控等都提出了挑战。
+	第二：时效性低。数据从 HBase 导出成静态文件是周期性的，一般这个周期是一天（或一小时），在时效性上不是很高。
+	第三：难以应对后续的更新。真实场景中，总会有数据是延迟到达的。如果这些数据之前已经从 HBase 导出到 HDFS，
+	      新到的变更数据就难以处理了，一个方案是把新变更的数据和原有数据进行对比，把不同的数据重新进行更新操作，这时候代价就很大了。
+	      假如说，我们想要sql实时对大量数据进行分析该怎么办？或者是我想让数据存储能够支持Upsert（更新插入操作），又该怎么办？所以这就是kudu的优势。
+	      kudu 的定位是 Fast Analytics on Fast Data，是一个既支持随机读写、又支持 OLAP 分析的大数据存储引擎。
+
+4.KUDU在 HDFS 和 HBase 这两个中平衡了随机读写和批量分析的性能，既支持了SQL实时查询，也支持了数据更新插入操作。
+  完美的和impala集成，统一了hdfs数据源和kudu数据源，从而使得开发人员能够高效的进行数据分析。</code></pre> 
+  <p><img alt="" class="has" height="497" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225452787.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="751"></p> 
+  <pre class="has">
+<code>5.hdfs不支持批量更新操作，kudu支持
+	hdfs适用于离线sql分析，kudu适用于实时sql分析	hbase不支持sql操作，kudu支持（hbase-hive表可支持sql操作，但是效率极低）
+	hbase不支持结构化数据存储，kudu支持
+	hbase开发语言使用的java，内存的释放通过gc来完成，在内存比较紧张时可能引发full gc进而导致服务不稳定；kudu核心模块用的c++来实现，没有full gc的风险
+	hbase的timestamp是暴露的，kudu没有暴露
+	hbase的插入和更新操作都是当作一条数据进行处理的，而kudu是分隔开的
+
+6.适合于在线实时分析的应用
+	适合大数据量更新操作的应用
+	适合将mysql的数据同步到kudu，减轻备库mysql查询的压力
+	适合存储ADS数据，包含用户标签、各类指标数据等
+	适合于存储结构化数据
+	适合于和Impala继承，SQL分析数据
+	适合于和HDFS一起使用，聚合数据源
+	实时预测模型的应用，支持根据所有历史数据周期地更新模型
+
+7.kudu完美的和impala集成，统一了hdfs数据源和kudu数据源，从而使得开发人员能够高效的进行数据分析。
+  impala-kudu 主要用于实时的分析海量数据，即海量的结构化数据不断更新到kudu中，底层是以列式结构分布式存储，查询是获取结构化数据，
+  然后进行 OLAP 分析、数据挖掘、机器学习等分析型操作，这些分析型操作所涉及的数据延迟性很小。
+  但是kudu对硬件资源要求很高，特别是IO这块，之前公司遇到的集群瓶颈是多台机器（写30m/s）IO使用率达到100%，从而使用rpc连接超时，导致数据丢失。                             
+  impala-kudu 的应用适用于多个行业，凡是结构化数据分析的情景都可使用，从实时性方面来讲，使用sql实时的查询结构化数据，使得分析操作快速和高效。
+  从离线方面来讲，可以查询hdfs的数据，从而保证了数据的统一化和多元化，并且有利于构建数据仓库模型。
+
+
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>2.kudu的基础架构</strong></span></h1> 
+  <pre class="has">
+<code>1.Kudu特点
+	特点一：主从架构 主为master，从为tserver，通常为三主多从
+	特点二：高可用性（High availability）
+		Tablet server&nbsp;和&nbsp;Master&nbsp;使用&nbsp;Raft Consensus Algorithm&nbsp;来保证节点的高可用，确保只要有一半以上的副本可用，
+		该&nbsp;tablet&nbsp;便可用于读写。例如，如果3个副本中有2个可用 或 5个副本中的有3个可用，则该tablet可用。即使在&nbsp;leader&nbsp;tablet&nbsp;出现故障的情况下，
+		读取功能也可以通过&nbsp;read-only（只读的）follower tablets来进行服务，或者是leader宕掉的情况下，会根据raft机制重新选举leader
+	特点三：水平可扩展
+	特点四：OLAP&nbsp;工作的快速处理。
+	特点五：与&nbsp;MapReduce，Spark&nbsp;，Impala和其他&nbsp;Hadoop&nbsp;生态系统组件集成
+	特点六：使用&nbsp;Cloudera Manager&nbsp;轻松维护和管理
+	特点七：底层存储完全是列式结构，每一列都可以自定义压缩
+	特点八：查询出来的数据是结构化模型，支持sql操作
+
+2.Kudu概念和术语
+	1.开发语言 C++
+	2.Columnar Data Store（列式数据存储）
+	3.Read&nbsp;Efficiency（高效读取） 
+		对于分析查询，允许读取单个列或该列的一部分同时忽略其他列
+	4.Data Compression（数据压缩）
+		由于给定的列只包含一种类型的数据，所以基于此模式的压缩会比压缩混合数据类型（在基于行的解决案中使用）时更有效几个数量级。
+		结合从列读取数据的效率，压缩允许从磁盘读取更少的块时完成查询</code></pre> 
+  <p><img alt="" class="has" height="568" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225534700.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="875"></p> 
+  <pre class="has">
+<code>	5.Table（表）
+		一张table是数据存储在&nbsp;Kudu&nbsp;的位置。表具有schema（结构）和全局有序的primary&nbsp;key（主键）。table被分成很多段，也就是称为tablets（Tablet的复数）
+	6.Tablet（段）
+ 		一个tablet 是 一张表table 连续的segment（段），与其它数据存储引擎或关系型数据库partition（分区）相似。
+		在一定的时间范围内，tablet的副本冗余到多个tserver服务器上，其中一个副本被认为是leader tablet。
+		任何副本都可以对读取进行服务，并且写入时需要为tablet服务的一组tablet server之间达成一致性。
+		一张表分成多个tablet，分布在不同的tablet server中，最大并行化操作，Tablet在Kudu中被切分为更小的单元，叫做RowSets，
+		RowSets分为两种MemRowSets和DiskRowSet，MemRowSets每生成32M，就溢写到磁盘中，也就是DiskRowSet
+	7.Tablet&nbsp;Server
+		tablet&nbsp;server是 存储tablet 和 为tablet向client提供服务。对于给定的tablet，一个tablet&nbsp;server充当 leader，
+		其他tablet server充当该tablet的follower副本。只有leader为每一个服务提供写请求，leader和followers为每个服务提供读请求。
+		leader使用Raft协议来进行选举&nbsp;。一个tablet&nbsp;server可以服务多个tablets，并且一个&nbsp;tablet&nbsp;可以被多个tablet&nbsp;servers服务着。
+	8.Master
+		保持跟踪所有的tablets、tablet&nbsp;servers、catalog tables（目录表）和其它与集群相关的metadata。在给定的时间点，只能有一个起作用的master（也就是&nbsp;leader）。
+		如果当前的leader消失，则选举出一个新的master，使用Raft协议来进行选举。master还协调客户端的metadata&nbsp;operations（元数据操作）。
+		例如，当创建新表时，客户端内部将请求发送给master。&nbsp;master将新表的元数据写入catalog table（目录表），并协调在tablet server上创建tablet的过程。
+		所有master的元数据都存储在一个tablet中，可以复制到所有其他候选的master。tablet&nbsp;server以设定的间隔向master发出心跳（默认值为每秒一次）。
+		master是以文件的形式存储在磁盘中。
+	9.Raft Consensus Algorithm
+		Kudu&nbsp;使用&nbsp;Raft consensus algorithm&nbsp;作为确保常规&nbsp;tablet&nbsp;和&nbsp;master&nbsp;数据的容错性和一致性的手段。
+		通过&nbsp;Raft协议，tablet&nbsp;的多个副本选举出&nbsp;leader，它负责接受请求和复制数据写入到其他follower副本。
+		一旦写入的数据在大多数副本中持久化后，就会向客户确认。给定的一组N副本（通常为&nbsp;3&nbsp;或&nbsp;5&nbsp;个）能够接受最多(N - 1)/2&nbsp;错误的副本的写入。
+	10.Catalog Table（目录表）
+		catalog&nbsp;table是Kudu&nbsp;的&nbsp;metadata（元数据中）的中心位置。它存储有关tables和tablets的信息。
+		该catalog table（目录表）可能不会被直接读取或写入。相反，它只能通过客户端&nbsp;API中公开的元数据操作访问。
+		catalog tables存储以下两类元数据。
+			Tables：table schemas 表结构，locations 位置，states 状态
+			Tablets：现有tablet&nbsp;的列表，每个&nbsp;tablet 的副本所在哪些tablet server，tablet的当前状态以及开始和结束的keys（键）。
+
+3.Kudu-Impala 集成特性
+	CREATE/ALTER/DROP TABLE
+		Impala&nbsp;支持使用&nbsp;Kudu&nbsp;作为持久层来&nbsp;creating（创建），altering（修改）和&nbsp;dropping（删除）表。
+		这些表遵循与&nbsp;Impala&nbsp;中其他表格相同的 &nbsp;Internal / external（内部 / 外部）方法，允许灵活的数据采集和查询。
+	INSERT
+		数据可以使用“与那些使用&nbsp;HDFS&nbsp;或&nbsp;HBase&nbsp;持久性的任何其他&nbsp;Impala&nbsp;表相同的”语法插入&nbsp;Impala&nbsp;中的&nbsp;Kudu&nbsp;表。
+	UPDATE&nbsp;/&nbsp;DELETE
+		Impala&nbsp;支持&nbsp;UPDATE&nbsp;和&nbsp;DELETE&nbsp;SQL&nbsp;命令逐行或批处理修改&nbsp;Kudu&nbsp;表中的已有的数据。
+		选择&nbsp;SQL&nbsp;命令的语法与现有标准尽可能兼容。除了简单&nbsp;DELETE&nbsp;或&nbsp;UPDATE&nbsp;命令之外，还可以&nbsp;FROM&nbsp;在子查询中指定带有子句的复杂连接。
+	Flexible Partitioning（灵活分区）
+		与&nbsp;Hive&nbsp;中的表分区类似，Kudu&nbsp;允许您通过&nbsp;hash&nbsp;或 range 动态预分割成预定义数量的&nbsp;tablets，以便在集群中均匀分布写入和查询。
+		您可以通过任意数量的&nbsp;primary&nbsp;key（主键）列，任意数量的&nbsp;hashes&nbsp;和可选的&nbsp;list of split rows&nbsp;来进行分区。
+	Parallel Scan（并行扫描）
+		为了在现代硬件上实现最高的性能，Impala&nbsp;使用的&nbsp;Kudu&nbsp;客户端可以跨多个&nbsp;tablets扫描。
+	High-efficiency queries（高效查询）
+		在可能的情况下，Impala&nbsp;将谓词评估下推到&nbsp;Kudu，以便使谓词（in，between and，&gt;，&lt;）评估为尽可能接近数据。在许多任务中，查询性能与&nbsp;Parquet&nbsp;相当。
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>3.kudu的底层存储原理</strong></span></h1> 
+  <pre class="has">
+<code>1.底层存储原理
+	1.1个Table（表）包含多个Tablet，其中Tablet的数量是根据hash或者是range进行设置的。
+	2.1个Tablet中包含MetaData信息和多个RowSet信息，其中MetaData信息是block和block在data中的位置。
+	3.1个RowSet包含一个MemRowSet和多个DiskRowSet，其中MemRowSet用于存储insert数据和update后的数据，写满后会刷新到磁盘中也就是多个DiskRowSet中，
+	  默认是1G刷新一次或者是2分钟。
+	4.1个DiskRowSet用于老数据的mutation（更新），比如说数据的更新操作，后台定期对DiskRowSet进行合并操作，删除历史数据和没有的数据，减少查询过程中的IO开销。
+	5.1个DiskRowSet包含BloomFilter、Ad_hoc Index、UndoFile、RedoFile、BaseData、DeltaMem。
+		BloomFile：根据DiskRowSet中key生成一个bloom filter，用于快速模糊的定位某一个key是否在DiskRowSet中。
+		Ad_hoc Index：是主键的索引，用于定位key在DiskRowSet中具体哪个偏移位置。
+		BaseData：是MemRowSet flush下来的数据，按照列存储，按照主键有序。
+		UndoFile：是BaseData之前的数据历史数据。
+		RedoFile：是BaseData之后的mutation（更新）记录，可以获得较新的数据。
+		DeltaMem：用于在内存中存储mutation（更新）记录，先写到内存中，然后写满后flush到磁盘，形成deltafile。
+</code></pre> 
+  <p><img alt="" class="has" height="480" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225603555.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="916"></p> 
+  <p><img alt="" class="has" height="412" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225606301.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="829"></p> 
+  <pre class="has">
+<code>2.MemRowSet
+	实现方式：B+Tree
+
+3.DiskRowSet
+	1.实现方式：二叉平衡树
+	2.内部数据组织：DeltaMem 和 MemRowSet在存在中的组织方式是一致的，都是B+Tree，在磁盘上的存储都是放在CFile文件中的，右图为CFile的文件格式
+	3.Cfile：包含Header，Data，Index，Footer四块，Index有两种，posidx index是根据rowId找到Data中的偏移，validx index是根据key的值找到data中的偏移，
+		validx只针对只有一个column为key的情况下，这个时候DiskRowSet是没有Ad_hoc索引的，使用validx来代替。
+		这两个index内部实现了B-Tree，index不一定是联系的，在达到一定长度后就会刷盘，Footer是记录CFile的元数据，
+		包括posidx_index，validx_index两棵树根节点所在位置，数据条目、编码、压缩方式等
+	4.压缩：对于ad_hoc文件使用的prefix，delta fle使用的是plain，bloomfile使用的是plain
+	5.磁盘上每一个DiskRowSet有若*.metadata和*.data文件，metadata文件记录的是DiskRowSet的元信息，主要包括哪些block和block在data中的位置，
+	  左图为block和DiskRowSet中各部分的映射关系，在写磁盘时是通过container来写入，每个container可以写很大的一块连续的磁盘空间，
+	  用于给某一个CFile写数据，当一个CFile写完后会将container归还给BlockManager，这时container就可以用于下一个CFile写数据了，
+	  当BlockManager中没有container可用是会创建一个新的container给新的CFile使用。
+	6.对应新建block先看看是否有container可用，若没有，目前默认的是在所在的配置中的data_dir中随机选取一个dir建一个新的metadata和data文件。
+	  先写data，block落盘后再写metadata
+
+</code></pre> 
+  <p><img alt="" class="has" height="634" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/2019051122570639.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1101"></p> 
+  <p><img alt="" class="has" height="645" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225655142.png" width="291"></p> 
+  <pre class="has">
+<code>4.MVCC
+	表的主键排序,受益于MVCC（Multi-Version Concurrency Control 多版本并发控制，一旦数据写入到MemRowSet，后续的reader能立马查询到
+
+5.Compaction	minor compaction：多个deltafile进行合并。默认是1000个deltafile进行合并一次
+	major compaction：deltafile文件的大小和basedata的文件的比例为0.1的时候，会进行合并操作</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>4.kudu的读写流程</strong></span></h1> 
+  <p><img alt="" class="has" height="412" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225656419.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="829"></p> 
+  <pre class="has">
+<code>1.kudu中的Tablet是负责Table表的一部分的读写工作，Tablet是有多个或一个Rowset组成的，其中一个Rowset处于内存中，叫做MemRowSet，MemRowSet主要是负责处理新的数据写入请求。
+
+2.DiskRowSet是MemRowSet达到1G刷新一次或者是时间超过2分钟后刷新到磁盘后生成的，实际底层存储是是有Base Data（一个CFile文件）、
+  多个Delta file（Undo data、Redo data组成）的和Delta MemStore，其中位于磁盘中的Base data、Undo data、Redo data是不可修改的，
+  Delta Memstore达到一定程度后会刷新到磁盘中的生成Redo data，其中kudu后台有一个类似HBase的compaction线程策略进行合并处理：
+	1、Minor Compaction：多个DeltaFile进行合并生成一个大的DeltaFile。默认是1000个DeltaFile进行合并一次
+	2、Major Compaction：DeltaFile文件的大小和Base data的文件的比例为0.1的时候，会进行合并操作，生成Undo data
+	3、将多个DiskRowSet进行合并，减少DiskRowSet的数量
+  Base Data：是MemRowSet flush下来的数据，按照列存储，按照主键有序
+  Undo Data：是BaseData之前的数据历史数据
+  Redo Data：是BaseData之后的mutation记录，可以获得较新的数据
+  Delta Memstore：用于在内存中存储更新为磁盘中数据的mutation记录，先写到内存中，然后写满后flush到磁盘，形成DeltaFile
+
+3.当创建Kudu客户端时，其会从主master上获取tablet位置信息，然后直接与服务于该tablet的服务器进行交谈。
+  为了优化读取和写入路径，客户端将保留该信息的本地缓存，以防止他们在每个请求时需要查询主机的tablet位置信息。
+  随着时间的推移，客户端的缓存可能会变得过时，并且当写入被发送到不是领导者的tablet服务器时，则将被拒绝。
+  然后，客户端将通过查询主服务器发现新领导者的位置来更新其缓存。
+
+4.读流程
+	1.客户端连接TMaster获取表的相关信息，包括分区信息，表中所有tablet的信息
+	2.客户端找到需要读取的数据的tablet所在的TServer，Kudu接受读请求，并记录timestamp信息，如果没有显式指定，那么表示使用当前时间
+	3.从内存中读取数据，也就是MemRowSet和DeltaRowSet中读取数据，根据timestamp来找到对应的mutation链表
+	4.从磁盘中读取数据，从metadata文件中使用boom filter快速模糊的判断所有候选RowSet是否含有此key。
+	  然后从DiskRowSet中读取数据，实际是根据B+树，判断key在那些DiskRowSet的range范围内，然后从metadata文件中，获取index来判断rowId在Data中的偏移，
+	  或者是利用validex来判断数据的偏移（只有一个key），根据读操作中包含的timestamp信息判断是否需要将base data进行回滚操作从而获取数据
+
+5.写流程
+	1.Kudu插入一条新数据
+		1.客户端连接TMaster获取表的相关信息，包括分区信息，表中所有tablet的信息
+		2.客户端找到负责处理读写请求的tablet所负责维护的TServer。Kudu接受客户端的请求，检查请求是否符合要求（表结构）
+		3.Kudu在Tablet中的所有rowset（memrowset,diskrowset）中进行查找，看是否存在与待插入数据相同主键的数据，如果存在就返回错误，否则继续
+		4.写入操作先被提交到tablet的预写日志(WAL)，并根据Raft一致性算法取得追随节点的同意，然后才会被添加到其中一个tablet的内存中，
+		  插入会被添加到tablet的MemRowSet中。为了在MemRowSet中支持多版本并发控制(MVCC)，对最近插入的行(即尚未刷新到磁盘的新的行)的更新和删除操作
+		  将被追加到MemRowSet中的原始行之后以生成REDO记录的列表
+		5.Kudu在MemRowset中写入一行新数据，在MemRowset（1G或者是120s）数据达到一定大小时，MemRowset将数据落盘，并生成一个diskrowset用于持久化数据，
+		  还生成一个memrowset继续接收新数据的请求
+
+	2.Kudu对原有数据的更新
+		1.客户端连接TMaster获取表的相关信息，包括分区信息，表中所有tablet的信息
+		2.Kudu接受请求，检查请求是否符合要求
+		3.因为待更新数数据可能位于memrowset中，也可能已经flush到磁盘上，形成diskrowset。因 此根据待更新数据所处位置不同，kudu有不同的做法
+		4.当待更新数据位于memrowset时，找到待更新数据所在行，然后将更新操作记录在所在行中一个mutation链表中；
+		  在memrowset将数据落盘时，Kudu会将更新合并到base data，并生成UNDO records用于查看历史版本的数据，REDO records实际上也是以DeltaFile的形式存放
+
+6.应用场景
+	1.当待更新数据位于DiskRowset时，找到待更新数据所在的DiskRowset，每个DiskRowset都会在内存中设置一个DeltaMemStore，将更新操作记录在DeltaMemStore中，
+	  在DeltaMemStore达到一定大小时，flush在磁盘，形成DeltaFile中。
+	2.实际上Kudu提交更新时会使用Raft协议将更新同步到其他replica(复制品)上去，当然如果在memrowset和DiskRowset中都没有找到这条数据，那么返回错误给客户端；
+	  另外当DiskRowset中的deltafile太多时，Kudu会采用一定的策略对一组deltafile进行合并。
+	3.wal日志的作用是如果我们在做真正的操作之前，先将这件事记录下来，持久化到可靠存储中（因为日志一般很小，并且是顺序写，效率很高），
+	  然后再去执行真正的操作。这样执行真正操作的时候也就不需要等待执行结果flush到磁盘再执行下一步，因为无论在哪一步出错，我们都能够根据备忘录重做一遍，
+	  得到正确的结果。
+
+
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>5.kudu和hbase的对比</strong></span></h1> 
+  <p><img alt="" class="has" height="668" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/2019051122575449.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1125"></p> 
+  <pre class="has">
+<code>1.架构
+	1.hbase的物理模型是master和regionserver，regionserver存储的是region，region里边很有很多store，一个store对应一个列簇，
+	  一个store中有一个memstore和多个storefile，store的底层是hfile，hfile是hadoop的二进制文件，其中HFile和HLog是hbase两大文件存储格式，
+	  HFile用于存储数据，HLog保证可以数据写入到HFile中。
+	2.kudu的物理模型是master和tserver，其中table根据hash和range分区，分为多个tablet存储到tserver中，tablet分为leader和follower，
+	  leader负责写请求，follower负责读请求，总结来说，一个ts可以服务多个tablet，一个tablet可以被多个ts服务。
+2.联系
+	设计理念和想法是一致的。
+	kudu的思想是基于hbase的，之前cloudera公司向对hbase改造，支持大数据量更新，可是由于改动源码太大，所以todd直接开发了kudu。
+	hbase基于rowkey查询和kudu基于主键查询是很快的。
+	底层存储架构都是以列式存储的。
+</code></pre> 
+  <pre class="has">
+<code>1.hbase的物理模型是master和regionserver，regionserver存储的是region，region里边很有很多store，一个store对应一个列簇，
+  一个store中有一个memstore和多个storefile，store的底层是hfile，hfile是hadoop的二进制文件，其中HFile和HLog是hbase两大文件存储格式，
+  HFile用于存储数据，HLog保证可以写入到HFile中；
+2.kudu的物理模型是master和tserver，其中table根据hash和range分区，分为多个tablet存储到tserver中，tablet分为leader和follower，
+  leader负责写请求，follower负责读请求，总结来说，一个ts可以服务多个tablet，一个tablet可以被多个ts服务（基于tablet的分区，最低为2个分区）；
+3.hbase基于rowkey查询和kudu基于主键查询是很快的；
+4.Kudu结构看上去跟HBase差别并不大，主要的区别包括：
+	1.Kudu将HBase中zookeeper的功能放进了TMaster内，Kudu中TMaster的功能比HBase中的Master任务要多一些，kudu所有集群的配置信息均存储在本地磁盘中，
+  	  hbase的集群配置信息是存储在zookeeper中；
+	2.Hbase将数据持久化这部分的功能交给了Hadoop中的HDFS，最终组织的数据存储在HDFS上。Kudu自己将存储模块集成在自己的结构中，
+	  内部的数据存储模块通过Raft协议来保证leader Tablet和replica Tablet内数据的强一致性，和数据的高可靠性。
+	  为什么不像HBase一样利用HDFS来实现数据存储，所以Kudu自己重新完成了底层的数据存储模块，并将其集成在TServer中，
+	  但是kudu对磁盘的IO要求很高，它是以写的性能换取读的性能；</code></pre> 
+  <p><img alt="" class="has" height="290" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225757503.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1200"></p> 
+  <pre class="has">
+<code>5.数据存储方式
+	1.HBase是面向列族式的存储，每个列族都是分别存放的，HBase表设计时，很少使用设计多个列族，大多情况下是一个列族。
+	  这个时候的HBase的存储结构已经与行式存储无太大差别了。而Kudu，实现的是一个真正的面向列的存储方式，表中的每一列都是单独存放的；
+	  所以HBase与Kudu的差异主要在于类似于行式存储的列族式存储方式与典型的面向列式的存储方式的差异；
+	2.HBase是一款NoSQL类型的数据库，对表的设计主要在于rowkey与列族的设计，列的类型可以不指定，因为HBase在实际存储中都会将所有的value字段转换成二进制的字节流。
+	  因为不需要指定类型，所以在插入数据的时候可以任意指定列名（列限定名），这样相当于可以在建表之后动态改变表的结构。
+	  Kudu因为选择了列式存储，为了更好的提高列式存储的效果，Kudu要求在建表时指定每一列的类型，这样的做法是为了根据每一列的类型设置合适的编码方式，
+	  实现更高的数据压缩比，进而降低数据读入时的IO压力；
+	3.HBase对每一个cell数据中加入了timestamp字段，这样能够实现记录同一rowkey和列名的多版本数据，另外HBase将数据更新操作、删除操作也是作为一条数据写入，
+	  通过timestamp来标记更新时间，type来区分数据是插入、更新还是删除。HBase写入或者更新数据时可以指定timestamp，这样的设置可以完成某些特定的操作； 
+	  Kudu也在数据存储中加入了timestamp这个字段，不像HBase可以直接在插入或者更新数据时设置特殊的timestamp值，Kudu的做法是由Kudu内部来控制timestamp的写入。
+	  不过Kudu允许在scan的时候设置timestamp参数，使得客户端可以scan到历史数据；
+	4.相对于HBase允许多版本的数据存在，Kudu为了提高批量读取数据时的效率，要求设计表时提供一列或者多列组成一个主键，主键唯一，
+	  不允许多个相同主键的数据存在。这样的设置下，Kudu不能像HBase一样将更新操作直接转换成插入一条新版本的数据，Kudu的选择是将写入的数据，更新操作分开存储；
+	  当然还有一些其他的行式存储与列式存储之间在不同应用场景下的性能差异。
+	5.hbase中，同一个主键数据是可以存在多个storefile里的，为了让mutation和磁盘的存在的key组合在一起，hbase需要基于rowkey执行merge。
+	  Rowkey可以是任意长度的字符串，因此对比rowkey是非常耗性能的。另外，在一个查询中，即使key列没有被使用（例如聚合计算），它们也要被读取出来，
+	  这导致了额外的IO。复合主键在hbase应用中很常见，主键的大小可能比你关注的列大一个数量级，特别是查询的列被压缩的情况下；&nbsp;
+	6.kudu中，读取一条数据或者执行非排序查询，不需要merge操作。例如，聚合一定范围内的key可以独立的查询每个RowSet(甚至可以并行的)，
+	  然后执行求和，因为key的顺序是不重要的，显然查询的效率更高,kudu中，mutation是与rowid绑定的。所以merge会更加高效，通过维护计数器的方式，
+	  给定下一个需要保存的mutation，我们可以简单的相减，就可以得到从base data到当前版本有多少个mutation。
+	  或者，直接寻址可以用来高效的获取最新版本的数据。获取block也非常的高效，因为mutation直接指向了block的索引地址；
+	7.hbase的系统中，每个cell的timstamp都是暴露给用户的，本质上组成了这个cell的一个符合主键。意味着，这种方式可以高效的直接访问指定版本的cell，
+	  且它存储了一个cell的整个时间序列的所有版本； 而Kudu却不高效（需要执行多个mutation），它的timestamp是从MVCC实现而来的，它不是主键的另外一个描述；
+	8.hbase采用的LSM（LogStructured Merge，很难对数据进行特殊编码，所以处理效率不高），hbase会将多条更新记录先后Flush到不同的Storefile中，
+	  所以读取时需要扫描多个文件，比较rowkey，比较版本等，然后进行更新操作，特别是major compaction操作的时候，会占用大量的性能；&nbsp;
+	9.Kudu对同一行的数据更新记录的合并工作，不是在查询的时候发生的，而是在更新的时候进行，在Kudu中一行数据只会存在于一个DiskRowSet中，
+	  避免读操作时的比较合并工作。对于列式存储的数据文件，要原地变更一行数据是很困难的，所以在Kudu中，对于Flush到磁盘上的DiskRowSet（DRS）数据，
+	  实际上是分两种形式存在的，一种是Base的数据，按列式存储格式存在，一旦生成，就不再修改，另一种是Delta文件，存储Base数据中有变更的数据，
+	  一个Base文件可以对应多个Delta文件（Kudu用MVCC(多版本并发控制)来实现数据的删改功能。更新、删除操作需要记录到特殊的数据结构里，
+	  保存在内存中的DeltaMemStore或磁盘上的DeltaFIle里面。DeltaMemStore是B-Tree实现的，因此速度快，而且可修改。
+	  磁盘上的DeltaFIle是二进制的列式的块，和base数据一样都是不可修改的。因此当数据频繁删改的时候，磁盘上会有大量的DeltaFiles文件，
+	  Kudu借鉴了Hbase的方式，会定期对这些文件进行合并），这种方式意味着，插入数据时相比HBase，需要额外走一次检索流程来判定对应主键的数据是否已经存在。
+	  因此，Kudu是牺牲了写性能来换取读取性能的提升。另外，如果在查询中没有指定key，那执行计划就不会查阅key，除了需要确定key边界情况；
+	10.hbase中insert和mutation是相同的操作，直接存储到storefile中。 
+	   kudu中insert和mutation是不同的操作：insert写入数据至MemRowSet，而mutation（delete、update）写入存在这条数据的RowSet的DeltaMemStore里，
+	   写入时必须确定这是一条新数据。这会产生一个bloom filter查询所有RowSet。如果布隆过滤器得到一个可能的match（即计算出可能在一个RowSet里），
+	   接着为了确定是否是insert还是update，一个寻址就必须被执行。 假设，只要RowSet足够小，bloom filter的结果就会足够精确，
+	   那么大部分插入将不需要物理磁盘寻址。另外，如果插入的key是有序的，例如timeseries+“_”+xxx，由于频繁使用，key所在的block可能会被保存在数据块缓存中。
+	   Update时，需要确定key在哪个RowSet。与上雷同，需要执行bloom filter。 这有点类似于关系型数据库RDBMS，当插入一条主键存在的数据时会报错，
+	   且不会更新这条数据。类似的，更新一条数据时，如果这条数据不存在也会报错。hbase的语法却不是这样，它不存在主键的概念；
+
+6.写入和读取过程
+	1.写过程
+		HBase写的时候，不管是新插入一条数据还是更新数据，都当作插入一条新数据来进行；而Kudu将插入新数据与更新操作分别看待；
+		Kudu表结构中必须设置一个唯一键，插入数据的时候必须判断一些该数据的主键是否唯一，所以插入的时候其实有一个读的过程；
+		而HBase没有太多限制，待插入数据将直接写进memstore；
+		HBase实现数据可靠性是通过将落盘的数据写入HDFS来实现，而Kudu是通过将数据写入和更新操作同步在其他副本上实现数据可靠性；
+		结合以上几点，可以看出Kudu在写的性能上相对HBase有一定的劣势；
+	2.读过程
+		在HBase中，读取的数据可能有多个版本，所以需要结合多个storefile进行查询；Kudu数据只可能存在于一个DiskRowset或者MemRowset中，
+		但是因为可能存在还未合并进原数据的更新，所以Kudu也需要结合多个DeltaFile进行查询；
+		HBase写入或者更新时可以指定timestamp，导致storefile之间timestamp范围的规律性降低，增加了实际查询storefile的数量；
+		Kudu不允许人为指定写入或者更新时的timestamp值，DeltaFile之间timestamp连续，可以更快的找到需要的DeltaFile；
+		HBase通过timestamp值可以直接取出数据；而Kudu实现多版本是通过保留UNDO records（已经合并过的操作）和REDO records（未合并过的操作）完成的，
+		在一些情况下Kudu需要将base data结合UNDO records进行回滚或者结合REDO records进行合并然后才能得到真正所需要的数据；
+		结合以上三点可以得出，不管是HBase还是Kudu，在读取一条数据时都需要从多个文件中搜寻相关信息。相对于HBase，Kudu选择将插入数据和更新操作分开，
+		一条数据只可能存在于一个DiskRowset或者memRowset中，只需要搜寻到一个rowset中存在指定数据就不用继续往下找了，用户不能设置更新和插入时的timestamp值，
+		减少了在rowset中DeltaFile的读取数量。这样在scan的情况下可以结合列式存储的优点实现较高的读性能，特别是在更新数量较少的情况下能够有效提高scan性能；
+		另外，本文在描述HBase读写过程中没有考虑读写中使用的优化技术如Bloomfilter、timestamp range等。其实Kudu中也有使用类似的优化技术来提高读写性能，
+		本文只是简单的分析，因此就不再详细讨论读写过程；
+
+7.其他差异
+	HBase：使用的java，内存的释放通过GC来完成，在内存比较紧张时可能引发full GC进而导致服务不稳定；
+	Kudu：核心模块用的C++来实现，没有full gc的风险；
+
+8.总结
+	Kudu通过要求完整的表结构设置，主键的设定，以列式存储作为数据在磁盘上的组织方式，更新和数据分开等技巧，
+	使得Kudu能够实现像HBase一样实现数据的随机读写之外，在HBase不太擅长的批量数据扫描（scan）具有较好的性能。
+	而批量读数据正是olap型应用所关注的重点，正如Kudu官网主页上描述的，Kudu实现的是既可以实现数据的快速插入与实时更新，
+	也可以实现数据的快速分析。Kudu的定位不是取代HBase，而是以降低写的性能为代价，提高了批量读的性能，使其能够实现快速在线分析。
+
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>6.kudu性能调优和报错方案解决</strong></span></h1> 
+  <pre class="has">
+<code>报错一：tablet初始化时长很久
+解决方案：
+	升级版本到kudu1.6.0以上版本&nbsp;.参考：https://kudu.apache.org/2017/12/08/apache-kudu-1-6-0-released.html
+	查看io使用情况 iostat -d -x -k 1 200.（可能是IO瓶颈）
+	Recommended maximum number of tablet servers is 100.
+	Recommended maximum number of tablets per tablet server is 2000.
+	
+</code></pre> 
+  <p><img alt="" class="has" height="340" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225838841.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1089"></p> 
+  <p>-----------------------------------------------&nbsp;</p> 
+  <pre class="has">
+<code>报错二：rpc连接超时（IO问题）
+	RPC can not complete before timeout: KuduRpc(method=CreateTable, tablet=null, attempt=26, DeadlineTracker(timeout=30000, elapsed=29427)
+解决方案：session.setTimeoutMillis(60000)
+
+报错三：移动tablet，权限不能访问
+解决方案：--superuser_acl=*
+
+</code></pre> 
+  <p><img alt="" class="has" height="68" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225851724.png" width="1153"></p> 
+  <p>-----------------------------------------------&nbsp;&nbsp;</p> 
+  <pre class="has">
+<code>报错四：新增master找不到元数据
+解决方案：
+	因为master的存储全部在本地磁盘文件，如果额外的添加了一个master，会报错，找不到consensus-meta,也就是master的容错机制，需要对master的元数据数据格式化，
+	初始化的时候直接设计好。
+	Recommended maximum number of masters is 3.
+</code></pre> 
+  <p><img alt="" class="has" height="159" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225936729.png" width="1104"></p> 
+  <p>-----------------------------------------------&nbsp;&nbsp;</p> 
+  <pre class="has">
+<code>报错五：minidumps文件（存储crash信息）出错
+	[New I/O worker #1] WARN org.apache.kudu.client.GetMasterRegistrationReceived - None of the provided masters (hadoop6:7051) is a leader, will retry.
+解决方案：
+	rm -rf /home/var/lib/kudu/master/log_dir/minidumps
+补充：
+	minidump文件包含有关崩溃的进程的重要调试信息，包括加载的共享库及其版本，崩溃时运行的线程列表，处理器寄存器的状态和每个线程的堆栈内存副本，
+	以及CPU和操作系统版本信息。Minitump可以通过电子邮件发送给Kudu开发人员或附加到JIRA，以帮助Kudu开发人员调试崩溃。
+
+报错六：impala操作kudu超时
+解决方案：kudu_operation_timeout_ms = 1800000
+
+</code></pre> 
+  <p><img alt="" class="has" height="292" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225944758.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1035"></p> 
+  <p>-----------------------------------------------&nbsp;&nbsp;</p> 
+  <pre class="has">
+<code>报错七：CDH安装kudu设置master
+解决方案：
+	--master_addresses=hadoop4:7051,hadoop5:7051,hadoop6:7051
+
+</code></pre> 
+  <p><img alt="" class="has" height="212" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511225952252.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1032"></p> 
+  <p>-----------------------------------------------&nbsp;&nbsp;</p> 
+  <pre class="has">
+<code>1.Kudu Tablet Server Maintenance Threads
+	解释：Kudu后台对数据进行维护操作，如flush、compaction、inserts、updates、and deletes，一般设置为4，官网建议的是数据目录的3倍
+	参数：maintenance_manager_num_threads
+
+2.Kudu Tablet Server Block Cache Capacity Tablet
+	解释：分配给Kudu Tablet Server块缓存的最大内存量，建议是2-4G
+	参数：block_cache_capacity_mb
+3.数据插入都kudu中，使用manual_flush策略
+4.设置ntp服务器的时间误差不超过20s（默认是10s）
+	参数：max_clock_sync_error_usec=20000000
+
+5.Kudu Tablet Server Hard Memory Limit Kudu
+	解释：写性能，Tablet Server能使用的最大内存量，建议是机器总内存的百分之80，master的内存量建议是2G，Tablet Server在批量写入数据时并非实时写入磁盘，
+	      而是先Cache在内存中，在flush到磁盘。这个值设置过小时，会造成Kudu数据写入性能显著下降。对于写入性能要求比较高的集群，建议设置更大的值
+	参数：memory_limit_hard_bytes
+6.建议每个表50columns左右，不能超过300个
+7.kudu的wal只支持单目录，如果快达到极限了，就会初始化tablte失败。所以说在部署集群的时候要单独给wal设置一个单独的目录。
+8.impala中创建表，底层使用kudu存储(Impala::TableName)，通过kudu的client端读取数据，读取不出来。
+9.kudu表如果不新建的情况下，在表中增加字段，对数据是没有影响的，kudu中增加一个字段user_id，之前impala已经和kudu进行关联操作了，
+  impala读取kudu的数据按照之前的所定义的字段读取的。
+10.设置client长连接过期时间，默认是7天（实际生产环境中设置的是180天）
+	--authn_token_validity_seconds=604800
+  	注意：设置到tserver的配置文件中
+11.tserver宕掉后，5分钟后没有恢复的情况下，该机器上的tablet会移动到其他机器，因为我们通常设置的是3个副本，其中一个副本宕掉，也就是一台机器的tserver出现故障，
+   实际情况下，还存在一个leader和follower，读写还是能够正常进行的，所以说这个参数很重要，保证数据不会转移。
+	--follower_unavailable_considered_failed_sec=300
+12.超过参数时间的历史数据会被清理，如果是base数据不会被清理。而真实运行时数据大小持续累加，没有被清理，默认是900s。
+	--tablet_history_max_age_sec=900
+
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>7.kudu性能测试报告</strong></span></h1> 
+  <p><img alt="" class="has" height="418" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511230045810.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="827"></p> 
+  <p><img alt="" class="has" height="606" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511230049114.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1185"></p> 
+  <p><img alt="" class="has" height="657" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511230052227.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1151"></p> 
+  <p><img alt="" class="has" height="659" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511230055889.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1159"></p> 
+  <p><img alt="" class="has" height="669" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511230059700.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3ppbWlhbzU1MjE0NzU3Mg==,size_16,color_FFFFFF,t_70" width="1070"></p> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>创建 hash分区 + range分区 两者同时使用 的表、删除表</strong></span></h1> 
+  <pre class="has">
+<code>package src.main.sample;
+
+import com.google.common.collect.ImmutableList;
+import org.apache.kudu.ColumnSchema;
+import org.apache.kudu.Schema;
+import org.apache.kudu.Type;
+import org.apache.kudu.client.*;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class CreateTable {
+
+    public static void main(String[] args) {
+        String tableName = "bigData";
+        KuduClient client = new KuduClient.KuduClientBuilder("192.168.241.128,192.168.241.129,192.168.241.130").defaultAdminOperationTimeoutMs(60000).build();
+        KuduSession session = client.newSession();
+        // 此处所定义的是rpc连接超时
+        session.setTimeoutMillis(60000);
+
+        try {
+            // 测试，如果table存在的情况下，就删除该表
+            if(client.tableExists(tableName)) {
+                client.deleteTable(tableName);
+                System.out.println("delete the table！");
+            }
+
+            List&lt;ColumnSchema&gt; columns = new ArrayList();
+
+            // 创建列
+            columns.add(new ColumnSchema.ColumnSchemaBuilder("id", Type.INT64).key(true).build());
+            columns.add(new ColumnSchema.ColumnSchemaBuilder("user_id", Type.INT64).key(true).build());
+            columns.add(new ColumnSchema.ColumnSchemaBuilder("start_time", Type.INT64).key(true).build());
+            columns.add(new ColumnSchema.ColumnSchemaBuilder("name", Type.STRING).nullable(true).build());
+
+            // 创建schema
+            Schema schema = new Schema(columns);
+
+	   /*
+	   创建 hash分区 + range分区 两者同时使用 的表
+		addHashPartitions(ImmutableList.of("字段名1","字段名2",...), hash分区数量)  默认使用主键，也可另外指定联合主键
+		setRangePartitionColumns(ImmutableList.of("字段名"))
+	    */
+            // id，user_id相当于联合主键，三个条件都满足的情况下，才可以更新数据，否则就是插入数据
+            ImmutableList&lt;String&gt; hashKeys = ImmutableList.of("id","user_id");
+            CreateTableOptions tableOptions = new CreateTableOptions();
+	   /*
+	    创建 hash分区 + range分区 两者同时使用 的表
+		addHashPartitions(ImmutableList.of("字段名1","字段名2",...), hash分区数量)  默认使用主键，也可另外指定联合主键
+		setRangePartitionColumns(ImmutableList.of("字段名"))
+	   */
+            // 设置hash分区，包括分区数量、副本数目
+            tableOptions.addHashPartitions(hashKeys,3); //hash分区数量
+            tableOptions.setNumReplicas(3); //副本数目
+
+            // 设置range分区
+            tableOptions.setRangePartitionColumns(ImmutableList.of("start_time"));
+
+	   // 设置range分区数量	
+            // 规则：range范围为时间戳是1-10，10-20，20-30，30-40，40-50
+            int count = 0;
+            for(long i = 1 ; i &lt;6 ; i++) {
+                PartialRow lower = schema.newPartialRow();
+                lower.addLong("start_time",count);
+                PartialRow upper = schema.newPartialRow();
+                count += 10;
+                upper.addLong("start_time", count);
+                tableOptions.addRangePartition(lower, upper);
+            }
+
+            System.out.println("create table is success!");
+            // 创建table,并设置partition
+            client.createTable(tableName, schema, tableOptions);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            try {
+//          client.deleteTable(tableName);
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                try {
+                    client.shutdown();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+}
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>修改表：增加字段、删除字段</strong></span></h1> 
+  <pre class="has">
+<code>package src.main.sample;
+
+import org.apache.kudu.Type;
+import org.apache.kudu.client.AlterTableOptions;
+import org.apache.kudu.client.KuduClient;
+
+public class AlterTable {
+    public static void main(String[] args) {
+        String tableName = "bigData";
+        KuduClient client = new KuduClient.KuduClientBuilder("192.168.161.128,192.168.161.129,192.168.161.130").defaultAdminOperationTimeoutMs(60000).build();
+        try {
+            Object o = 0L;
+            // 创建非空的列
+            client.alterTable(tableName, new AlterTableOptions().addColumn("device_id", Type.INT64, o));
+
+            // 创建列为空
+            client.alterTable(tableName, new AlterTableOptions().addNullableColumn("site_id", Type.INT64));
+	   // 删除字段
+//            client.alterTable(tableName, new AlterTableOptions().dropColumn("site_id"));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>插入 表数据</strong></span></h1> 
+  <pre class="has">
+<code>package src.main.sample;
+
+import org.apache.kudu.client.*;
+
+public class InsertData {
+    public static void main(String[] args) {
+        try {
+            String tableName = "bigData";
+
+            KuduClient client = new KuduClient.KuduClientBuilder("192.168.241.128,192.168.241.129,192.168.241.130").defaultAdminOperationTimeoutMs(60000).build();
+            // 获取table
+            KuduTable table = client.openTable(tableName);
+
+            // 获取一个会话
+            KuduSession session = client.newSession();
+            session.setTimeoutMillis(60000);
+			/**
+			 * mode形式：
+			 * SessionConfiguration.FlushMode.AUTO_FLUSH_BACKGROUND 后台自动一次性批处理刷新提交N条数据
+			 * SessionConfiguration.FlushMode.AUTO_FLUSH_SYNC  每次自动同步刷新提交每条数据
+			 * SessionConfiguration.FlushMode.MANUAL_FLUSH 	手动刷新一次性提交N条数据
+			 */
+            session.setFlushMode(SessionConfiguration.FlushMode.MANUAL_FLUSH); //mode形式
+            session.setMutationBufferSpace(10000);// 缓冲大小，也就是数据的条数
+
+            // 插入时，初始时间
+            long startTime = System.currentTimeMillis();
+
+            int val = 0;
+            // 插入数据
+            for (int i = 0; i &lt; 60; i++) {
+                Insert insert = table.newInsert();
+                PartialRow row = insert.getRow();
+				// row.addString("字段名", 字段值)、row.addLong(第几列, 字段值) 
+                row.addLong(0, i); //指第一个字段 "id"（hash分区的联合主键之一）
+                row.addLong(1, i*100);//指第二个字段 "user_id"（hash分区的联合主键之一）
+                row.addLong(2, i);//指第三个字段 "start_time"（range分区字段）
+                row.addString(3, "bigData");//指第四个字段 "name"
+                session.apply(insert);
+                if (val % 10 == 0) {
+                    session.flush(); //手动刷新提交
+                    val = 0;
+                }
+                val++;
+            }
+            session.flush(); //手动刷新提交
+            // 插入时结束时间
+            long endTime = System.currentTimeMillis();
+            System.out.println("the timePeriod executed is : " + (endTime - startTime) + "ms");
+            session.close();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>3种刷新提交数据的模式</strong></span></h1> 
+  <pre class="has">
+<code>package src.main.sample;
+
+import com.google.common.collect.ImmutableList;
+import org.apache.kudu.ColumnSchema;
+import org.apache.kudu.Schema;
+import org.apache.kudu.Type;
+import org.apache.kudu.client.*;
+
+import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * 数据刷新策略对比
+ */
+public class InsertFlushData {
+    // 缓冲大小，也就是数据的条数
+    private final static int OPERATION_BATCH = 2000;
+
+    /**
+     * mode形式：
+     * SessionConfiguration.FlushMode.AUTO_FLUSH_BACKGROUND 后台自动一次性批处理刷新提交N条数据
+     * SessionConfiguration.FlushMode.AUTO_FLUSH_SYNC  每次自动同步刷新提交每条数据
+     * SessionConfiguration.FlushMode.MANUAL_FLUSH 	手动刷新一次性提交N条数据
+     */
+
+    // 支持三个模式的测试用例
+    public static void insertTestGeneric(KuduSession session, KuduTable table, SessionConfiguration.FlushMode mode, int recordCount) throws Exception {
+		//设置 刷新提交模式
+        session.setFlushMode(mode);
+
+		//当刷新提交模式 不为 AUTO_FLUSH_SYNC（自动同步刷新）时，才设置缓冲大小（数据条数）
+        if (SessionConfiguration.FlushMode.AUTO_FLUSH_SYNC != mode) {
+			// 缓冲大小，也就是数据的条数
+            session.setMutationBufferSpace(OPERATION_BATCH);
+        }
+
+        int commit = 0;
+
+        for (int i = 0; i &lt; recordCount; i++) {
+            Insert insert = table.newInsert();
+            PartialRow row = insert.getRow();
+            UUID uuid = UUID.randomUUID();
+			// row.addString("字段名", 字段值)、row.addLong(第几列, 字段值) 
+            row.addString("id", uuid.toString());
+            row.addInt("value1", 16);
+            row.addLong("value2", 16);
+
+            Long gtmMillis;
+            /**
+             * System.currentTimeMillis() 是从1970-01-01开始算的毫秒数(GMT), kudu API是采用纳秒数, 所以需要时间*1000
+             * 另外, 考虑到我们是东8区时间, 所以转成Long型需要再加8个小时, 否则存到Kudu的时间是GTM, 比东8区晚8个小时
+             */
+            // 第一步: 获取当前时间对应的GTM时区unix毫秒数
+			// 第二步: 将timestamp转成对应的GTM时区unix毫秒数
+            Timestamp localTimestamp = new Timestamp(System.currentTimeMillis());
+            gtmMillis = localTimestamp.getTime();
+			// 将GTM的毫秒数转成东8区的毫秒数量
+            Long shanghaiTimezoneMillis = gtmMillis + 8 * 3600 * 1000;
+            row.addLong("timestamp", shanghaiTimezoneMillis);
+
+            session.apply(insert);
+
+			// 对于在MANUAL_FLUSH（手动刷新）模式时，进行 手动刷新提交
+            if (SessionConfiguration.FlushMode.MANUAL_FLUSH == mode) {
+                commit = commit + 1;
+				// 对于手工提交, 需要buffer在未满的时候flush,这里采用了buffer一半时即提交
+				//如果要提交的数据条数 已经大于 缓冲大小（数据条数）除以2的值的话，则进行一次手动刷新提交
+                if (commit &gt; OPERATION_BATCH / 2) {
+                    session.flush();//手动刷新提交
+                    commit = 0;
+                }
+            }
+        }
+
+		// 对于在MANUAL_FLUSH（手动刷新）模式时，进行 手动刷新提交
+        // 对于手工提交, 保证完成最后的提交
+        if (SessionConfiguration.FlushMode.MANUAL_FLUSH == mode &amp;&amp; commit &gt; 0) {
+            session.flush();//手动刷新提交
+        }
+
+        // 对于后台自动提交, 必须保证完成最后的提交, 并保证有错误时能抛出异常
+        if (SessionConfiguration.FlushMode.AUTO_FLUSH_BACKGROUND == mode) {
+            session.flush();//手动刷新提交
+            RowErrorsAndOverflowStatus error = session.getPendingErrors();
+            // 检查错误收集器是否有溢出和是否有行错误
+            if (error.isOverflowed() || error.getRowErrors().length &gt; 0) {
+                if (error.isOverflowed()) {
+                    throw new Exception("kudu overflow exception occurred.");
+                }
+                StringBuilder errorMessage = new StringBuilder();
+                if (error.getRowErrors().length &gt; 0) {
+                    for (RowError errorObj : error.getRowErrors()) {
+                        errorMessage.append(errorObj.toString());
+                        errorMessage.append(";");
+                    }
+                }
+                throw new Exception(errorMessage.toString());
+            }
+        }
+    }
+
+    // 支持手动flush的测试用例
+    public static void insertTestManualFlush(KuduSession session, KuduTable table, int recordCount) throws Exception {
+        SessionConfiguration.FlushMode mode = SessionConfiguration.FlushMode.MANUAL_FLUSH;
+        session.setFlushMode(mode);
+        session.setMutationBufferSpace(OPERATION_BATCH);
+
+        int commit = 0;
+        for (int i = 0; i &lt; recordCount; i++) {
+            Insert insert = table.newInsert();
+            PartialRow row = insert.getRow();
+            UUID uuid = UUID.randomUUID();
+            row.addString("id", uuid.toString());
+            row.addInt("value1", 17);
+            row.addLong("value2", 17);
+            Long gtmMillis;
+			/**
+             * System.currentTimeMillis() 是从1970-01-01开始算的毫秒数(GMT), kudu API是采用纳秒数, 所以需要时间*1000
+             * 另外, 考虑到我们是东8区时间, 所以转成Long型需要再加8个小时, 否则存到Kudu的时间是GTM, 比东8区晚8个小时
+             */
+            // 第一步: 获取当前时间对应的GTM时区unix毫秒数
+			// 第二步: 将timestamp转成对应的GTM时区unix毫秒数
+            Timestamp localTimestamp = new Timestamp(System.currentTimeMillis());
+            gtmMillis = localTimestamp.getTime();
+			// 将GTM的毫秒数转成东8区的毫秒数量
+            Long shanghaiTimezoneMillis = gtmMillis + 8 * 3600 * 1000;
+            row.addLong("timestamp", shanghaiTimezoneMillis);
+            session.apply(insert);
+            // 对于手工提交, 需要buffer在未满的时候flush,这里采用了buffer一半时即提交
+            commit = commit + 1;
+			//如果要提交的数据条数 已经大于 缓冲大小（数据条数）除以2的值的话，则进行一次手动刷新提交
+            if (commit &gt; OPERATION_BATCH / 2) {
+                session.flush();//手动刷新提交
+                commit = 0;
+            }
+        }
+
+        // 对于手工提交, 保证完成最后的提交
+        if (commit &gt; 0) {
+            session.flush();//手动刷新提交
+        }
+    }
+
+    // 自动flush的测试案例
+    public static void insertTestAutoFlushSync(KuduSession session, KuduTable table, int recordCount) throws Exception {
+        SessionConfiguration.FlushMode mode = SessionConfiguration.FlushMode.AUTO_FLUSH_SYNC;
+        session.setFlushMode(mode);
+        for (int i = 0; i &lt; recordCount; i++) {
+            Insert insert = table.newInsert();
+            PartialRow row = insert.getRow();
+            UUID uuid = UUID.randomUUID();
+            row.addString("id", uuid.toString());
+            row.addInt("value1", 18);
+            row.addLong("value2", 18);
+
+            Long gtmMillis;
+
+            /**
+             * System.currentTimeMillis() 是从1970-01-01开始算的毫秒数(GMT), kudu API是采用纳秒数, 所以需要时间*1000
+             * 另外, 考虑到我们是东8区时间, 所以转成Long型需要再加8个小时, 否则存到Kudu的时间是GTM, 比东8区晚8个小时
+             */
+            // 第一步: 获取当前时间对应的GTM时区unix毫秒数
+            gtmMillis = System.currentTimeMillis();
+
+            // 第二步: 将timestamp转成对应的GTM时区unix毫秒数
+            Timestamp localTimestamp = new Timestamp(System.currentTimeMillis());
+            gtmMillis = localTimestamp.getTime();
+
+            // 将GTM的毫秒数转成东8区的毫秒数量
+            Long shanghaiTimezoneMillis = gtmMillis + 8 * 3600 * 1000;
+            row.addLong("timestamp", shanghaiTimezoneMillis);
+
+            // 对于AUTO_FLUSH_SYNC模式, apply()将立即完成数据写入，但是并不是批处理
+            session.apply(insert);
+        }
+    }
+
+    /**
+     * 测试案例
+     */
+    public static void testStrategy() throws KuduException {
+        KuduClient client = new KuduClient.KuduClientBuilder("192.168.161.128,192.168.161.129,192.168.161.130").build();
+        KuduSession session = client.newSession();
+        KuduTable table = client.openTable("bigData2");
+
+        SessionConfiguration.FlushMode mode;
+        long d1;
+        long d2;
+        long timeMillis;
+        long seconds;
+        int recordCount = 200000;
+
+        try {
+            // 自动刷新策略(默认的刷新策略，同步刷新)
+            mode = SessionConfiguration.FlushMode.AUTO_FLUSH_SYNC;
+            System.out.println(mode + " is start！");
+            d1 = System.currentTimeMillis();
+            insertTestAutoFlushSync(session, table, recordCount);
+            d2 = System.currentTimeMillis();
+            timeMillis = d2 - d1;
+            System.out.println(mode.name() + "花费毫秒数: " + timeMillis);
+
+            // 后台刷新策略（后台批处理刷新）
+            mode = SessionConfiguration.FlushMode.AUTO_FLUSH_BACKGROUND;
+            System.out.println(mode + " is start！");
+            d1 = System.currentTimeMillis();
+            insertTestGeneric(session, table, mode, recordCount);
+            d2 = System.currentTimeMillis();
+            timeMillis = d2 - d1;
+            System.out.println(mode.name() + "花费毫秒数: " + timeMillis);
+
+            // 手动刷新
+            mode = SessionConfiguration.FlushMode.MANUAL_FLUSH;
+            System.out.println(mode + " is start！");
+            d1 = System.currentTimeMillis();
+            insertTestManualFlush(session, table, recordCount);
+            d2 = System.currentTimeMillis();
+            timeMillis = d2 - d1;
+            System.out.println(mode.name() + "花费毫秒数: " + timeMillis);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if (!session.isClosed()) {
+                session.close();
+            }
+        }
+    }
+
+    public static void createTable() {
+        String tableName = "bigData2";
+        KuduClient client = new KuduClient.KuduClientBuilder("192.168.161.128,192.168.161.129,192.168.161.130").defaultAdminOperationTimeoutMs(60000).build();
+        KuduSession session = client.newSession();
+        session.setTimeoutMillis(60000);
+
+        try {
+            // 测试，如果table存在的情况下，就删除该表
+            if (client.tableExists(tableName)) {
+                client.deleteTable(tableName);
+                System.out.println("delete the table is success！");
+            }
+
+            List&lt;ColumnSchema&gt; columns = new ArrayList();
+
+            // 创建列
+            columns.add(new ColumnSchema.ColumnSchemaBuilder("id", Type.STRING).key(true).build());
+            columns.add(new ColumnSchema.ColumnSchemaBuilder("value1", Type.INT32).key(true).build());
+            columns.add(new ColumnSchema.ColumnSchemaBuilder("value2", Type.INT64).key(true).build());
+            columns.add(new ColumnSchema.ColumnSchemaBuilder("timestamp", Type.INT64).key(true).build());
+
+            // 创建schema
+            Schema schema = new Schema(columns);
+		    /*
+		    创建 hash分区 + range分区 两者同时使用 的表
+				addHashPartitions(ImmutableList.of("字段名1","字段名2",...), hash分区数量)  默认使用主键，也可另外指定联合主键
+				setRangePartitionColumns(ImmutableList.of("字段名"))
+			*/
+            // id和timestamp 组成 联合主键
+            ImmutableList&lt;String&gt; hashKeys = ImmutableList.of("id", "timestamp");
+            CreateTableOptions tableOptions = new CreateTableOptions();
+
+            // 设置hash分区，包括分区数量、副本数目
+            tableOptions.addHashPartitions(hashKeys, 20); //hash分区数量
+            tableOptions.setNumReplicas(1);//副本数目
+
+            System.out.println("create the table is success! ");
+            // 创建table,并设置partition
+            client.createTable(tableName, schema, tableOptions);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            createTable();
+            testStrategy();
+            /**
+             *AUTO_FLUSH_SYNC is start！
+              AUTO_FLUSH_SYNC花费毫秒数: 588863
+              AUTO_FLUSH_BACKGROUND is start！
+              AUTO_FLUSH_BACKGROUND花费毫秒数: 12284
+              MANUAL_FLUSH is start！
+              MANUAL_FLUSH花费毫秒数: 17231
+             */
+        } catch (KuduException e) {
+            e.printStackTrace();
+        }
+    }
+}
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>查询 表数据&nbsp;</strong></span></h1> 
+  <pre class="has">
+<code>package src.main.sample;
+
+import org.apache.kudu.Schema;
+import org.apache.kudu.client.*;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class SelectData {
+    public static void main(String[] args) {
+        try {
+            String tableName = "bigData";
+
+            KuduClient client = new KuduClient.KuduClientBuilder("192.168.161.128,192.168.161.129,192.168.161.130").defaultAdminOperationTimeoutMs(60000).build();
+
+            // 获取需要查询数据的列
+            List&lt;String&gt; projectColumns = new ArrayList&lt;String&gt;();
+            projectColumns.add("id");
+            projectColumns.add("user_id");
+            projectColumns.add("start_time");
+            projectColumns.add("name");
+
+            KuduTable table = client.openTable(tableName);
+
+            // 简单的读取
+            KuduScanner scanner = client.newScannerBuilder(table).setProjectedColumnNames(projectColumns).build();
+
+            // 根据主键设置读取的上限和下限
+//            Schema schema = table.getSchema();
+//            PartialRow lower = schema.newPartialRow();
+//            lower.addLong("id", 10);
+//            lower.addLong("user_id", 10);
+//            lower.addLong("start_time", 50);
+//            PartialRow upper = schema.newPartialRow();
+//            upper.addLong("id", 50);
+//            upper.addLong("user_id", 50);
+//            upper.addLong("start_time", 50);
+
+//            KuduScanner scanner = client.newScannerBuilder(table)
+//                    .setProjectedColumnNames(projectColumns)
+//                    .lowerBound(lower)
+//                    .exclusiveUpperBound(upper)
+//                    .build();
+
+            while (scanner.hasMoreRows()) {
+                RowResultIterator results = scanner.nextRows();
+                // 15个tablet，每次从tablet中获取的数据的行数
+                int numRows = results.getNumRows();
+                System.out.println("numRows count is : " + numRows);
+                while (results.hasNext()) {
+                    RowResult result = results.next();
+                    long id = result.getLong(0);
+                    long user_id = result.getLong(1);
+                    long start_time = result.getLong(2);
+                    String name = result.getString(3);
+                    System.out.println("id is : " + id + "  ===  user_id is : " + user_id + "  ===  start_time : " + start_time + "  ===  name is : " + name);
+                }
+                System.out.println("--------------------------------------");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+</code></pre> 
+  <hr>
+  <h1><span style="color:#f33b45;"><strong>修改 表数据</strong></span></h1> 
+  <pre class="has">
+<code>package src.main.sample;
+
+import org.apache.kudu.client.*;
+
+public class UpsertData {
+    public static void main(String[] args) {
+        try {
+            String tableName = "bigData";
+
+            KuduClient client = new KuduClient.KuduClientBuilder("192.168.161.128,192.168.161.129,192.168.161.130").defaultAdminOperationTimeoutMs(60000).build();
+            // 获取table
+            KuduTable table = client.openTable(tableName);
+			/**
+			 * mode形式：
+			 * SessionConfiguration.FlushMode.AUTO_FLUSH_BACKGROUND 后台自动一次性批处理刷新提交N条数据
+			 * SessionConfiguration.FlushMode.AUTO_FLUSH_SYNC  每次自动同步刷新提交每条数据
+			 * SessionConfiguration.FlushMode.MANUAL_FLUSH 	手动刷新一次性提交N条数据
+			 */
+            // 获取一个会话
+            KuduSession session = client.newSession();
+            session.setTimeoutMillis(60000);
+            session.setFlushMode(SessionConfiguration.FlushMode.MANUAL_FLUSH); //手动刷新一次性提交N条数据
+            session.setMutationBufferSpace(10000); // 缓冲大小，也就是数据的条数
+
+            // 插入时，初始时间
+            long startTime = System.currentTimeMillis();
+
+            int val = 0;
+            // 在使用 upsert 语句时，当前需要 三个条件（key）都满足的情况下，才可以更新数据，否则就是插入数据
+			// 三个条件（key） 分别指的是 hash分区的联合主键id、user_id，还有range分区字段 start_time
+            for (int i = 0; i &lt; 60; i++) {
+				//upsert into 表名 values (‘xx’,123) 如果指定的values中的主键值 在表中已经存在，则执行update语义，反之，执行insert语义。
+                Upsert upsert = table.newUpsert();
+                PartialRow row = upsert.getRow();
+                row.addLong(0, i); //指第一个字段 "id"（hash分区的联合主键之一）
+                row.addLong(1, i*100); //指第二个字段 "user_id"（hash分区的联合主键之一）
+                row.addLong(2, i); //指第三个字段 "start_time"（range分区字段）
+                row.addString(3, "bigData"+i); //指第四个字段 "name"
+                session.apply(upsert);
+                if (val % 10 == 0) {
+                    session.flush(); //手动刷新提交
+                    val = 0;
+                }
+                val++;
+            }
+            session.flush(); //手动刷新提交
+            // 插入时结束时间
+            long endTime = System.currentTimeMillis();
+            System.out.println("the timePeriod executed is : " + (endTime - startTime) + "ms");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+</code></pre> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

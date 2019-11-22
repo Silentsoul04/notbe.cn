@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Android AsyncTask源码解析 « NotBeCN</title>
+  <meta name="description" content="          由于AsyncTask是抽象类，所以必须要有子类继承，下面是它的构造函数：   //1public AsyncTask() {        this((Looper) null);    }//2public AsyncTask(@Nullable Handler handler) {   ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/qq_36999309_90138090.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Android AsyncTask源码解析</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>由于AsyncTask是抽象类，所以必须要有子类继承，下面是它的构造函数：</p> 
+  <pre class="has">
+<code class="language-java">//1
+public AsyncTask() {
+        this((Looper) null);
+    }
+//2
+public AsyncTask(@Nullable Handler handler) {
+        this(handler != null ? handler.getLooper() : null);
+    }
+//3
+public AsyncTask(@Nullable Looper callbackLooper) {
+        mHandler = callbackLooper == null || callbackLooper == Looper.getMainLooper()
+            ? getMainHandler()
+            : new Handler(callbackLooper);
+        /**略*/
+}</code></pre> 
+  <p>1号和2号构造函数调用的都是3号构造函数。1号调用3号传入的是null；2号的Handler参数如果不为null，传入的是Handler.Looper，否则也传入null。</p> 
+  <p>在3号构造函数，如果参数为null或者是主线程Looper，那么Handler就是主线程的Handler，否则就是指定线程的Handler。</p> 
+  <p>如果子类继承了AsyncTask则会默认调用无参的构造函数，奇怪，既然这样，为什么很多人都说AsyncTask的实例只能在主线程创建呢？这明明跟在哪个线程创建没关系啊！</p> 
+  <p>我们再看看<strong>getMainHandler()</strong></p> 
+  <pre class="has">
+<code class="language-java">private static Handler getMainHandler() {
+        synchronized (AsyncTask.class) {
+            if (sHandler == null) {
+                sHandler = new InternalHandler(Looper.getMainLooper());
+            }
+            return sHandler;
+        }
+    }</code></pre> 
+  <p>可以看到，返回的Handler对象是一个子类—InternalHandler，传入的是主线程Looper，看看这个类。</p> 
+  <pre class="has">
+<code class="language-java">private static class InternalHandler extends Handler {
+        public InternalHandler(Looper looper) {
+            super(looper);
+        }
+
+        @SuppressWarnings({"unchecked", "RawUseOfParameterizedType"})
+        @Override
+        public void handleMessage(Message msg) {
+            AsyncTaskResult&lt;?&gt; result = (AsyncTaskResult&lt;?&gt;) msg.obj;
+            switch (msg.what) {
+                case MESSAGE_POST_RESULT:
+                    // There is only one result
+                    result.mTask.finish(result.mData[0]);
+                    break;
+                case MESSAGE_POST_PROGRESS:
+                    result.mTask.onProgressUpdate(result.mData);
+                    break;
+            }
+        }
+    }</code></pre> 
+  <p>构造函数没有变化，只是重写了handleMessage()方法，从switch的两种情况可以知道，AsyncTask的<strong>onProgressUpdate</strong>和<strong>onPostExecute，</strong>都是通过handler实现回调的。</p> 
+  <p>再回到3号构造函数，这里面有一种情况是返回一个new Handler()对象，很明显如果这样的话，我们就没有办法收到结果和更新了。另外从整个过程来看，即便是子线程创建执行也是没有关系的，但是方法注释上都写着<strong>必须在主线程执行</strong>。我自己还是试验了一下，是可以在子线程创建执行的，可能有什么是我没有考虑到的吧。但是AsyncTask只能调用1号构造函数，其他的无法使用。</p> 
+  <p>我们再看看3号构造函数剩下的部分</p> 
+  <pre class="has">
+<code class="language-java">mWorker = new WorkerRunnable&lt;Params, Result&gt;() {
+            public Result call() throws Exception {
+                mTaskInvoked.set(true);
+                Result result = null;
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+                    //noinspection unchecked
+                    result = doInBackground(mParams);//1
+                    Binder.flushPendingCommands();
+                } catch (Throwable tr) {
+                    mCancelled.set(true);
+                    throw tr;
+                } finally {
+                    postResult(result);//2
+                }
+                return result;
+            }
+        };
+mFuture = new FutureTask&lt;Result&gt;(mWorker) {
+            @Override
+            protected void done() {
+                try {
+                    postResultIfNotInvoked(get());
+                } catch (InterruptedException e) {
+                    android.util.Log.w(LOG_TAG, e);
+                } catch (ExecutionException e) {
+                    throw new RuntimeException("An error occurred while executing doInBackground()",
+                            e.getCause());
+                } catch (CancellationException e) {
+                    postResultIfNotInvoked(null);
+                }
+            }
+        };
+        </code></pre> 
+  <p>mWorker实现了Callable接口，mFuture则是FutureTask的子类，构造函数传入mWorker。</p> 
+  <p>&nbsp;</p> 
+  <p>mWorkder主要看1和2部分代码。1部分执行了doInBackGround()，传入指定参数；2部分调用<strong>postResult()传入结果，</strong>往主线程回调结果。</p> 
+  <p>mFuture主要就是重写了done()，<strong>postResultIfNotInvoked()</strong>会先判断这个任务是否被执行了，如果没有执行，也会调用<strong>postResult()，</strong>传入null。</p> 
+  <pre class="has">
+<code class="language-java"> private Result postResult(Result result) {
+        @SuppressWarnings("unchecked")
+        Message message = getHandler().obtainMessage(MESSAGE_POST_RESULT,
+                new AsyncTaskResult&lt;Result&gt;(this, result));
+        message.sendToTarget();
+        return result;
+    }</code></pre> 
+  <p>可以看到<strong>postResult()，</strong>就如上面所说，通过handler传递结果，将结果返回到主线程。</p> 
+  <p>&nbsp;</p> 
+  <p>接下来再看看两个线程池。</p> 
+  <pre class="has">
+<code class="language-java">public static final Executor SERIAL_EXECUTOR = new SerialExecutor();    
+private static volatile Executor sDefaultExecutor = SERIAL_EXECUTOR;
+
+
+public static final Executor THREAD_POOL_EXECUTOR;
+
+    static {
+        ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(
+                CORE_POOL_SIZE, MAXIMUM_POOL_SIZE, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS,
+                sPoolWorkQueue, sThreadFactory);
+        threadPoolExecutor.allowCoreThreadTimeOut(true);
+        THREAD_POOL_EXECUTOR = threadPoolExecutor;
+    }</code></pre> 
+  <p>SERIAL_EXECUTOR和sDefaultExecutor默认是同一个引用，前者是静态的，后者是被volatile修饰，而且可以被set方法修改，并且我们使用的是后者的引用。首先看看SerialExecutor类型的线程池</p> 
+  <pre class="has">
+<code class="language-java">private static class SerialExecutor implements Executor {
+        final ArrayDeque&lt;Runnable&gt; mTasks = new ArrayDeque&lt;Runnable&gt;();
+        Runnable mActive;
+
+        public synchronized void execute(final Runnable r) {
+            mTasks.offer(new Runnable() {
+                public void run() {
+                    try {
+                        r.run();
+                    } finally {
+                        scheduleNext();//1
+                    }
+                }
+            });
+            if (mActive == null) {//2
+                scheduleNext();
+            }
+        }
+
+        protected synchronized void scheduleNext() {
+            if ((mActive = mTasks.poll()) != null) {
+                THREAD_POOL_EXECUTOR.execute(mActive);
+            }
+        }
+    }</code></pre> 
+  <p>很明显，这个线程池只是把提交的任务加入队列中，真正执行还是靠<strong>THREAD_POOL_EXECUTOR。</strong>这里通过加锁、mActive和scheduleNext()保证每次只要一个任务执行，执行完后才会执行下一个。</p> 
+  <p>如果连续两个任务执行，首先他们都会被加入队列，然后执行<strong>2处</strong>代码时，线程A先执行，然后线程B就无法执行了。线程A执行完毕后执行<strong>1处</strong>代码，弹出线程B的任务，继续执行。通过这样来达到串行执行的目的。</p> 
+  <p>&nbsp;</p> 
+  <p>接下来我们就看看执行过程，execute()</p> 
+  <pre class="has">
+<code class="language-java">public final AsyncTask&lt;Params, Progress, Result&gt; execute(Params... params) {
+        return executeOnExecutor(sDefaultExecutor, params);
+    }
+ 
+public final AsyncTask&lt;Params, Progress, Result&gt; executeOnExecutor(Executor exec,
+            Params... params) {
+        if (mStatus != Status.PENDING) {
+            switch (mStatus) {
+                case RUNNING:
+                    throw new IllegalStateException("Cannot execute task:"
+                            + " the task is already running.");
+                case FINISHED:
+                    throw new IllegalStateException("Cannot execute task:"
+                            + " the task has already been executed "
+                            + "(a task can be executed only once)");
+            }
+        }
+
+        mStatus = Status.RUNNING;
+
+        onPreExecute();
+
+        mWorker.mParams = params;
+        exec.execute(mFuture);
+
+        return this;
+    }</code></pre> 
+  <p>可以看到，每一个AsyncTask实例只能被执行一次，然后首先执行<strong>onPreExecute()，</strong>最后调用了sDefaultExecutor的execute()。</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

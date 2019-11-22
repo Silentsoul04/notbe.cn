@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>网络子系统在链路层的收发过程剖析（一）【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://linux.chinaunix.net/techdoc/net/2007/01/30/949381.shtml    R.wen (rwen2012@126.com)1），Skb_buff/* To allow 64K frame to be packed as si...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/04/12/weixin_34270865_90130002.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">网络子系统在链路层的收发过程剖析（一）【转】</h1>
+    <p class="post-meta">Apr 12, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://linux.chinaunix.net/techdoc/net/2007/01/30/949381.shtml" rel="nofollow">http://linux.chinaunix.net/techdoc/net/2007/01/30/949381.shtml</a></p> 
+   <p>R.wen (<br><a href="mailto:rwen2012@126.com" rel="nofollow">rwen2012@126.com</a><br>)<br><br>1），Skb_buff<br><br><br>/* To allow 64K frame to be packed as single skb without frag_list */<br>#define MAX_SKB_FRAGS (65536/PAGE_SIZE + 2)<br><br>typedef struct skb_frag_struct skb_frag_t;<br><br>struct skb_frag_struct {<br>&nbsp; &nbsp;&nbsp; &nbsp; struct page *page;<br>&nbsp; &nbsp;&nbsp; &nbsp; __u16 page_offset;<br>&nbsp; &nbsp;&nbsp; &nbsp; __u16 size;<br>};<br><br>/* This data is invariant across clones and lives at<br>* the end of the header data, ie. at skb-&gt;end.<br>*/<br>struct skb_shared_info {<br>&nbsp; &nbsp;&nbsp; &nbsp; atomic_t&nbsp;&nbsp;dataref;<br>&nbsp; &nbsp;&nbsp; &nbsp; unsigned short&nbsp; &nbsp;&nbsp; &nbsp; nr_frags;<br>&nbsp; &nbsp;&nbsp; &nbsp; unsigned short&nbsp; &nbsp;&nbsp; &nbsp; gso_size;<br>&nbsp; &nbsp;&nbsp; &nbsp; /* Warning: this field is not always filled in (UFO)! */<br>&nbsp; &nbsp;&nbsp; &nbsp; unsigned short&nbsp; &nbsp;&nbsp; &nbsp; gso_segs;<br>&nbsp; &nbsp;&nbsp; &nbsp; unsigned short&nbsp;&nbsp;gso_type;<br>&nbsp; &nbsp;&nbsp; &nbsp; unsigned int&nbsp; &nbsp; ip6_frag_id;<br>&nbsp; &nbsp;&nbsp; &nbsp; struct sk_buff *frag_list;<br>&nbsp; &nbsp;&nbsp; &nbsp; skb_frag_t&nbsp; &nbsp;&nbsp; &nbsp;frags[MAX_SKB_FRAGS];<br>};<br><br><br>Skb比较复杂的部分在于skb_shared_info部分，alloc_skb()在为数据分配空间的时候，会在这个数据的末尾加上一个skb_shared_info结构，这个结构就是用于scatter/gather IO的实现的。它主要用于提高性能，避免数据的多次拷贝。例如，当用户用sendmsg分送一个数组结构的数据时，这些数据在物理可能是不连续的（大多数情况），在不支持scatter/gather IO的网卡上，它只能通过重新拷贝，将它重装成连续的skb（skb_linearize）,才可以进行DMA操作。而在支持S/G IO上，它就省去了这次拷贝。<br><br><br><br><img src="http://blogimg.chinaunix.net/blog/upfile/070130171132.jpg" alt=""><br><br><br>2），网卡（PCI设备的注册）<br>&nbsp; &nbsp;&nbsp; &nbsp; 系统启动的时候，pci会扫描所有的PCI设备然后根据注册驱动的id_table，找到相匹配的驱动，实现关联。当找到匹配的驱动时，它会执行相关驱动程序中的probe函数，而网卡的net_device就是在这个函数里面初始化的并注册到内核的。<br><br><br>3），网卡链路状态检测<br>&nbsp; &nbsp;&nbsp; &nbsp; 当网卡链路状态变化时（如断开或连上），网卡会通知驱动程序或者由驱动程序去查询网卡的相关寄存器位（例如在timeout时去查询这些位），然后由netif_carrier_on/off去通知内核这个变化。<br><br>void netif_carrier_on(struct net_device *dev)<br>{&nbsp; &nbsp;// test_and_clear_bit - Clear a bit and return its old value<br>&nbsp; &nbsp;&nbsp; &nbsp; if (test_and_clear_bit(__LINK_STATE_NOCARRIER, &amp;dev-&gt;state))<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;linkwatch_fire_event(dev);<br>&nbsp; &nbsp;&nbsp; &nbsp; if (netif_running(dev))<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;__netdev_watchdog_up(dev);<br>}<br><br>static inline netif_carrier_off(struct net_device *dev)<br>{<br>//test_and_set_bit - Set a bit and return its old value<br>&nbsp; &nbsp; if (!test_and_set_bit(_ _LINK_STATE_NOCARRIER, &amp;dev-&gt;state))<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;linkwatch_fire_event(dev);<br>}<br><br>这样，netif_carrier_on会调用linkwatch_fire_event，它会创建一个lw_event结构：<br><br>&nbsp; &nbsp;&nbsp; &nbsp; struct lw_event {<br>&nbsp; &nbsp;&nbsp; &nbsp; struct list_head list;<br>&nbsp; &nbsp;&nbsp; &nbsp; struct net_device *dev;<br>};<br>并将这个结构初始化后（event-&gt;dev = dev;）加入到事件队列中：<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;spin_lock_irqsave(&amp;lweventlist_lock, flags);<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;list_add_tail(&amp;event-&gt;list, &amp;lweventlist);<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;spin_unlock_irqrestore(&amp;lweventlist_lock, flags);<br><br>然后它调用schedule_work(&amp;linkwatch_work)由内核线程去处理这些事件。它最终由linkwatch_run_queue(void)去完成这些处理工作：<br><br>list_for_each_safe(n, next, &amp;head) {<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;struct lw_event *event = list_entry(n, struct lw_event, list);<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;struct net_device *dev = event-&gt;dev;<br>&nbsp; &nbsp;&nbsp; &nbsp; …<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;if (dev-&gt;flags &amp; IFF_UP) {<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;if (netif_carrier_ok(dev)) {<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp; dev_activate(dev);<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;} else<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp; dev_deactivate(dev);<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;netdev_state_change(dev);<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;}<br>}<br><br>可以看到，它的最主要工作之一就是netdev_state_change(dev)：<br>void netdev_state_change(struct net_device *dev)<br>{<br>&nbsp; &nbsp;&nbsp; &nbsp; if (dev-&gt;flags &amp; IFF_UP) {<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;raw_notifier_call_chain(&amp;netdev_chain,<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp; NETDEV_CHANGE, dev);<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp;rtmsg_ifinfo(RTM_NEWLINK, dev, 0);<br>&nbsp; &nbsp;&nbsp; &nbsp; }<br>}<br><br>这个函数通知注册到netdev_chain链表的所有子系统，这个网卡的链路状态有了变化。就是说，如果某个子系统对网卡的链路状态变化感兴趣，它就可以注册到进这个链表，在变化产生时，内核便会通知这些子系统。<br><br>注意：a. 它只会在网卡状态为UP时，才会发出通知，因为，如果状态为DOWN，网卡链路的状态改变也没什么意义。<br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;b. 每个见网卡的这些状态变化的事件lw_event是不会队列的，即每个网卡只有一个事件的实例在队列中。还有由上面看到的lw_event结构，它只是包含发生状态变化的网卡设备，而没有包含它是链上或是断开的状状参数。<br><br>&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp;&nbsp; &nbsp; 07.01.29</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

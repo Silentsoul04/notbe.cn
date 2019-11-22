@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>程序员过关斩将--数据库快速迁移10亿级数据 « NotBeCN</title>
+  <meta name="description" content="                     问题分析   经过几分钟的排查，数据库情况如下：       数据库采用Sqlserver 2008 R2，单表数据量21亿。     无水平或者垂直切分，但是采用了分区表。分区表策略是按时间降序分的区，将近30个分区。正因为分区表的原因，系统才保证了在性能不是太差的情况...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/weixin_43163769_90137079.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">程序员过关斩将--数据库快速迁移10亿级数据</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-light"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/2019051209191511.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3dlaXhpbl80MzE2Mzc2OQ==,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p> 
+  <h4><a id="_1"></a>问题分析</h4> 
+  <p>经过几分钟的排查，数据库情况如下：</p> 
+  <ul> 
+   <li>数据库采用Sqlserver 2008 R2，单表数据量21亿。<br> <img src="https://mmbiz.qpic.cn/mmbiz_png/3TjM42ia414kJHibmWS3NXUVjRhGicEmRhOzU6fn2e3ar3A4kibSkASn57s7gqQiaKsOUvgehnnM4wvJJMT4bPh8nWA/0?wx_fmt=png" alt="image"></li> 
+   <li>无水平或者垂直切分，但是采用了分区表。分区表策略是按时间降序分的区，将近30个分区。正因为分区表的原因，系统才保证了在性能不是太差的情况下坚持至今。</li> 
+   <li>此表除聚集索引之外，无其他索引，无主键（主键其实是利用索引来快速查重的）。所以在频繁插入新数据的情况下，索引调整所耗费的性能比较低。<br> <img src="https://mmbiz.qpic.cn/mmbiz_png/3TjM42ia414kJHibmWS3NXUVjRhGicEmRhOu7zuheqtibCuJwyibicibDBL5P2QBhCicJxSonFTuZHjTpvHjZxNr36l7Xg/0?wx_fmt=png" alt="image"></li> 
+  </ul> 
+  <blockquote> 
+   <p>至于聚集索引和非聚集索引等知识，请各位移步google或者百度。</p> 
+  </blockquote> 
+  <p>至于业务，不是太复杂。经过相关人员咨询，大约40%的请求为单条Insert，大约60%的请求为按class_id 和in_time（倒序）分页获取数据。Select请求全部命中聚集索引，所以性能非常高。这也是聚集索引之所以这样设计的目的。</p> 
+  <h3><a id="_13"></a>解决问题</h3> 
+  <p>由于单表数据量已经超过21亿，并且2017年以前的数据几乎不影响业务，所以决定把2017年以前（不包括2017年）的数据迁移到新表，仅供以后特殊业务查询使用。经过查询大约有9亿数据量。<br> 数据迁移工作包括三个个步骤：</p> 
+  <ol> 
+   <li>从源数据表查询出要迁移的数据</li> 
+   <li>把数据插入新表</li> 
+   <li>把旧表的数据删除</li> 
+  </ol> 
+  <h5><a id="_20"></a>传统做法</h5> 
+  <p>这里申明一点，就算是传统的做法也需要分页获取源数据，因为你的内存一次性装载不下9亿条数据。</p> 
+  <ol> 
+   <li>从源数据表分页获取数据，具体分页条数，太少则查询原表太频繁，太多则查询太慢。<br> SQL语句类似于</li> 
+  </ol> 
+  <pre><code>SELECT * FROM (
+SELECT *,ROW_NUMBER() OVER(ORDER BY class_id,in_time) p FROM  tablexx WHERE in_time &lt;'2017.1.1'  
+) t WHERE t.p BETWEEN 1 AND 100
+</code></pre> 
+  <ol start="2"> 
+   <li>把查询出来的数据插入目标数据表，这里强调一点，一定不要用单条插入策略，必须用批量插入。</li> 
+   <li>把数据删除，其实这里删除还是有一个小难点，表没有标示列。这里不展开，因为这不是菜菜要说的重点。</li> 
+  </ol> 
+  <p>如果你的数据量不大，以上方法完全没有问题，但是在9亿这个数字前面，以上方法显得心有余而力不足。一个字：慢，太慢，非常慢。</p> 
+  <p>可以大体算一下，假如每秒可以迁移1000条数据，大约需要的时间为(单位：分)</p> 
+  <blockquote> 
+   <p>900000000/1000/60=15000(分钟)</p> 
+  </blockquote> 
+  <p>大约需要10天^ V ^</p> 
+  <h4><a id="_39"></a>改进做法</h4> 
+  <p>以上的传统做法弊端在哪里呢？</p> 
+  <ol> 
+   <li>在9亿数据前查询必须命中索引，就算是非聚集索引菜菜也不推荐，首推聚集索引。</li> 
+   <li>如果你了解索引的原理，你应该明白，不停的插入新数据的时候，索引在不停的更新，调整，以保持树的平衡等特性。尤其是聚集索引影响甚大，因为还需要移动实际的数据。</li> 
+  </ol> 
+  <p>提取以上两点共同的要素，那就是聚集索引。相应的解决方案也就应运而生：</p> 
+  <ol> 
+   <li>按照聚集索分页引查询数据</li> 
+   <li>批量插入数据迎合聚集索引，即：按照聚集索引的顺序批量插入。</li> 
+   <li>按照聚集索引顺序批量删除</li> 
+  </ol> 
+  <p><strong>由于做了表分区，如果有一种方式把2017年以前的分区直接在磁盘物理层面从当前表剥离，然后挂载到另外一个表，可算是神级操作。有谁能指导一下菜菜，感激不尽</strong></p> 
+  <h3><a id="_51"></a>扩展阅读</h3> 
+  <ol> 
+   <li> <p>一个表的聚集索引的顺序就是实际数据文件的顺序，映射到磁盘上，本质上位于同一个磁道上，所以操作的时候磁盘的磁头不必跳跃着去操作。</p> </li> 
+   <li> <p>存储在硬盘中的每个文件都可分为两部分：文件头和存储数据的数据区。文件头用来记录文件名、文件属性、占用簇号等信息，文件头保存在一个簇并映射在FAT表（文件分配表）中。而真实的数据则是保存在数据区当中的。平常所做的删除，其实是修改文件头的前2个代码，这种修改映射在FAT表中，就为文件作了删除标记，并将文件所占簇号在FAT表中的登记项清零，表示释放空间，这也就是平常删除文件后，硬盘空间增大的原因。而真正的文件内容仍保存在数据区中，并未得以删除。要等到以后的数据写入，把此数据区覆盖掉，这样才算是彻底把原来的数据删除。如果不被后来保存的数据覆盖，它就不会从磁盘上抹掉。</p> </li> 
+  </ol> 
+  <h3><a id="NetCore__56"></a>NetCore 代码(实际运行代码)</h3> 
+  <ol> 
+   <li>第一步：由于聚集索引需要class_id ，所以宁可花2-4秒时间把要操作的class_id查询出来(ORM为dapper)，并且升序排列</li> 
+  </ol> 
+  <pre><code>            DateTime dtMax = DateTime.Parse("2017.1.1");
+            var allClassId = DBProxy.GeSourcetLstClassId(dtMax)?.OrderBy(s=&gt;s);
+</code></pre> 
+  <ol start="2"> 
+   <li>按照第一步class_id 列表顺序查询数据，每个class_id 分页获取，然后插入目标表，全部完成然后删除源表相应class_id的数据。(全部命中聚集索引)</li> 
+  </ol> 
+  <pre><code>            int pageIndex = 1; //页码
+            int pageCount = 20000;//每页的数据条数
+            DataTable tempData =null;
+            int successCount = 0;
+            foreach (var classId in allClassId)
+            {
+                tempData = null;
+                pageIndex = 1;
+                while (true)
+                {
+                    int startIndex = (pageIndex - 1) * pageCount+1;
+                    int endIndex = pageIndex * pageCount;
+
+                    tempData = DBProxy.GetSourceDataByClassIdTable(dtMax, classId, startIndex, endIndex);
+                    if (tempData == null || tempData.Rows.Count==0)
+                    {
+                        //最后一页无数据了，删除源数据源数据然后跳出
+                         DBProxy.DeleteSourceClassData(dtMax, classId);
+                        break;
+                    }
+                    else
+                    {
+                        DBProxy.AddTargetData(tempData);
+                    }
+                    pageIndex++;
+                }
+                successCount++;
+                Console.WriteLine($"班级:{classId} 完成,已经完成：{successCount}个");
+            }
+</code></pre> 
+  <p>DBProxy 完整代码：</p> 
+  <pre><code>class DBProxy
+    {
+        //获取要迁移的数据所有班级id
+        public static IEnumerable&lt;int&gt; GeSourcetLstClassId(DateTime dtMax)
+        {
+            var connection = Config.GetConnection(Config.SourceDBStr);
+            string Sql = @"SELECT class_id FROM  tablexx WHERE in_time &lt;@dtMax GROUP BY class_id ";
+            using (connection)
+            {
+                return connection.Query&lt;int&gt;(Sql, new { dtMax = dtMax }, commandType: System.Data.CommandType.Text);
+
+            }
+        }
+       
+        public static DataTable GetSourceDataByClassIdTable(DateTime dtMax, int classId, int startIndex, int endIndex)
+        {
+            var connection = Config.GetConnection(Config.SourceDBStr);
+            string Sql = @" SELECT * FROM (
+                        SELECT *,ROW_NUMBER() OVER(ORDER BY in_time desc) p FROM  tablexx WHERE in_time &lt;@dtMax  AND class_id=@classId
+                        ) t WHERE t.p BETWEEN @startIndex AND @endIndex ";
+            using (connection)
+            {
+                DataTable table = new DataTable("MyTable");
+                var reader = connection.ExecuteReader(Sql, new { dtMax = dtMax, classId = classId, startIndex = startIndex, endIndex = endIndex }, commandType: System.Data.CommandType.Text);
+                table.Load(reader);
+                reader.Dispose();
+                return table;
+            }
+        }
+         public static int DeleteSourceClassData(DateTime dtMax, int classId)
+        {
+            var connection = Config.GetConnection(Config.SourceDBStr);
+            string Sql = @" delete from  tablexx WHERE in_time &lt;@dtMax  AND class_id=@classId ";
+            using (connection)
+            {
+                return connection.Execute(Sql, new { dtMax = dtMax, classId = classId }, commandType: System.Data.CommandType.Text);
+
+            }
+        }
+        //SqlBulkCopy 批量添加数据
+        public static int AddTargetData(DataTable data)
+        {
+            var connection = Config.GetConnection(Config.TargetDBStr);
+            using (var sbc = new SqlBulkCopy(connection))
+            {
+                sbc.DestinationTableName = "tablexx_2017";               
+                sbc.ColumnMappings.Add("class_id", "class_id");
+                sbc.ColumnMappings.Add("in_time", "in_time");
+                .
+                .
+                .
+                using (connection)
+                {
+                    connection.Open();
+                    sbc.WriteToServer(data);
+                }               
+            }
+            return 1;
+        }
+
+    }
+</code></pre> 
+  <h4><a id="_158"></a>运行报告</h4> 
+  <p>程序本机运行，开vpn连接远程DB服务器，运行1分钟，迁移的数据数据量为 1915560，每秒约3万条数据</p> 
+  <blockquote> 
+   <p>1915560 / 60=31926 条/秒</p> 
+  </blockquote> 
+  <p>cpu情况（不高）：</p> 
+  <p><img src="https://mmbiz.qpic.cn/mmbiz_png/3TjM42ia414kJHibmWS3NXUVjRhGicEmRhOBslueO2ukufmZZYibu18icPy32Bjw0YpFaEFNicpiccsLQTajsumNROF9g/0?wx_fmt=png" alt="image"></p> 
+  <p>磁盘队列情况（不高）：</p> 
+  <p><img src="https://mmbiz.qpic.cn/mmbiz_png/3TjM42ia414kJHibmWS3NXUVjRhGicEmRhOsIpt4yOfcy6y7RZAzIz3qhfK1GiabsSxc4TNtefnwkzCKibPOn1TicjfA/0?wx_fmt=png" alt="image"></p> 
+  <p>在以下情况下速度还将提高</p> 
+  <ol> 
+   <li>源数据库和目标数据库硬盘为ssd，并且分别为不同的服务器</li> 
+   <li>迁移程序和数据库在同一个局域网，保障数据传输时候带宽不会成为瓶颈</li> 
+   <li>合理的设置SqlBulkCopy参数</li> 
+   <li>菜菜的场景大多数场景下每次批量插入的数据量达不到设置的值，因为有的class_id 对应的数据量就几十条，甚至几条而已，打开关闭数据库连接也是需要耗时的</li> 
+   <li>单纯的批量添加或者批量删除操作</li> 
+  </ol> 
+  <hr> 
+  <blockquote> 
+   <p><strong>添加关注，查看更精美版本，收获更多精彩</strong></p> 
+  </blockquote> 
+  <p><img src="https://www.cnblogs.com/images/cnblogs_com/zhanlang/1295643/o_QQ%e6%88%aa%e5%9b%be20190112194545.png" alt="image"></p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

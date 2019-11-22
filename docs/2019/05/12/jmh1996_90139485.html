@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux-0.12源码分析——缓冲区等待队列（栈）sleep_on+wake_up分析 « NotBeCN</title>
+  <meta name="description" content="                   今天，我们来看一个有趣的东西，那就是中当有多个进程去读或写同一个文件，然后被这个文件对应的同一个缓冲区阻塞时，linux-0.12是如何把这些进程给阻塞起来，同时又是如何把被阻塞的进程一一唤醒。   从一个奇怪的地方说起   我们来看buffer-head的结构 includ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/jmh1996_90139485.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux-0.12源码分析——缓冲区等待队列（栈）sleep_on+wake_up分析</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-dracula"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>今天，我们来看一个有趣的东西，那就是中当有多个进程去读或写同一个文件，然后被这个文件对应的同一个缓冲区阻塞时，linux-0.12是如何把这些进程给阻塞起来，同时又是如何把被阻塞的进程一一唤醒。</p> 
+  <h1><a id="_3"></a>从一个奇怪的地方说起</h1> 
+  <p>我们来看buffer-head的结构<br> include\linux\fs.h</p> 
+  <pre><code class="prism language-c"><span class="token keyword">struct</span> buffer_head <span class="token punctuation">{</span>
+	<span class="token keyword">char</span> <span class="token operator">*</span> b_data<span class="token punctuation">;</span>			<span class="token comment">/* pointer to data block (1024 bytes) */</span> <span class="token comment">//指向实体数据</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span> b_blocknr<span class="token punctuation">;</span>	<span class="token comment">/* block number */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">short</span> b_dev<span class="token punctuation">;</span>		<span class="token comment">/* device (0 = free) */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> b_uptodate<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> b_dirt<span class="token punctuation">;</span>		<span class="token comment">/* 0-clean,1-dirty */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> b_count<span class="token punctuation">;</span>		<span class="token comment">/* users using this block */</span> <span class="token comment">//使用这个缓冲区的进程数</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">char</span> b_lock<span class="token punctuation">;</span>		<span class="token comment">/* 0 - ok, 1 -locked */</span>
+	<span class="token keyword">struct</span> task_struct <span class="token operator">*</span> b_wait<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> b_prev<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> b_next<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> b_prev_free<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> b_next_free<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+  <p>我们可以看到的是，buffer_head结构体里面的确有一个字段来标识 什么进程被它阻塞了：buffer_head.b_wait.这个字段是一个task_struct *类型的变量。</p> 
+  <p>当这个buffer只阻塞一个进程时，buffer_head.b_wait可以指向整个进程的task_struct。<br> 但是，如果一个buffer把多个进程都阻塞了怎么办呢？？？？</p> 
+  <p>多个进程去操作同一个文件是相当常见的场景，linux是不可能连这个都不支持。<br> 接下来，我们来来linux-0.12是如何巧妙的利用进程上下文，以及内核全局全局视野，通过一番神仙操作 只借助b_wait 就实现了一个进程等待 <strong>栈</strong>。我们会看到缓存区在组织多个阻塞进行时，其实是把它们以 <strong>栈</strong> 的形式组织的，并非是标题写的那样以 <strong>队列</strong> 的形式。</p> 
+  <h1><a id="case_31"></a>构造一个小case</h1> 
+  <p>假设有三个进程A,B,C，这三个进程不存在父子关系，然后他们操作同一个文件。</p> 
+  <p>进程A:从hello.txt读100个字节</p> 
+  <pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token keyword">char</span> buf<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">int</span> fd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token string">"/home/hello.txt"</span><span class="token punctuation">,</span>O_RDWR<span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">read</span><span class="token punctuation">(</span>fd<span class="token punctuation">,</span>buf<span class="token punctuation">,</span><span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>i<span class="token operator">&lt;</span><span class="token number">1000000</span><span class="token punctuation">;</span>i<span class="token operator">++</span><span class="token punctuation">)</span> 
+		<span class="token punctuation">{</span>
+			<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>进程B:从hello.txt 读前400个字节</p> 
+  <pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token keyword">char</span> buf<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">int</span> fd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token string">"/home/hello.txt"</span><span class="token punctuation">,</span>O_RDWR<span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">read</span><span class="token punctuation">(</span>fd<span class="token punctuation">,</span>buf<span class="token punctuation">,</span><span class="token number">400</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>i<span class="token operator">&lt;</span><span class="token number">1000000</span><span class="token punctuation">;</span>i<span class="token operator">++</span><span class="token punctuation">)</span> 
+		<span class="token punctuation">{</span>
+			<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>进程C，写hello.txt文件</p> 
+  <pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property">#<span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token keyword">char</span> buf<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span><span class="token operator">=</span><span class="token string">"Hello,world"</span><span class="token punctuation">;</span>
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">int</span> fd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span><span class="token string">"/home/hello.txt"</span><span class="token punctuation">,</span>O_RDWR<span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">write</span><span class="token punctuation">(</span>fd<span class="token punctuation">,</span>buf<span class="token punctuation">,</span><span class="token function">strlen</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>i<span class="token operator">&lt;</span><span class="token number">1000000</span><span class="token punctuation">;</span>i<span class="token operator">++</span><span class="token punctuation">)</span> 
+		<span class="token punctuation">{</span>
+			<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>然后依次开启三个shell,依次运行进程A,进程B,进程C。他们三个是并发的运行的。</p> 
+  <h1><a id="_83"></a>一个个的分析</h1> 
+  <h2><a id="A_84"></a>进程A</h2> 
+  <p>进程A，最先被运行起来，该进程首先调用open()函数，open()函数最终会调用sys_open来打开hello.txt文件，返回文件的文件描述符。</p> 
+  <p>接着，进程A执行read(fd,buf,100)函数。该函数最终会调用sys_read函数。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">sys_read</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">int</span> fd<span class="token punctuation">,</span><span class="token keyword">char</span> <span class="token operator">*</span> buf<span class="token punctuation">,</span><span class="token keyword">int</span> count<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">struct</span> file <span class="token operator">*</span> file<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> m_inode <span class="token operator">*</span> inode<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>fd<span class="token operator">&gt;=</span>NR_OPEN <span class="token operator">||</span> count<span class="token operator">&lt;</span><span class="token number">0</span> <span class="token operator">||</span> <span class="token operator">!</span><span class="token punctuation">(</span>file<span class="token operator">=</span>current<span class="token operator">-&gt;</span>filp<span class="token punctuation">[</span>fd<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token operator">-</span>EINVAL<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>count<span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token function">verify_area</span><span class="token punctuation">(</span>buf<span class="token punctuation">,</span>count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	inode <span class="token operator">=</span> file<span class="token operator">-&gt;</span>f_inode<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>inode<span class="token operator">-&gt;</span>i_pipe<span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token punctuation">(</span>file<span class="token operator">-&gt;</span>f_mode<span class="token operator">&amp;</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token operator">?</span><span class="token function">read_pipe</span><span class="token punctuation">(</span>inode<span class="token punctuation">,</span>buf<span class="token punctuation">,</span>count<span class="token punctuation">)</span><span class="token punctuation">:</span><span class="token operator">-</span>EIO<span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">S_ISCHR</span><span class="token punctuation">(</span>inode<span class="token operator">-&gt;</span>i_mode<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token function">rw_char</span><span class="token punctuation">(</span>READ<span class="token punctuation">,</span>inode<span class="token operator">-&gt;</span>i_zone<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>buf<span class="token punctuation">,</span>count<span class="token punctuation">,</span><span class="token operator">&amp;</span>file<span class="token operator">-&gt;</span>f_pos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">S_ISBLK</span><span class="token punctuation">(</span>inode<span class="token operator">-&gt;</span>i_mode<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token function">block_read</span><span class="token punctuation">(</span>inode<span class="token operator">-&gt;</span>i_zone<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span><span class="token operator">&amp;</span>file<span class="token operator">-&gt;</span>f_pos<span class="token punctuation">,</span>buf<span class="token punctuation">,</span>count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">S_ISDIR</span><span class="token punctuation">(</span>inode<span class="token operator">-&gt;</span>i_mode<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">S_ISREG</span><span class="token punctuation">(</span>inode<span class="token operator">-&gt;</span>i_mode<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>count<span class="token operator">+</span>file<span class="token operator">-&gt;</span>f_pos <span class="token operator">&gt;</span> inode<span class="token operator">-&gt;</span>i_size<span class="token punctuation">)</span>
+			count <span class="token operator">=</span> inode<span class="token operator">-&gt;</span>i_size <span class="token operator">-</span> file<span class="token operator">-&gt;</span>f_pos<span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>count<span class="token operator">&lt;=</span><span class="token number">0</span><span class="token punctuation">)</span>
+			<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span> <span class="token function">file_read</span><span class="token punctuation">(</span>inode<span class="token punctuation">,</span>file<span class="token punctuation">,</span>buf<span class="token punctuation">,</span>count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">printk</span><span class="token punctuation">(</span><span class="token string">"(Read)inode-&gt;i_mode=%06o\n\r"</span><span class="token punctuation">,</span>inode<span class="token operator">-&gt;</span>i_mode<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token operator">-</span>EINVAL<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>然后sys_read在执行完所有的检查后就会调用file_read函数。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">file_read</span><span class="token punctuation">(</span><span class="token keyword">struct</span> m_inode <span class="token operator">*</span> inode<span class="token punctuation">,</span> <span class="token keyword">struct</span> file <span class="token operator">*</span> filp<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span> buf<span class="token punctuation">,</span> <span class="token keyword">int</span> count<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">int</span> left<span class="token punctuation">,</span>chars<span class="token punctuation">,</span>nr<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> bh<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>left<span class="token operator">=</span>count<span class="token punctuation">)</span><span class="token operator">&lt;=</span><span class="token number">0</span><span class="token punctuation">)</span>
+		<span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span>left<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>nr <span class="token operator">=</span> <span class="token function">bmap</span><span class="token punctuation">(</span>inode<span class="token punctuation">,</span><span class="token punctuation">(</span>filp<span class="token operator">-&gt;</span>f_pos<span class="token punctuation">)</span><span class="token operator">/</span>BLOCK_SIZE<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token punctuation">(</span>bh<span class="token operator">=</span><span class="token function">bread</span><span class="token punctuation">(</span>inode<span class="token operator">-&gt;</span>i_dev<span class="token punctuation">,</span>nr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+				<span class="token keyword">break</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span> <span class="token keyword">else</span>
+			bh <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+		nr <span class="token operator">=</span> filp<span class="token operator">-&gt;</span>f_pos <span class="token operator">%</span> BLOCK_SIZE<span class="token punctuation">;</span>
+		chars <span class="token operator">=</span> <span class="token function">MIN</span><span class="token punctuation">(</span> BLOCK_SIZE<span class="token operator">-</span>nr <span class="token punctuation">,</span> left <span class="token punctuation">)</span><span class="token punctuation">;</span>
+		filp<span class="token operator">-&gt;</span>f_pos <span class="token operator">+</span><span class="token operator">=</span> chars<span class="token punctuation">;</span>
+		left <span class="token operator">-</span><span class="token operator">=</span> chars<span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>bh<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+			<span class="token keyword">char</span> <span class="token operator">*</span> p <span class="token operator">=</span> nr <span class="token operator">+</span> bh<span class="token operator">-&gt;</span>b_data<span class="token punctuation">;</span>
+			<span class="token keyword">while</span> <span class="token punctuation">(</span>chars<span class="token operator">--</span><span class="token operator">&gt;</span><span class="token number">0</span><span class="token punctuation">)</span>
+				<span class="token function">put_fs_byte</span><span class="token punctuation">(</span><span class="token operator">*</span><span class="token punctuation">(</span>p<span class="token operator">++</span><span class="token punctuation">)</span><span class="token punctuation">,</span>buf<span class="token operator">++</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token function">brelse</span><span class="token punctuation">(</span>bh<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{</span>
+			<span class="token keyword">while</span> <span class="token punctuation">(</span>chars<span class="token operator">--</span><span class="token operator">&gt;</span><span class="token number">0</span><span class="token punctuation">)</span>
+				<span class="token function">put_fs_byte</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span>buf<span class="token operator">++</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	inode<span class="token operator">-&gt;</span>i_atime <span class="token operator">=</span> CURRENT_TIME<span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token punctuation">(</span>count<span class="token operator">-</span>left<span class="token punctuation">)</span><span class="token operator">?</span><span class="token punctuation">(</span>count<span class="token operator">-</span>left<span class="token punctuation">)</span><span class="token punctuation">:</span><span class="token operator">-</span>ERROR<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>在file_read函数里，bmap（）计算得到到底需要读硬盘的那个逻辑块号nr，并把整个逻辑块号作为参数传给bread(inode-&gt;i_dev，nr)函数。bread是block_read函数，功能是从块设备中读取设备号为inode-&gt;i_dev,块号为nr的逻辑块。</p> 
+  <pre><code class="prism language-c"><span class="token comment">/* * bread() reads a specified block and returns the buffer that contains * it. It returns NULL if the block was unreadable. */</span>
+<span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> <span class="token function">bread</span><span class="token punctuation">(</span><span class="token keyword">int</span> dev<span class="token punctuation">,</span><span class="token keyword">int</span> block<span class="token punctuation">)</span>
+	<span class="token comment">//1.有现成的</span>
+		<span class="token comment">//最新的</span>
+		<span class="token comment">//不是最新的</span>
+	<span class="token comment">//2.空闲</span>
+	<span class="token comment">//3.没空闲</span>
+	<span class="token comment">//设备号？块号？来保证存活时间尽量长？不应该是先进先出</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> bh<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token punctuation">(</span>bh<span class="token operator">=</span><span class="token function">getblk</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span>block<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token function">panic</span><span class="token punctuation">(</span><span class="token string">"bread: getblk returned NULL\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>bh<span class="token operator">-&gt;</span>b_uptodate<span class="token punctuation">)</span>
+		<span class="token comment">//缓冲区与硬盘的是不是一致的,是一致就可以直接使用了</span>
+		<span class="token keyword">return</span> bh<span class="token punctuation">;</span>
+	<span class="token function">ll_rw_block</span><span class="token punctuation">(</span>READ<span class="token punctuation">,</span>bh<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//在驱动里面读</span>
+	<span class="token function">wait_on_buffer</span><span class="token punctuation">(</span>bh<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>bh<span class="token operator">-&gt;</span>b_uptodate<span class="token punctuation">)</span>
+		<span class="token keyword">return</span> bh<span class="token punctuation">;</span>
+	<span class="token function">brelse</span><span class="token punctuation">(</span>bh<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>bread函数首先调用getblk获取一个缓冲块。然后查看b_update是不是1，其实就是查看这个块的数据是不是可用的。当然这是我们第一次读hello.txt看到是不可用。于是就会接着调用ll_rw_block(READ,bh),在里面下发读磁盘文件的命令，其中会把bh给lock住，防止其他进程也拿着这个buffer去读文件。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">ll_rw_block</span><span class="token punctuation">(</span><span class="token keyword">int</span> rw<span class="token punctuation">,</span> <span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> bh<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span> major<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>major<span class="token operator">=</span><span class="token function">MAJOR</span><span class="token punctuation">(</span>bh<span class="token operator">-&gt;</span>b_dev<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&gt;=</span> NR_BLK_DEV <span class="token operator">||</span>
+	<span class="token operator">!</span><span class="token punctuation">(</span>blk_dev<span class="token punctuation">[</span>major<span class="token punctuation">]</span><span class="token punctuation">.</span>request_fn<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token function">printk</span><span class="token punctuation">(</span><span class="token string">"Trying to read nonexistent block-device\n\r"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">make_request</span><span class="token punctuation">(</span>major<span class="token punctuation">,</span>rw<span class="token punctuation">,</span>bh<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">make_request</span><span class="token punctuation">(</span><span class="token keyword">int</span> major<span class="token punctuation">,</span><span class="token keyword">int</span> rw<span class="token punctuation">,</span> <span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> bh<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">struct</span> request <span class="token operator">*</span> req<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> rw_ahead<span class="token punctuation">;</span>
+
+<span class="token comment">/* WRITEA/READA is special case - it is not really needed, so if the */</span>
+<span class="token comment">/* buffer is locked, we just forget about it, else it's a normal read */</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>rw_ahead <span class="token operator">=</span> <span class="token punctuation">(</span>rw <span class="token operator">==</span> READA <span class="token operator">||</span> rw <span class="token operator">==</span> WRITEA<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>bh<span class="token operator">-&gt;</span>b_lock<span class="token punctuation">)</span>
+			<span class="token keyword">return</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>rw <span class="token operator">==</span> READA<span class="token punctuation">)</span>
+			rw <span class="token operator">=</span> READ<span class="token punctuation">;</span>
+		<span class="token keyword">else</span>
+			rw <span class="token operator">=</span> WRITE<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>rw<span class="token operator">!=</span>READ <span class="token operator">&amp;&amp;</span> rw<span class="token operator">!=</span>WRITE<span class="token punctuation">)</span>
+		<span class="token function">panic</span><span class="token punctuation">(</span><span class="token string">"Bad block dev command, must be R/W/RA/WA"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">lock_buffer</span><span class="token punctuation">(</span>bh<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//加锁</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>rw <span class="token operator">==</span> WRITE <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>bh<span class="token operator">-&gt;</span>b_dirt<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token punctuation">(</span>rw <span class="token operator">==</span> READ <span class="token operator">&amp;&amp;</span> bh<span class="token operator">-&gt;</span>b_uptodate<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token function">unlock_buffer</span><span class="token punctuation">(</span>bh<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+repeat<span class="token punctuation">:</span>
+		···
+
+</code></pre> 
+  <p>之后，执行wait_on_buffer(bh);</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">inline</span> <span class="token keyword">void</span> <span class="token function">wait_on_buffer</span><span class="token punctuation">(</span><span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> bh<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token function">cli</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//临界区了，关中断是以进程为单位的;tss里面有eflag的寄存器的值，里面的中断控制位有可能是打开的，恢复寄存器的时候会把IF重新打开。是跟进程相关的。IF位</span>
+	<span class="token comment">//???为什么一定要加？判断之后 立马中断进来</span>
+	<span class="token comment">//这个时候是本进程不再接受中断</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span>bh<span class="token operator">-&gt;</span>b_lock<span class="token punctuation">)</span>
+		<span class="token comment">//使用的是while,而不是if.因为 一次sleep_on还得回来再判断b_lock</span>
+		<span class="token function">sleep_on</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>bh<span class="token operator">-&gt;</span>b_wait<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">sti</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+  <p>在wait_on_buffer里面，它首先会关中断，注意只是把 <strong>进程自己的中断给关闭了！！</strong>。这是一个很重要的思想，即，中断的开关 是与进程相关的。本进程中断关闭了，并不意味着整个系统就没法响应中断了，当通过进程调度切换到其他进程时，如果另外一个进程开启了中断，那么系统又可以接收中断了。</p> 
+  <p>关闭中断后，使用while来检查bh-&gt;b_lock，如果bh-&gt;b_lock为真，意味着有人在同步这个块，于是调用sleep_on（&amp;bh-&gt;b_wait）函数。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">sleep_on</span><span class="token punctuation">(</span><span class="token keyword">struct</span> task_struct <span class="token operator">*</span><span class="token operator">*</span>p<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">struct</span> task_struct <span class="token operator">*</span>tmp<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>p<span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>current <span class="token operator">==</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span>init_task<span class="token punctuation">.</span>task<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token function">panic</span><span class="token punctuation">(</span><span class="token string">"task[0] trying to sleep"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	tmp <span class="token operator">=</span> <span class="token operator">*</span>p<span class="token punctuation">;</span>
+	<span class="token operator">*</span>p <span class="token operator">=</span> current<span class="token punctuation">;</span>
+	current<span class="token operator">-&gt;</span>state <span class="token operator">=</span> TASK_UNINTERRUPTIBLE<span class="token punctuation">;</span><span class="token comment">//这种进程的状态改成了不同中断；那么不能被schedule起来;要由其他进程来唤醒</span>
+	<span class="token function">schedule</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>tmp<span class="token punctuation">)</span>
+		tmp<span class="token operator">-&gt;</span>state<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>注意，传入的是一个两重的指针：&amp;bh-&gt;wait。<br> sleep_on 首先判断&amp;bh-&gt;wait是不是为NULL,显然虽然bh-&gt;wait为NULL, 但是变量所在的地址&amp;bh-&gt;wait不为NULL。</p> 
+  <p>接着判断是不是要sleep_on 进程0。</p> 
+  <p>接下来，神仙操作来了！！！！</p> 
+  <pre><code class="prism language-c">    tmp <span class="token operator">=</span> <span class="token operator">*</span>p<span class="token punctuation">;</span>
+	<span class="token operator">*</span>p <span class="token operator">=</span> current<span class="token punctuation">;</span>
+	current<span class="token operator">-&gt;</span>state <span class="token operator">=</span> TASK_UNINTERRUPTIBLE<span class="token punctuation">;</span><span class="token comment">//这种进程的状态改成了不同中断；那么不能被schedule起来;要由其他进程来唤醒</span>
+</code></pre> 
+  <p>p为&amp;bh-&gt;wait,那么 * p 就是bh-&gt;wait了。对于进程A来说，此时bh-&gt;wait为NULL,于是tmp就是NULL。<br> 然后<code>*p=current</code> ,其实等价于：<code>bh-&gt;wait=current</code>，把当前进程的task_struct指针给bh-&gt;wait 表示进程A正在wait 这个buffer。<br> <code>current-&gt;state=TASK_UNINTERUPTIBLE</code> ，把进程A的状态设置为不可中断等待状态，处于这个状态意味着进程A 无法再被运行，即使他收到了信号也不行，只有当其他进程把它的状态该成就绪态以后它才可能被再次调度。</p> 
+  <p><strong>注意！对于进程A来说，tmp为NULL，bh-&gt;wait为进程A的task_struct 指针。</strong><br> <strong>注意！对于进程A来说，tmp为NULL，bh-&gt;wait为进程A的task_struct 指针。</strong><br> <strong>注意！对于进程A来说，tmp为NULL，bh-&gt;wait为进程A的task_struct 指针。</strong><br> 接下来，调用schedule()函数，进程A主动交出控制权，主动进行进程调度。</p> 
+  <h2><a id="_B_275"></a>进程 B</h2> 
+  <p>然后就是进程B的运行了。<br> B与A很相似，到bread()函数内的wait_on_buffer（）的sleep_on（）前都是差不多的，而且因为A,B要读同样的块，于是他们使用的buffer也是同一个，这个过程主要有getblk（）函数的逻辑来体现。</p> 
+  <p>但是在sleep_on()里面就开始有很大不同。再看看sleep_on的实现：</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">inline</span> <span class="token keyword">void</span> <span class="token function">wait_on_buffer</span><span class="token punctuation">(</span><span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> bh<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token function">cli</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//临界区了，关中断是以进程为单位的;tss里面有eflag的寄存器的值，里面的中断控制位有可能是打开的，恢复寄存器的时候会把IF重新打开。是跟进程相关的。IF位</span>
+	<span class="token comment">//???为什么一定要加？判断之后 立马中断进来</span>
+	<span class="token comment">//这个时候是本进程不再接受中断</span>
+	<span class="token keyword">while</span> <span class="token punctuation">(</span>bh<span class="token operator">-&gt;</span>b_lock<span class="token punctuation">)</span>
+		<span class="token comment">//使用的是while,而不是if.因为 一次sleep_on还得回来再判断b_lock</span>
+		<span class="token function">sleep_on</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>bh<span class="token operator">-&gt;</span>b_wait<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">sti</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">void</span> <span class="token function">sleep_on</span><span class="token punctuation">(</span><span class="token keyword">struct</span> task_struct <span class="token operator">*</span><span class="token operator">*</span>p<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">struct</span> task_struct <span class="token operator">*</span>tmp<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>p<span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>current <span class="token operator">==</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span>init_task<span class="token punctuation">.</span>task<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token function">panic</span><span class="token punctuation">(</span><span class="token string">"task[0] trying to sleep"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	tmp <span class="token operator">=</span> <span class="token operator">*</span>p<span class="token punctuation">;</span>
+	<span class="token operator">*</span>p <span class="token operator">=</span> current<span class="token punctuation">;</span>
+	current<span class="token operator">-&gt;</span>state <span class="token operator">=</span> TASK_UNINTERRUPTIBLE<span class="token punctuation">;</span><span class="token comment">//这种进程的状态改成了不同中断；那么不能被schedule起来;要由其他进程来唤醒</span>
+	<span class="token function">schedule</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>tmp<span class="token punctuation">)</span>
+		tmp<span class="token operator">-&gt;</span>state<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>同样的，sleep_on的参数是&amp;bh-&gt;wait。<br> 对于进程B来说，tmp是个局部变量，它的值是跟进程A执行到这里的tmp值不同的。<br> tmp=*p，等价于tmp=bh-&gt;wait。然而，buffer_head[]是内核全局共享的。进程A把这个块的wait设置为了进程A的task_struct指针。<br> 于是对于进程B来说，tmp就是进程A的task_struct指针。<br> 然后<code>*p=current</code>，此时bh-&gt;wait就改成了进程B的task_struct指针了。<br> 最后调用schedule（）把自己给挂起来。</p> 
+  <p><strong>因此！对于进程B来说，tmp为进程A的<code>task_struct *</code>,，bh-&gt;wait为进程B的task_struct 指针</strong></p> 
+  <h1><a id="C_316"></a>进程C</h1> 
+  <p>进程C最后也会运行到sleep_on函数。同样的分析，最后可以知道：<br> <strong>对于进程C来说，tmp为进程B的task_struct ，bh-&gt;wait为进程C的task_struct 指针。</strong></p> 
+  <h1><a id="_320"></a>其他</h1> 
+  <p>进程A,B,C 都因为hello.txt那个逻辑快而阻塞了。于是系统就换去执行其他进程，同时磁盘把数据更新到缓冲区。<br> 最后，数据读完后，会给正在运行其他进程的内核发送 磁盘中断。从磁盘中断中，内核了解到数据已经准备好。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">inline</span> <span class="token keyword">void</span> <span class="token function">end_request</span><span class="token punctuation">(</span><span class="token keyword">int</span> uptodate<span class="token punctuation">)</span>
+<span class="token comment">//update的值,0没有更新好;1更新好</span>
+<span class="token comment">//下一个request,修改lock,唤醒进程,</span>
+<span class="token punctuation">{</span>
+	<span class="token function">DEVICE_OFF</span><span class="token punctuation">(</span>CURRENT<span class="token operator">-&gt;</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>CURRENT<span class="token operator">-&gt;</span>bh<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		CURRENT<span class="token operator">-&gt;</span>bh<span class="token operator">-&gt;</span>b_uptodate <span class="token operator">=</span> uptodate<span class="token punctuation">;</span>
+		<span class="token function">unlock_buffer</span><span class="token punctuation">(</span>CURRENT<span class="token operator">-&gt;</span>bh<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>uptodate<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token function">printk</span><span class="token punctuation">(</span>DEVICE_NAME <span class="token string">" I/O error\n\r"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">printk</span><span class="token punctuation">(</span><span class="token string">"dev %04x, block %d\n\r"</span><span class="token punctuation">,</span>CURRENT<span class="token operator">-&gt;</span>dev<span class="token punctuation">,</span>
+			CURRENT<span class="token operator">-&gt;</span>bh<span class="token operator">-&gt;</span>b_blocknr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">wake_up</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>CURRENT<span class="token operator">-&gt;</span>waiting<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//为空</span>
+	<span class="token function">wake_up</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>wait_for_request<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//请求项等待队列; 等待队列有缓冲块的队列,以及请求队列之分.缓冲块队列比较特殊</span>
+	CURRENT<span class="token operator">-&gt;</span>dev <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+	CURRENT <span class="token operator">=</span> CURRENT<span class="token operator">-&gt;</span>next<span class="token punctuation">;</span><span class="token comment">//下一项</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>再看unlock_buffer（CURRENT-&gt;bh）函数：</p> 
+  <pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">inline</span> <span class="token keyword">void</span> <span class="token function">unlock_buffer</span><span class="token punctuation">(</span><span class="token keyword">struct</span> buffer_head <span class="token operator">*</span> bh<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>bh<span class="token operator">-&gt;</span>b_lock<span class="token punctuation">)</span>
+		<span class="token function">printk</span><span class="token punctuation">(</span>DEVICE_NAME <span class="token string">": free buffer being unlocked\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	bh<span class="token operator">-&gt;</span>b_lock<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+	<span class="token function">wake_up</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>bh<span class="token operator">-&gt;</span>b_wait<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>注意里面的wake_up函数：</p> 
+  <pre><code class="prism language-c">
+<span class="token keyword">void</span> <span class="token function">wake_up</span><span class="token punctuation">(</span><span class="token keyword">struct</span> task_struct <span class="token operator">*</span><span class="token operator">*</span>p<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>p <span class="token operator">&amp;&amp;</span> <span class="token operator">*</span>p<span class="token punctuation">)</span> <span class="token punctuation">{</span>
+		<span class="token punctuation">(</span><span class="token operator">*</span><span class="token operator">*</span>p<span class="token punctuation">)</span><span class="token punctuation">.</span>state<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+		<span class="token operator">*</span>p<span class="token operator">=</span><span class="token constant">NULL</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>对于hello.txt对应的缓存块来说，此时他的bh-&gt;b_wait是进程C。<br> 于是进程C的状态改成了就绪态，进程C就有了被调度的权利了。</p> 
+  <h2><a id="C_370"></a>回到进程C</h2> 
+  <p>最后，调度到进程C,从进程C被阻塞的地方接着执行。</p> 
+  <pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">sleep_on</span><span class="token punctuation">(</span><span class="token keyword">struct</span> task_struct <span class="token operator">*</span><span class="token operator">*</span>p<span class="token punctuation">)</span>
+<span class="token punctuation">{</span>
+	<span class="token keyword">struct</span> task_struct <span class="token operator">*</span>tmp<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>p<span class="token punctuation">)</span>
+		<span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>current <span class="token operator">==</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span>init_task<span class="token punctuation">.</span>task<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token function">panic</span><span class="token punctuation">(</span><span class="token string">"task[0] trying to sleep"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	tmp <span class="token operator">=</span> <span class="token operator">*</span>p<span class="token punctuation">;</span>
+	<span class="token operator">*</span>p <span class="token operator">=</span> current<span class="token punctuation">;</span>
+	current<span class="token operator">-&gt;</span>state <span class="token operator">=</span> TASK_UNINTERRUPTIBLE<span class="token punctuation">;</span><span class="token comment">//这种进程的状态改成了不同中断；那么不能被schedule起来;要由其他进程来唤醒</span>
+	<span class="token function">schedule</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>tmp<span class="token punctuation">)</span>
+		tmp<span class="token operator">-&gt;</span>state<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+  <p>进程C在执行schedule被切换走，现在切换回来。于是执行</p> 
+  <pre><code class="prism language-c">	<span class="token keyword">if</span> <span class="token punctuation">(</span>tmp<span class="token punctuation">)</span>
+		tmp<span class="token operator">-&gt;</span>state<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+  <p>而对于进程C来说，tmp其实是进程B的task_struct，于是进程B的状态也改成就绪态。</p> 
+  <h2><a id="B_398"></a>回到进程B</h2> 
+  <p>因为进程C在sleep_on的末尾把进程B的状态改成就绪太了，于是进程B肯定会被调度到。<br> 同样的，进程B也从被切换走的地方继续执行：<br> 于是执行</p> 
+  <pre><code class="prism language-c">	<span class="token keyword">if</span> <span class="token punctuation">(</span>tmp<span class="token punctuation">)</span>
+		tmp<span class="token operator">-&gt;</span>state<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+  <p>而对于进程B来说，tmp其实是进程A的task_struct，于是进程A的状态也改成就绪态。</p> 
+  <h2><a id="A_409"></a>回到进程A</h2> 
+  <p>因为B在sleep_on的末尾把进程A的状态改成就绪了，于是进程A肯定会被调度到。<br> 同样的，进程A也从被切换走的地方继续执行：<br> 于是执行</p> 
+  <pre><code class="prism language-c">	<span class="token keyword">if</span> <span class="token punctuation">(</span>tmp<span class="token punctuation">)</span>
+		tmp<span class="token operator">-&gt;</span>state<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+</code></pre> 
+  <p>而对于进程A来说，tmp其实是NULL。于是这个hello.txt对应的块就没有再阻塞任何进程了。</p> 
+  <h1><a id="_421"></a>总结</h1> 
+  <p>OK,终于把这个神仙操作给解析完了，一气呵成、令人回味无穷。<br> 可以看出来其实hello.txt阻塞的进程是以先进后出的栈的方式来唤醒的。</p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

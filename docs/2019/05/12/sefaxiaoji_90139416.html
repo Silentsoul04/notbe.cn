@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>ceph L版本相对于J版本在scrub机制上做的优化 « NotBeCN</title>
+  <meta name="description" content="                       文章目录            1. 优化改动点     2. 关键数据结构     3. scrub流程变化           1. 优化改动点      2. 关键数据结构             2.1 支持scrub分段执行       2.2 支持scru...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/sefaxiaoji_90139416.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">ceph L版本相对于J版本在scrub机制上做的优化</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p></p>
+  <div class="toc">
+   <h3>文章目录</h3>
+   <ul>
+    <ul>
+     <li><a href="#1__1" rel="nofollow">1. 优化改动点</a></li>
+     <li><a href="#2__2" rel="nofollow">2. 关键数据结构</a></li>
+     <li><a href="#3_scrub_3" rel="nofollow">3. scrub流程变化</a></li>
+     <ul>
+      <li><a href="#1__5" rel="nofollow">1. 优化改动点</a></li>
+      <li><a href="#2__21" rel="nofollow">2. 关键数据结构</a></li>
+      <ul>
+       <li><a href="#21_scrub_22" rel="nofollow">2.1 支持scrub分段执行</a></li>
+       <li><a href="#22_scrub_45" rel="nofollow">2.2 支持scrub抢占的设计</a></li>
+       <ul>
+        <li><a href="#221_scrub_52" rel="nofollow">2.2.1 scrub原子性破坏</a></li>
+        <li><a href="#222_scrub_55" rel="nofollow">2.2.2 scrub抢占防止出现校验不一致的问题解决方法</a></li>
+        <li><a href="#223_scrub_58" rel="nofollow">2.2.3 scrub抢占条件</a></li>
+       </ul>
+      </ul>
+      <li><a href="#3_scrub_94" rel="nofollow">3. scrub关键流程变化</a></li>
+      <ul>
+       <li><a href="#31_scrub_95" rel="nofollow">3.1 scrub过程</a></li>
+       <li><a href="#32_scrubpg_120" rel="nofollow">3.2 scrub抢占发生时，主pg状态机变化过程：</a></li>
+       <li><a href="#33_build_scrub_map_chunk_123" rel="nofollow">3.3 build_scrub_map_chunk的过程</a></li>
+       <li><a href="#34_scrub_151" rel="nofollow">3.4 scrub抢占的一致性校验异常处理</a></li>
+      </ul>
+     </ul>
+    </ul>
+   </ul>
+  </div>
+  <p></p> 
+  <h2><a id="1__1"></a>1. 优化改动点</h2> 
+  <h2><a id="2__2"></a>2. 关键数据结构</h2> 
+  <h2><a id="3_scrub_3"></a>3. scrub流程变化</h2> 
+  <h3><a id="1__5"></a>1. 优化改动点</h3> 
+  <p>主要解决deep scrub对业务影响的3个具体问题：</p> 
+  <ul> 
+   <li>对象数据较大的情况做deep scrub对业务的影响</li> 
+   <li>对象存储的omap数据较大的情况做deep scrub对业务的影响</li> 
+   <li>scrub过程阻塞客户端的I/O</li> 
+  </ul> 
+  <p>因此为了减少上述3种问题对业务的影响，L版本做了如下修改</p> 
+  <ul> 
+   <li>每次deep scrub读取对象的data可以按照条带进行，参考配置参数osd_deep_scrub_stride，默认是512字节</li> 
+   <li>每次deep scrub读取对象的omap的kv个数最多为osd_deep_scrub_keys，默认1024个key</li> 
+   <li>为了记录上述分段scrub的过程，新增了ScrubMapBuilder结构体</li> 
+   <li>每个副本将scrub过程拆分了多段；比如objects_list_range完成之后，pg会重新加入scrub队列等待下一次调度；再比如当某个对象的omap读取条数超过一定的数量之后，pg也会重新加入scrub队列等待重新调度</li> 
+   <li>从副本接收到scrub请求处理由以前的replica_scrub直接处理改为放到scrub状态机中处理，同时添加了一个scrub状态为Scrubber::BUILD_MAP_REPLICA</li> 
+   <li>支持scrub抢占</li> 
+  </ul> 
+  <h3><a id="2__21"></a>2. 关键数据结构</h3> 
+  <h4><a id="21_scrub_22"></a>2.1 支持scrub分段执行</h4> 
+  <p>为了支持scrub分段执行即打断了scrub操作的原子性，L版本新增了ScrubMapBuilder数据结构，该结构主要是为了记录scrub的中间状态，比如scrub中断后下一次从那个对象那个offset以及那个omap key开始遍历查询等<br> ScrubMapBuilder结构体说明：</p> 
+  <table> 
+   <thead> 
+    <tr> 
+     <th>元素</th> 
+     <th>说明</th> 
+    </tr> 
+   </thead> 
+   <tbody> 
+    <tr> 
+     <td>deep</td> 
+     <td>标记是否为deep scrub，实际上该结构主要是为了优化deep scrub实现的</td> 
+    </tr> 
+    <tr> 
+     <td>vector&lt;hobject_t&gt; ls</td> 
+     <td>chunk scrub对象列表</td> 
+    </tr> 
+    <tr> 
+     <td>size_t pos = 0</td> 
+     <td>标记要scrub的对象</td> 
+    </tr> 
+    <tr> 
+     <td>int64_t data_pos = 0</td> 
+     <td>标记当前正在deep scrub的对象读取data的offset，当进行下一个object的deep scrub操作时候会清0</td> 
+    </tr> 
+    <tr> 
+     <td>string omap_pos</td> 
+     <td>标记当前正在deep scrub的对象读取omap的offset，当进行下一个object的deep scrub操作时候会清0</td> 
+    </tr> 
+    <tr> 
+     <td>int ret = 0</td> 
+     <td></td> 
+    </tr> 
+    <tr> 
+     <td>bufferhash data_hash, omap_hash</td> 
+     <td>标记当前正在deep scrub的对象已读取的数据和omap</td> 
+    </tr> 
+    <tr> 
+     <td>uint64_t omap_keys = 0</td> 
+     <td>对象的key条数</td> 
+    </tr> 
+    <tr> 
+     <td>uint64_t omap_bytes = 0</td> 
+     <td>对象的keyvalue的大小</td> 
+    </tr> 
+   </tbody> 
+  </table>
+  <p>scrub对每个对象遍历的结果是记录在ScrubMap结构体中的；<br> ScrubMap结构体说明如下：</p> 
+  <table> 
+   <thead> 
+    <tr> 
+     <th>元素</th> 
+     <th>说明</th> 
+    </tr> 
+   </thead> 
+   <tbody> 
+    <tr> 
+     <td>object</td> 
+     <td>该成员主要是记录对象所在副本scrub结果信息，比如attrs、omap_digest、data_digest以及对象的读取attrs、data状态</td> 
+    </tr> 
+    <tr> 
+     <td>map&lt;hobject_t,object&gt; objects</td> 
+     <td>此次参与的scrub对象列表</td> 
+    </tr> 
+    <tr> 
+     <td>eversion_t valid_through</td> 
+     <td>本次参与scrub最新的pglog版本号</td> 
+    </tr> 
+   </tbody> 
+  </table>
+  <h4><a id="22_scrub_45"></a>2.2 支持scrub抢占的设计</h4> 
+  <p>scrub支持抢占需要解决以下4个问题：</p> 
+  <ul> 
+   <li>未实现抢占功能前，scrub过程是原子性的，从INACTIVE到WAIT_REPLICAS状态过程都是持有pg锁的并且所有对象数据都是已经读取完成的，因此为了实现抢占功能需要破坏原子性</li> 
+   <li>抢占会导致副本间数据校验时出现不一致</li> 
+   <li>抢占触发的时机</li> 
+   <li>允许抢占的条件</li> 
+  </ul> 
+  <h5><a id="221_scrub_52"></a>2.2.1 scrub原子性破坏</h5> 
+  <ul> 
+   <li>将scrub过程进行分段进行，比如遇到大data以及大omap的对象时，每次scrub只读取部分数据并记录当前scrub的中间状态，然后退出等待重新调度</li> 
+  </ul> 
+  <h5><a id="222_scrub_55"></a>2.2.2 scrub抢占防止出现校验不一致的问题解决方法</h5> 
+  <ul> 
+   <li>在scrub正在进行的过程中，有客户端的I/O抢占进来了，那么有可能主pg上更新了数据，从副本的数据还未更新，导致两边scrub读取的数据不一致，那么就会出现inconsisent的状态，对于这种抢占的scrub需要重新触发新的NEW_CHUNCK并放弃上一次scrub的结果</li> 
+  </ul> 
+  <h5><a id="223_scrub_58"></a>2.2.3 scrub抢占条件</h5> 
+  <p>1）抢占只能发生在抢占时间窗内，并且允许抢占才可以；</p> 
+  <p><strong>抢占时间窗</strong>：</p> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512125720668.png" alt="在这里插入图片描述"><br> 在这两个scrub状态之间内都是可以发生抢占的，但一般的主要发生的抢占是在调用build_scrub_map_chunk过程中，因此该过程有可能不是原子性的；</p> 
+  <p>2）抢占触发的时机:<br> osd在处理客户端的写请求调用write_blocked_by_scrub会判断如果当前的写object正在做scrub，并且允许抢占，则客户端的I/O则可以被处理</p> 
+  <pre><code>bool PG::write_blocked_by_scrub(const hobject_t&amp; soid)
+{
+  if (soid &lt; scrubber.start || soid &gt;= scrubber.end) {
+    return false;
+  }
+  if (scrub_can_preempt) {
+    if (!scrub_preempted) {
+      dout(10) &lt;&lt; __func__ &lt;&lt; " " &lt;&lt; soid &lt;&lt; " preempted" &lt;&lt; dendl;
+      scrub_preempted = true;
+    } else {
+      dout(10) &lt;&lt; __func__ &lt;&lt; " " &lt;&lt; soid &lt;&lt; " already preempted" &lt;&lt; dendl;
+    }
+    return false;
+  }
+  return true;
+}
+</code></pre> 
+  <p>而这里的scrub_can_preempt的值就是在chunky_scrub在scrub抢占时间窗内被设置的，该值取决于scrubber.preempt_left的值即该值大于0说明还可以被抢占；</p> 
+  <pre><code>scrub_can_preempt = scrubber.preempt_left &gt; 0;
+</code></pre> 
+  <p>那么scrub_can_preempt什么设置为false呢？</p> 
+  <p>当主pg的scrub状态变为WAIT_REPLICAS则会将scrub_can_preempt设置为false，因此可以抢占的时间窗为NEW_CHUNCK–&gt;WAIT_REPLICAS；</p> 
+  <h3><a id="3_scrub_94"></a>3. scrub关键流程变化</h3> 
+  <h4><a id="31_scrub_95"></a>3.1 scrub过程</h4> 
+  <div class="mermaid">
+   <svg xmlns="http://www.w3.org/2000/svg" id="mermaid-svg-7WdnIsWN2mQjedfn" height="100%" width="100%" style="max-width:700px;" viewbox="-75 -10 700 1276">
+    <g></g>
+    <g>
+     <line id="actor3" x1="75" y1="5" x2="75" y2="1265" class="actor-line" stroke-width="0.5px" stroke="#999"></line>
+     <rect x="0" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect>
+     <text x="75" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle;">
+      <tspan x="75" dy="0">
+       PrimaryA
+      </tspan>
+     </text>
+    </g>
+    <g>
+     <line id="actor4" x1="275" y1="5" x2="275" y2="1265" class="actor-line" stroke-width="0.5px" stroke="#999"></line>
+     <rect x="200" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect>
+     <text x="275" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle;">
+      <tspan x="275" dy="0">
+       B
+      </tspan>
+     </text>
+    </g>
+    <g>
+     <line id="actor5" x1="475" y1="5" x2="475" y2="1265" class="actor-line" stroke-width="0.5px" stroke="#999"></line>
+     <rect x="400" y="0" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect>
+     <text x="475" y="32.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle;">
+      <tspan x="475" dy="0">
+       C
+      </tspan>
+     </text>
+    </g>
+    <defs>
+     <marker id="arrowhead" refx="5" refy="2" markerwidth="6" markerheight="4" orient="auto">
+      <path d="M 0,0 V 4 L6,2 Z"></path>
+     </marker>
+    </defs>
+    <defs>
+     <marker id="crosshead" markerwidth="15" markerheight="8" orient="auto" refx="16" refy="4">
+      <path fill="black" stroke="#000000" stroke-width="1px" d="M 9,2 V 6 L16,4 Z" style="stroke-dasharray: 0, 0;"></path>
+      <path fill="none" stroke="#000000" stroke-width="1px" d="M 0,1 L 6,7 M 6,1 L 0,7" style="stroke-dasharray: 0, 0;"></path>
+     </marker>
+    </defs>
+    <g>
+     <text x="75" y="93" class="messageText" style="text-anchor: middle;">
+      INACTIVE
+     </text>
+     <path d="M 75,100 C 135,90 135,130 75,120" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="75" y="158" class="messageText" style="text-anchor: middle;">
+      NEWCHUNK
+     </text>
+     <path d="M 75,165 C 135,155 135,195 75,185" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="75" y="223" class="messageText" style="text-anchor: middle;">
+      BUILD_MAP
+     </text>
+     <path d="M 75,230 C 135,220 135,260 75,250" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="175" y="288" class="messageText" style="text-anchor: middle;">
+      _request_scrub_map
+     </text>
+     <line x1="75" y1="295" x2="275" y2="295" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></line>
+    </g>
+    <g>
+     <text x="275" y="323" class="messageText" style="text-anchor: middle;">
+      BUILD_MAP_REPLICA
+     </text>
+     <path d="M 275,330 C 335,320 335,360 275,350" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="275" y="388" class="messageText" style="text-anchor: middle;">
+      requeue_scrub
+     </text>
+     <path d="M 275,395 C 335,385 335,425 275,415" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="275" y="453" class="messageText" style="text-anchor: middle;">
+      build_scrub_map_chunk
+     </text>
+     <path d="M 275,460 C 335,450 335,490 275,480" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="275" y="518" class="messageText" style="text-anchor: middle;">
+      done
+     </text>
+     <path d="M 275,525 C 335,515 335,555 275,545" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="275" y="583" class="messageText" style="text-anchor: middle;">
+      _request_scrub_map
+     </text>
+     <line x1="75" y1="590" x2="475" y2="590" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></line>
+    </g>
+    <g>
+     <text x="475" y="618" class="messageText" style="text-anchor: middle;">
+      BUILD_MAP_REPLICA
+     </text>
+     <path d="M 475,625 C 535,615 535,655 475,645" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="475" y="683" class="messageText" style="text-anchor: middle;">
+      requeue_scrub
+     </text>
+     <path d="M 475,690 C 535,680 535,720 475,710" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="475" y="748" class="messageText" style="text-anchor: middle;">
+      build_scrub_map_chunk
+     </text>
+     <path d="M 475,755 C 535,745 535,785 475,775" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="475" y="813" class="messageText" style="text-anchor: middle;">
+      done
+     </text>
+     <path d="M 475,820 C 535,810 535,850 475,840" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="75" y="878" class="messageText" style="text-anchor: middle;">
+      WAIT_REPLICAS
+     </text>
+     <path d="M 75,885 C 135,875 135,915 75,905" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="175" y="943" class="messageText" style="text-anchor: middle;">
+      CEPH_OSD_OP_SCRUB_MAP
+     </text>
+     <line x1="275" y1="950" x2="75" y2="950" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></line>
+    </g>
+    <g>
+     <text x="275" y="978" class="messageText" style="text-anchor: middle;">
+      CEPH_OSD_OP_SCRUB_MAP
+     </text>
+     <line x1="475" y1="985" x2="75" y2="985" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></line>
+    </g>
+    <g>
+     <text x="75" y="1013" class="messageText" style="text-anchor: middle;">
+      COMPARE_MAPS
+     </text>
+     <path d="M 75,1020 C 135,1010 135,1050 75,1040" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="75" y="1078" class="messageText" style="text-anchor: middle;">
+      FINISH
+     </text>
+     <path d="M 75,1085 C 135,1075 135,1115 75,1105" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <text x="75" y="1143" class="messageText" style="text-anchor: middle;">
+      INACTIVE
+     </text>
+     <path d="M 75,1150 C 135,1140 135,1180 75,1170" class="messageLine0" stroke-width="2" stroke="black" marker-end="url(#arrowhead)" style="fill: none;"></path>
+    </g>
+    <g>
+     <rect x="0" y="1200" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect>
+     <text x="75" y="1232.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle;">
+      <tspan x="75" dy="0">
+       PrimaryA
+      </tspan>
+     </text>
+    </g>
+    <g>
+     <rect x="200" y="1200" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect>
+     <text x="275" y="1232.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle;">
+      <tspan x="275" dy="0">
+       B
+      </tspan>
+     </text>
+    </g>
+    <g>
+     <rect x="400" y="1200" fill="#eaeaea" stroke="#666" width="150" height="65" rx="3" ry="3" class="actor"></rect>
+     <text x="475" y="1232.5" dominant-baseline="central" alignment-baseline="central" class="actor" style="text-anchor: middle;">
+      <tspan x="475" dy="0">
+       C
+      </tspan>
+     </text>
+    </g>
+   </svg>
+  </div> 
+  <h4><a id="32_scrubpg_120"></a>3.2 scrub抢占发生时，主pg状态机变化过程：</h4> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512130116860.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3NlZmF4aWFvamk=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p> 
+  <h4><a id="33_build_scrub_map_chunk_123"></a>3.3 build_scrub_map_chunk的过程</h4> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/2019051213014581.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3NlZmF4aWFvamk=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br> 从上面的过程我们可以知道，有三种情况会导致scrub过程被中断，分别为</p> 
+  <ul> 
+   <li>开始获取scrub对象列表时，返回-EINPROGRESS等待chunky_scrub将该pg重新加入scrub队列，待下一次被调度，代码如下</li> 
+  </ul> 
+  <pre><code>void PG::chunky_scrub(ThreadPool::TPHandle &amp;handle) {
+    ...
+    case PG::Scrubber::BUILD_MAP:
+    ...
+    ret = build_scrub_map_chunk(
+	  scrubber.primary_scrubmap,
+	  scrubber.primary_scrubmap_pos,
+	  scrubber.start, scrubber.end,
+	  scrubber.deep,
+	  handle);
+    if (ret == -EINPROGRESS) {
+	  requeue_scrub();
+	  done = true;
+	  break;
+	}
+}
+</code></pre> 
+  <ul> 
+   <li>遍历对象时读取数据如果对象大小大于osd_deep_scrub_stride则会分多次处理，该过程返回-EINPROGRESS等待chunky_scrub将该pg重新加入scrub队列，待下一次被调度</li> 
+   <li>遍历对象时读取数据如果对象omap的数量大于osd_deep_scrub_keys则会分多次处理，该过程返回-EINPROGRESS等待chunky_scrub将该pg重新加入scrub队列，待下一次被调度</li> 
+  </ul> 
+  <p>注意：重新加入队列被调度意味会释放pg锁</p> 
+  <h4><a id="34_scrub_151"></a>3.4 scrub抢占的一致性校验异常处理</h4> 
+  <p>发生了抢占如何保证scrub校验不会出错，因为能够抢占意味着scrub期间对象数据有可能发生了更改，那么ceph时如何处理这种情况的呢？</p> 
+  <p>刚才上面我们说过scrub最有可能被中断的阶段是build_scrub_map_chunk即PG::Scrubber::BUILD_MAP状态，那么当发生抢占时pg的scrub状态机时如何处理的？如下代码所示：</p> 
+  <pre><code>// build my own scrub map
+	if (scrub_preempted) {
+	  dout(10) &lt;&lt; __func__ &lt;&lt; " preempted" &lt;&lt; dendl;
+	  scrubber.state = PG::Scrubber::BUILD_MAP_DONE;
+	  break;
+	}
+	
+</code></pre> 
+  <p>scrub_preempted该值是在调用write_blocked_by_scrub进行设置为true，意味着当前scrub被抢占了。如果被抢占了，scrub状态机进入PG::Scrubber::BUILD_MAP_DONE状态，然后等待所有的从副本的ScrubMap结果返回，最终重新进入PG::Scrubber::NEW_CHUNK状态，该状态会将从副本返回的ScrubMap清除掉;</p> 
+  <pre><code>  case PG::Scrubber::NEW_CHUNK:
+	scrubber.primary_scrubmap = ScrubMap();
+	scrubber.received_maps.clear();
+</code></pre> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

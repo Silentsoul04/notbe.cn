@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux死锁检测的一种思路【转】 « NotBeCN</title>
+  <meta name="description" content="             &nbsp;    转自：http://www.cnblogs.com/mumuxinfei/p/4365697.html    前言:&nbsp;　　上一篇博文讲述了pstack的使用和原理. 和jstack一样, pstack能获取进程的线程堆栈快照, 方便检验和性能评估. 但jst...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/09/22/weixin_34326558_90117725.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux死锁检测的一种思路【转】</h1>
+    <p class="post-meta">Sep 22, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>&nbsp;</p> 
+   <p>转自：<a href="http://www.cnblogs.com/mumuxinfei/p/4365697.html" rel="nofollow">http://www.cnblogs.com/mumuxinfei/p/4365697.html</a></p> 
+   <p><em><strong>前言:</strong>&nbsp;</em><br>　　<a href="http://www.cnblogs.com/mumuxinfei/p/4366708.html" rel="nofollow">上一篇博文</a>讲述了<a href="http://www.cnblogs.com/mumuxinfei/p/4366708.html" rel="nofollow"><strong>pstack的使用和原理</strong></a>. 和jstack一样, pstack能获取进程的<strong>线程堆栈快照</strong>, 方便检验和性能评估. 但jstack功能更加的强大, 它能对潜在的<strong>死锁</strong>予以提示, 而pstack只提供了线索, 需要gdb进一步的确定.&nbsp;<br>　　那Linux下, 如何去<strong>检测死锁</strong>, 如何让死锁的检测能够更加的智能和方便? 这是本文的核心主旨, 让我们一同分享下思路.</p> 
+   <p><em><strong>常规做法:</strong></em><br>　　我们来模拟一个出现死锁的程序, 然后通过常规方式来确定是否出现了死锁, 以及在那些线程上出现的.<br>　　如下是经典的死锁程序:<br><img src="https://yqfile.alicdn.com/img_4dfa1eb4f4efdc3637d01bd91d1970b2.png" alt=""><br>　　注: 线程A获取锁1, 线程B获取锁2, 然后线程A/B分别去获取锁2/1, 两者谁也不松手的, 又不得对方的, 于是duang, duang duang...<br>　　使用<strong>pstack来快速扫描堆栈</strong>:<br>　　<img src="https://yqfile.alicdn.com/img_1123e3cff968416e0e97d7df8ac4667b.png" alt=""><br>　　发现有两个线程均在lock中等待, 存在死锁的嫌疑, 需要gdb后具体确认.</p> 
+   <p>　　<img src="https://yqfile.alicdn.com/img_c1a9d9a75c4cb374fc1d7356ea871bf5.png" alt=""><br>　　图文解读:&nbsp;<strong>线程10800申请mutex_1</strong>(此时被线程10799所有), 而<strong>线程10799申请mutex_2</strong>(被线程10800所有), 于是线程10800在等待线程10799的释放, 而线程10799在等待线程10800的释放, 于是我们可以确定发生死锁了.<br>　　但这种方式, 需要开发人员自己去<strong>验证和排除</strong>, 复杂的案例就并不轻松了.&nbsp;<br>　　在gdb中, 我们可以只能看到mutex对应的线程, 却无法<strong>反向获取到线程拥有的mutex列表</strong>, 如果有这个信息, 就像<strong>jstack</strong>工具那样, 获取对死锁的判定, 只要扫下堆栈信息, 就能基本的判定了.</p> 
+   <p><em><strong>检测模型:</strong></em><br>　　对于死锁, 操作系统课程中, 着重讲述了其常规模型/检测算法/规避建议, 这边不再展开.<br>　　一言以蔽之:&nbsp;<strong>死锁的发生, 必然意味着有向图(依赖关系)的构建存在环.</strong><br>　　关于检测模型, 我们可以这么假定,&nbsp;<strong>锁为有向边</strong>, 申请锁的<strong>线程A为起点</strong>, 拥有锁的<strong>线程B为终点</strong>. 这样就形成线程A到线程B的一条有向边. 而众多的<strong>锁(边)和线程(点)</strong>, 就构成了一个<strong>有向图</strong>.<br>　　于是乎, 一个死<strong>锁检测的算法</strong>, 就转变为图论中<strong>有向图的环判断问题</strong>. 而该问题, 可以借助成熟的<strong>拓扑遍历算法</strong>轻易实现.</p> 
+   <div class="cnblogs_Highlighter sh-gutter"> 
+    <div> 
+     <div class="syntaxhighlighter cpp"> 
+      <table border="0">
+       <tbody>
+        <tr>
+         <td class="gutter"> 
+          <div class="line number1 index0 alt2">
+           1
+          </div> 
+          <div class="line number2 index1 alt1">
+           2
+          </div> 
+          <div class="line number3 index2 alt2">
+           3
+          </div> 
+          <div class="line number4 index3 alt1">
+           4
+          </div> 
+          <div class="line number5 index4 alt2">
+           5
+          </div> 
+          <div class="line number6 index5 alt1">
+           6
+          </div> 
+          <div class="line number7 index6 alt2">
+           7
+          </div> 
+          <div class="line number8 index7 alt1">
+           8
+          </div> 
+          <div class="line number9 index8 alt2">
+           9
+          </div> 
+          <div class="line number10 index9 alt1">
+           10
+          </div> 
+          <div class="line number11 index10 alt2">
+           11
+          </div> 
+          <div class="line number12 index11 alt1">
+           12
+          </div> 
+          <div class="line number13 index12 alt2">
+           13
+          </div> 
+          <div class="line number14 index13 alt1">
+           14
+          </div> 
+          <div class="line number15 index14 alt2">
+           15
+          </div> 
+          <div class="line number16 index15 alt1">
+           16
+          </div> 
+          <div class="line number17 index16 alt2">
+           17
+          </div> 
+          <div class="line number18 index17 alt1">
+           18
+          </div> 
+          <div class="line number19 index18 alt2">
+           19
+          </div> 
+          <div class="line number20 index19 alt1">
+           20
+          </div> </td> 
+         <td class="code"> 
+          <div> 
+           <div class="line number1 index0 alt2">
+            <code class="cpp comments">//拓扑排序：可以测试一个有向图是否有环&nbsp;&nbsp;</code>
+           </div> 
+           <div class="line number2 index1 alt1"> 
+            <code class="cpp keyword bold">void</code>&nbsp;
+            <code class="cpp plain">Graph::topsort( )&nbsp;</code> 
+           </div> 
+           <div class="line number3 index2 alt2">
+            <code class="cpp plain">{&nbsp;</code>
+           </div> 
+           <div class="line number4 index3 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">Queue&lt;Vertex&gt; q;&nbsp;</code> 
+           </div> 
+           <div class="line number5 index4 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp color1 bold">int</code>&nbsp;
+            <code class="cpp plain">counter = 0;&nbsp;</code> 
+           </div> 
+           <div class="line number6 index5 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">q.makeEmpty( );&nbsp;</code> 
+           </div> 
+           <div class="line number7 index6 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">for</code>&nbsp;
+            <code class="cpp plain">each Vertex v&nbsp;</code> 
+           </div> 
+           <div class="line number8 index7 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">if</code>
+            <code class="cpp plain">( v.indegree == 0 )&nbsp;</code> 
+           </div> 
+           <div class="line number9 index8 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">q.enqueue( v );&nbsp;</code> 
+           </div> 
+           <div class="line number10 index9 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">while</code>
+            <code class="cpp plain">( !q.isEmpty( ) )&nbsp;</code> 
+           </div> 
+           <div class="line number11 index10 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">{&nbsp;</code> 
+           </div> 
+           <div class="line number12 index11 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">Vertex v = q.dequeue( );&nbsp;</code> 
+           </div> 
+           <div class="line number13 index12 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">counter++;</code> 
+           </div> 
+           <div class="line number14 index13 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">for</code>&nbsp;
+            <code class="cpp plain">each Vertex w adjacent to v&nbsp;</code> 
+           </div> 
+           <div class="line number15 index14 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">if</code>
+            <code class="cpp plain">( --w.indegree == 0 )&nbsp;</code> 
+           </div> 
+           <div class="line number16 index15 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">q.enqueue( w );&nbsp;</code> 
+           </div> 
+           <div class="line number17 index16 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">}&nbsp;</code> 
+           </div> 
+           <div class="line number18 index17 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">if</code>
+            <code class="cpp plain">( counter != NUM_VERTICES )&nbsp;</code> 
+           </div> 
+           <div class="line number19 index18 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">throw</code>&nbsp;
+            <code class="cpp plain">CycleFoundException( );&nbsp;</code> 
+           </div> 
+           <div class="line number20 index19 alt1">
+            <code class="cpp plain">}</code>
+           </div> 
+          </div> </td> 
+        </tr>
+       </tbody>
+      </table>
+     </div> 
+    </div> 
+   </div> 
+   <p><em><strong>解决方案:</strong></em><br>　　检测模型的确定, 让人豁然开朗. 但如何落地实现, 成了另一个拦路虎.&nbsp;<br>　　让我们从反向获取线程拥有的锁列表这个思路出发, 如何去实现? 如果我们能像java反射一样, 拦截lock/unlock操作, 并添加汇报线程与锁关系的功能, 那自然能构建有向图. 进而实现自动检测死锁情况.<br>　　但是C/C++没有反射, 不过可以在所有的lock/unlock代码处添加桩代码, 并得以解决. 但这对使用方的代码具有侵入性, 能否改善呢?<br>　　上天总是眷顾勤奋的人, 这边我们可以借助宏扩展(<strong>宏不会递归展开, 这是关键</strong>)来巧妙实现这个功能.</p> 
+   <div class="cnblogs_Highlighter sh-gutter"> 
+    <div> 
+     <div class="syntaxhighlighter cpp"> 
+      <table border="0">
+       <tbody>
+        <tr>
+         <td class="gutter"> 
+          <div class="line number1 index0 alt2">
+           1
+          </div> 
+          <div class="line number2 index1 alt1">
+           2
+          </div> 
+          <div class="line number3 index2 alt2">
+           3
+          </div> 
+          <div class="line number4 index3 alt1">
+           4
+          </div> 
+          <div class="line number5 index4 alt2">
+           5
+          </div> 
+          <div class="line number6 index5 alt1">
+           6
+          </div> 
+          <div class="line number7 index6 alt2">
+           7
+          </div> 
+          <div class="line number8 index7 alt1">
+           8
+          </div> 
+          <div class="line number9 index8 alt2">
+           9
+          </div> 
+          <div class="line number10 index9 alt1">
+           10
+          </div> 
+          <div class="line number11 index10 alt2">
+           11
+          </div> 
+          <div class="line number12 index11 alt1">
+           12
+          </div> 
+          <div class="line number13 index12 alt2">
+           13
+          </div> 
+          <div class="line number14 index13 alt1">
+           14
+          </div> 
+          <div class="line number15 index14 alt2">
+           15
+          </div> 
+          <div class="line number16 index15 alt1">
+           16
+          </div> 
+          <div class="line number17 index16 alt2">
+           17
+          </div> 
+          <div class="line number18 index17 alt1">
+           18
+          </div> </td> 
+         <td class="code"> 
+          <div> 
+           <div class="line number1 index0 alt2">
+            <code class="cpp preprocessor">#include &lt;sys/syscall.h&gt;</code>
+           </div> 
+           <div class="line number2 index1 alt1">
+            &nbsp;
+           </div> 
+           <div class="line number3 index2 alt2">
+            <code class="cpp preprocessor">#define gettid() syscall(__NR_gettid)</code>
+           </div> 
+           <div class="line number4 index3 alt1">
+            &nbsp;
+           </div> 
+           <div class="line number5 index4 alt2">
+            <code class="cpp comments">// 拦截lock, 添加before, after操作, 记录锁与线程的关系</code>
+           </div> 
+           <div class="line number6 index5 alt1">
+            <code class="cpp preprocessor">#define pthread_mutex_lock(x)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</code>
+           </div> 
+           <div class="line number7 index6 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">do</code>&nbsp;
+            <code class="cpp plain">{&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</code> 
+           </div> 
+           <div class="line number8 index7 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp functions bold">printf</code>
+            <code class="cpp plain">(</code>
+            <code class="cpp string">"before=&gt;thread_id:%d apply mutex:%p\n"</code>
+            <code class="cpp plain">, gettid(), x);&nbsp;&nbsp;&nbsp; \</code> 
+           </div> 
+           <div class="line number9 index8 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">pthread_mutex_lock(x);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</code> 
+           </div> 
+           <div class="line number10 index9 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp functions bold">printf</code>
+            <code class="cpp plain">(</code>
+            <code class="cpp string">"after=&gt;thread_id:%d acquire mutex:%p\n"</code>
+            <code class="cpp plain">, gettid(), x);&nbsp;&nbsp; \</code> 
+           </div> 
+           <div class="line number11 index10 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">}&nbsp;</code>
+            <code class="cpp keyword bold">while</code>&nbsp;
+            <code class="cpp plain">(</code>
+            <code class="cpp keyword bold">false</code>
+            <code class="cpp plain">);</code> 
+           </div> 
+           <div class="line number12 index11 alt1">
+            &nbsp;
+           </div> 
+           <div class="line number13 index12 alt2">
+            <code class="cpp comments">// 拦截unlock, 添加after操作, 解除锁和线程的关系</code>
+           </div> 
+           <div class="line number14 index13 alt1">
+            <code class="cpp preprocessor">#define pthread_mutex_unlock(x)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</code>
+           </div> 
+           <div class="line number15 index14 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp keyword bold">do</code>&nbsp;
+            <code class="cpp plain">{&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</code> 
+           </div> 
+           <div class="line number16 index15 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">pthread_mutex_unlock(x);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</code> 
+           </div> 
+           <div class="line number17 index16 alt2"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp functions bold">printf</code>
+            <code class="cpp plain">(</code>
+            <code class="cpp string">"unlock=&gt;thread_id: %d release mutex:%p\n"</code>
+            <code class="cpp plain">, gettid(), x); \</code> 
+           </div> 
+           <div class="line number18 index17 alt1"> 
+            <code class="cpp spaces">&nbsp;&nbsp;&nbsp;&nbsp;</code>
+            <code class="cpp plain">}&nbsp;</code>
+            <code class="cpp keyword bold">while</code>
+            <code class="cpp plain">(</code>
+            <code class="cpp keyword bold">false</code>
+            <code class="cpp plain">);</code> 
+           </div> 
+          </div> </td> 
+        </tr>
+       </tbody>
+      </table>
+     </div> 
+    </div> 
+   </div> 
+   <p>　　注: gettid函数用于获取线程实际的id,&nbsp;<strong>重名名</strong>的pthread_mutex_lock/pthread_mutex_unlock宏, 添加了对<strong>before/after拦截调用</strong>, 并汇报记录了<strong>锁与线程的关系</strong>.<br>　　我们可以对before/after操作, 进行实际的图构建和检测. 而且该宏替换, 轻松解决了代码侵入性的问题.<br>　　让我们在回忆jstack的使用, 猜测java就是借助<strong>反射</strong>, 轻松实现了类似的功能, 使得其能检测死锁情况.</p> 
+   <p><em><strong>检验效果:</strong></em><br>　　有了上述的理论基础和思路后, 进行尝试和扩展.&nbsp;<br>　　这边写了一个简单的检测工具库, 使用非常的简单.<br>　　在需要检测的代码中, 引入<strong>dead_lock_stub.h</strong>头文件, 然后在main函数的开头加入</p> 
+   <div class="cnblogs_Highlighter sh-gutter"> 
+    <div> 
+     <div class="syntaxhighlighter cpp"> 
+      <table border="0">
+       <tbody>
+        <tr>
+         <td class="gutter"> 
+          <div class="line number1 index0 alt2">
+           1
+          </div> </td> 
+         <td class="code"> 
+          <div> 
+           <div class="line number1 index0 alt2">
+            <code class="cpp plain">DeadLockGraphic::getInstance().start_check();</code>
+           </div> 
+          </div> </td> 
+        </tr>
+       </tbody>
+      </table>
+     </div> 
+    </div> 
+   </div> 
+   <p>　　实验效果如下:<br>　　<img src="https://yqfile.alicdn.com/img_70f1084f99a671ad578fef93ab348e0b.png" alt=""><br>　　样例代码的<a href="http://pan.baidu.com/s/1ntzHEeX" rel="nofollow">网盘地址</a>如下: http://pan.baidu.com/s/1ntzHEeX</p> 
+   <div> 
+    <p><em><strong>&nbsp;<em><strong><em><strong>写在最后：</strong></em><br>　　</strong></em></strong></em>如果你觉得这篇文章对你有帮助, 请小小打赏下. 其实我想试试, 看看写博客能否给自己带来一点小小的收益. 无论多少, 都是对楼主一种由衷的肯定.</p> 
+    <p>　　<img src="https://yqfile.alicdn.com/img_e3d6234bbc5f2582536b6d0c68def1ca.png" alt=""></p> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

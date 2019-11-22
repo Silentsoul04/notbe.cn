@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux 串口、usb转串口驱动分析(2-2) 【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=26807463&amp;id=4186852    Linux 串口、usb转串口驱动分析2    内核版本：2.6.35.6&nbsp;&nbsp;&nbsp...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/11/11/weixin_33964094_90125676.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux 串口、usb转串口驱动分析(2-2) 【转】</h1>
+    <p class="post-meta">Nov 11, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p style="text-align:left;" align="center">转自：<a href="http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=26807463&amp;id=4186852" rel="nofollow">http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=26807463&amp;id=4186852</a></p> 
+   <p align="center">Linux 串口、usb转串口驱动分析2</p> 
+   <p>内核版本：2.6.35.6&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 荣鹏140319</p> 
+   <p>&nbsp;</p> 
+   <p>声明：图和个别段落（我做了小的修改）是直接从网上截取</p> 
+   <p>&nbsp;</p> 
+   <p>目标：主要是想对Linux 串口、usb转串口驱动框架有一个整体的把控，因此会忽略某些细节，同时里面涉及到的一些驱动基础，比如字符设备驱动、平台驱动等也不进行详细说明原理。</p> 
+   <p>二、具体细节分析</p> 
+   <p>先分析tty框架</p> 
+   <p>tty在linux下属于字符设备驱动&nbsp; tty层提供了一些数据结构和函数接口方便其他驱动注册上来，其中包括虚拟终端、串口终端、伪终端等</p> 
+   <p>&nbsp;</p> 
+   <p>Tty核心部分在tty_io.c里面</p> 
+   <p>&nbsp;</p> 
+   <p>第一步、内核默认的tty初始化部分</p> 
+   <p>static int __init tty_class_init(void)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tty_class = class_create(THIS_MODULE, "tty");</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (IS_ERR(tty_class))</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return PTR_ERR(tty_class);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tty_class-&gt;devnode = tty_devnode;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 0;</p> 
+   <p>}</p> 
+   <p>postcore_initcall(tty_class_init);</p> 
+   <p>上面代码创建了tty类，方便以后创建设备节点</p> 
+   <p>&nbsp;</p> 
+   <p>然后是tty_init</p> 
+   <p>tty_init函数负责初始化tty层，它是由chr_dev_init调用的(fs_initcall(chr_dev_init))</p> 
+   <p>也就是说它属于字符设备一部分。</p> 
+   <p>int __init tty_init(void)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cdev_init(&amp;tty_cdev, &amp;tty_fops);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cdev_add(&amp;tty_cdev, MKDEV(TTYAUX_MAJOR, 0), 1) ||</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; register_chrdev_region(MKDEV(TTYAUX_MAJOR, 0), 1, "/dev/tty") &lt; 0)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; panic("Couldn't register /dev/tty driver\n");</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; device_create(tty_class, NULL, MKDEV(TTYAUX_MAJOR, 0), NULL,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "tty");</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; cdev_init(&amp;console_cdev, &amp;console_fops);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (cdev_add(&amp;console_cdev, MKDEV(TTYAUX_MAJOR, 1), 1) ||</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; register_chrdev_region(MKDEV(TTYAUX_MAJOR, 1), 1, "/dev/console") &lt; 0)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; panic("Couldn't register /dev/console driver\n");</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; device_create(tty_class, NULL, MKDEV(TTYAUX_MAJOR, 1), NULL,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "console");</p> 
+   <p>&nbsp;</p> 
+   <p>#ifdef CONFIG_VT</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; vty_init(&amp;console_fops);</p> 
+   <p>#endif</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 0;</p> 
+   <p>}</p> 
+   <p>注：个人认为上面的if判断写法不是很好，虽然是正确的</p> 
+   <p>&nbsp;</p> 
+   <p>这里和我们最终关心的串口驱动没关系，但由此可以看出tty字符设备（/dev/tty）使用的主设备号是TTYAUX_MAJOR（5），次设备号为0，/dev/console使用的主设备号也是5，但次设备号为1，控制台的初始化console_init在这个函数之前会被调用（start_kernel），内核注释如下：</p> 
+   <p>/*</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* HACK ALERT! This is early. We're enabling the console before</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* we've done PCI setups etc, and console_init() must be aware of</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* this. But we do want output early, in case something goes wrong.</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; console_init();</p> 
+   <p>这里不跟进去分析了。</p> 
+   <p>&nbsp;</p> 
+   <p>虚拟终端、控制台部分暂时忽略不管。</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>第二步：使用tty层提供的功能（我们只关心串口驱动，所以是serial核心层或者usb-serial核心层使用它们）</p> 
+   <p>&nbsp;</p> 
+   <p>1）tty_register_driver 注册tty驱动</p> 
+   <p>相关数据结构：&nbsp;struct tty_driver *driver&nbsp;可以通过alloc_tty_driver分配</p> 
+   <p>它主要做的事情：</p> 
+   <p>1、创建一个字符设备，但是这个字符设备的操作集是tty层定义的tty_fops，之所以由tty层提供，是因为它要实现线路规划部分，数据流会由它转向线路规划部分中。</p> 
+   <p>static const struct file_operations tty_fops = {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .llseek&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = no_llseek,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .read&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tty_read,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .write&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tty_write,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .poll&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tty_poll,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .unlocked_ioctl&nbsp;&nbsp;&nbsp; = tty_ioctl,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .compat_ioctl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tty_compat_ioctl,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .open&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tty_open,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .release = tty_release,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .fasync&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = tty_fasync,</p> 
+   <p>};</p> 
+   <p>这其实是起到一个桥接作用。后面再分析这点</p> 
+   <p>&nbsp;</p> 
+   <p>2、将该驱动对象加入到全局的链表&nbsp; 这一步就是为了上面说的 桥接</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>2）tty_register_device注册tty设备，只需要指定对应的驱动对象和索引号即可</p> 
+   <p>它主要做的事情：</p> 
+   <p>创建一个字符设备到/dev下&nbsp; 设备号由驱动对应的设备号base+索引</p> 
+   <p>下面以几个情景分析（这里只分析tty框架的处理，还没有和具体的驱动挂钩）：</p> 
+   <p>情景1：打开设备</p> 
+   <p>在应用层open上文第二步中tty_register_device创建的设备，会经过vfs 最终到tty_init中注册的tty_fops操作集里的open</p> 
+   <p>也就是tty_open</p> 
+   <p>它会根据你打开的是/dev/tty 还是 /dev/console 或者是你自己定义的一个设备（比如串口设备）（这个是由你tty_register_driver注册是参数struct tty_driver *driver里面的major决定的）</p> 
+   <p>&nbsp;</p> 
+   <p>这里假设打开的是自己定义的设备/dev/ttyS0，那么会通过</p> 
+   <p>driver = get_tty_driver(device, &amp;index);</p> 
+   <p>获取，它其实是扫描全局链表，这个链表的建立是在第二步中第2小步说明部分完成的。</p> 
+   <p>&nbsp;</p> 
+   <p>如果是第一次打开，那么会创建一个新的对象用来代表这个open及以后操作的上下文，即tty_struct，通过alloc_tty_struct分配的，它里面有相应的线路规划策略tty_ldisc_init，默认初始化为tty_ldisc_get(N_TTY)。 然后调用线路规划的open。tty_struct对象同时继承了driver的操作集tty_fops，它内部同时会分配并初始化ktermios对象tty_init_termios(tty)及在driver上登记driver-&gt;ttys[idx] = tty; 最后会调用驱动本身注册的open。</p> 
+   <p>tty_struct对象会放到file的private_data，为以后操作做好准备。</p> 
+   <p>&nbsp;</p> 
+   <p>情景2：从设备读数据</p> 
+   <p>在应用层read上文第二步中tty_register_device创建的设备，会经过vfs 最终到tty_init中注册的tty_fops操作集里的read</p> 
+   <p>也就是tty_read</p> 
+   <p>&nbsp;</p> 
+   <p>tty设备没有read函数，是因为大部分tty的输入设备和输出设备不一样。例如我们的虚拟终端设备，它的输入是键盘，输出是显示器。</p> 
+   <p>由于这样的原因，tty的驱动层和tty的线路规程层都有一个缓冲区。</p> 
+   <p>tty驱动层的缓冲区用来保存硬件发过来的数据。在驱动程序里使用 &nbsp;tty_insert_flip_string 函数可以实现将硬件的数据存入到驱动层的缓冲区。</p> 
+   <p>其实一个缓冲区就够了，为什么线路规程层还是有一个缓冲区呢？</p> 
+   <p>那是因为tty核心无法直接读取驱动层的缓冲区的数据。tty核心读不到数据，用户也就无法获取数据。用户的read函数只能从tty核心读取数据。而tty核心只能从tty线路规程层的缓冲区读取数据。</p> 
+   <p>因为是层层读写的关系，所以tty线路规程也是需要一个缓冲区的。</p> 
+   <p>在驱动程序里使用 tty_flip_buffer_push() &nbsp;函数将tty驱动层缓冲区的数据推到tty线路规程层的缓冲区。这样就完成了数据的流通。</p> 
+   <p>因为全是缓冲区操作，所以需要两个进程：写数据进程和读数据进程。</p> 
+   <p>如果缓冲区内没有数据，运行读进程的话，tty核心就会把读进程加入到等待队列。</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>tty_read的主要流程：</p> 
+   <p>从上文分析的open函数所存储的private里面取出分配并初始化过的tty_struct对象</p> 
+   <p>tty = (struct tty_struct *)file-&gt;private_data;</p> 
+   <p>然后它会调用属于tty的线路规划里面的read&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+   <p>线路规划是通过tty_register_ldisc注册到一个全局数组里的</p> 
+   <p>对应默认的线性规划是在文件tty_ldisc.c里面的</p> 
+   <p>tty_ldisc_begin完成的，它是在console_init里调用的，也就是内核调用tty_init之前。</p> 
+   <p>void tty_ldisc_begin(void)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* Setup the default TTY line discipline. */</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (void) tty_register_ldisc(N_TTY, &amp;tty_ldisc_N_TTY);</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>struct tty_ldisc_ops tty_ldisc_N_TTY = {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .magic&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = TTY_LDISC_MAGIC,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = "n_tty",</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .open&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = n_tty_open,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .close&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = n_tty_close,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .flush_buffer&nbsp;&nbsp;&nbsp; = n_tty_flush_buffer,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .chars_in_buffer = n_tty_chars_in_buffer,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .read&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = n_tty_read,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .write&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = n_tty_write,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .ioctl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = n_tty_ioctl,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .set_termios&nbsp;&nbsp;&nbsp;&nbsp; = n_tty_set_termios,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .poll&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = n_tty_poll,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .receive_buf&nbsp;&nbsp;&nbsp;&nbsp; = n_tty_receive_buf,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .write_wakeup&nbsp;&nbsp;&nbsp; = n_tty_write_wakeup</p> 
+   <p>};</p> 
+   <p>&nbsp;</p> 
+   <p>因此最终调用n_tty_read</p> 
+   <p>它会根据是否有数据做不同的处理，如果有数据，则直接处理后返回，如果没有数据，那么就在等待队列上睡眠等待。</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>情景2：从设备写数据</p> 
+   <p>在应用层write上文第二步中tty_register_device创建的设备，会经过vfs 最终到tty_init中注册的tty_fops操作集里的write</p> 
+   <p>也就是tty_write</p> 
+   <p>&nbsp;</p> 
+   <p>Write调用要简单很多。</p> 
+   <p>&nbsp;</p> 
+   <p>它调用do_tty_write</p> 
+   <p>它内部实际调用的是线路规划的n_tty_write，它当然会调用tty_struct 的write，也就是继承自tty驱动的write</p> 
+   <p>c = tty-&gt;ops-&gt;write(tty, b, nr); 由驱动完成最终的操作硬件发送数据。</p> 
+   <p>&nbsp;</p> 
+   <p>注意：这里描述的读、写是以终端io为例，如果是蓝牙、或者ppp这些网络io，read、write会通过网络协议栈，而不是这里的tty_read tty_write。</p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_04057954271620249b17c77f2d43dc74.png" alt=""></p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_e5be64e99bad7e5ca6d4714415045dea.png" alt=""></p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>第二步、具体驱动部分分析</p> 
+   <p>1、&nbsp;&nbsp;serial核心层（tty驱动层实现）分析</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>2、&nbsp;&nbsp;串口驱动分析（8250为例）</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>1、&nbsp;&nbsp;usb-serial核心层（tty驱动层实现）分析</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>2、&nbsp;&nbsp;usb转串口驱动分析（pl2303为例）</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

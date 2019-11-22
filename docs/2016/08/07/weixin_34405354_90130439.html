@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>linux中断的上半部和下半部 【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=24690947&amp;id=3491821    一、什么是下半部    &nbsp;    中断是一个很霸道的东西，处理器一旦接收到中断，就会打断正在执行的...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/08/07/weixin_34405354_90130439.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">linux中断的上半部和下半部 【转】</h1>
+    <p class="post-meta">Aug 7, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=24690947&amp;id=3491821" rel="nofollow">http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;uid=24690947&amp;id=3491821</a></p> 
+   <p>一、什么是下半部</p> 
+   <p>&nbsp;</p> 
+   <p>中断是一个很霸道的东西，处理器一旦接收到中断，就会打断正在执行的代码，调用中断处理函数。如果在中断处理函数中没有禁止中断，该中断处理函数执行过程中仍有可能被其他中断打断。出于这样的原因，大家都希望中断处理函数执行得越快越好。</p> 
+   <p>另外，中断上下文中不能阻塞，这也限制了中断上下文中能干的事。</p> 
+   <p>基于上面的原因，内核将整个的中断处理流程分为了上半部和下半部。上半部就是之前所说的中断处理函数，它能最快的响应中断，并且做一些必须在中断响应之后马上要做的事情。而一些需要在中断处理函数后继续执行的操作，内核建议把它放在下半部执行。</p> 
+   <p>拿网卡来举例，在linux内核中，当网卡一旦接受到数据，网卡会通过中断告诉内核处理数据，内核会在网卡中断处理函数（上半部）执行一些网卡硬件的必要设置，因为这是在中断响应后急切要干的事情。接着，内核调用对应的下半部函数来处理网卡接收到的数据，因为数据处理没必要在中断处理函数里面马上执行，可以将中断让出来做更紧迫的事情。</p> 
+   <p>&nbsp;</p> 
+   <p>可以有三种方法来实现下半部：软中断、tasklet和等待队列。</p> 
+   <p>&nbsp;</p> 
+   <p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</p> 
+   <p>&nbsp;</p> 
+   <p>二、软中断</p> 
+   <p>&nbsp;</p> 
+   <p>软中断一般很少用于实现下半部，但tasklet是通过软中断实现的，所以先介绍软中断。字面理解，软中断就是软件实现的异步中断，它的优先级比硬中断低，但比普通进程优先级高，同时，它和硬中断一样不能休眠。</p> 
+   <p>&nbsp;</p> 
+   <p>软中断是在编译时候静态分配的，要用软中断必须修改内核代码。</p> 
+   <p>&nbsp;</p> 
+   <p>在kernel/softirq.c中有这样的一个数组：</p> 
+   <p>51&nbsp;static struct softirq_action softirq_vec[NR_SOFTIRQS]&nbsp;__cacheline_aligned_in_smp;</p> 
+   <p>内核通过一个softirq_action数组来维护的软中断，NR_SOFTIRQS是当前软中断的个数，待会再看他在哪里定义。</p> 
+   <p>&nbsp;</p> 
+   <p>先看一下softirq_action结构体：</p> 
+   <p>/*include/linux/interrupt.h*/</p> 
+   <p>265 struct softirq_action</p> 
+   <p>266 {</p> 
+   <p>267 void (*action)(struct softirq_action *); //软中断处理函数</p> 
+   <p>268 };</p> 
+   <p>一看发现，结构体里面就一个软中断函数，他的参数就是本身结构体的指针。之所以这样设计，是为了以后的拓展，如果在结构体中添加了新成员，也不需要修改函数接口。在以前的内核，该结构体里面还有一个data的成员，用于传参，不过现在没有了。</p> 
+   <p>&nbsp;</p> 
+   <p>接下来看一下如何使用软中断实现下半部</p> 
+   <p>一、要使用软中断，首先就要静态声明软中断：</p> 
+   <p>/*include/linux/interrupt.h*/</p> 
+   <p>246 enum</p> 
+   <p>247 {</p> 
+   <p>248 HI_SOFTIRQ=0, //用于tasklet的软中断，优先级最高，为0</p> 
+   <p>249 TIMER_SOFTIRQ, //定时器的下半部</p> 
+   <p>250 NET_TX_SOFTIRQ, //发送网络数据的软中断</p> 
+   <p>251 NET_RX_SOFTIRQ, //接受网络数据的软中断</p> 
+   <p>252 BLOCK_SOFTIRQ,</p> 
+   <p>253 TASKLET_SOFTIRQ, //也是用于实现tasklet</p> 
+   <p>254 SCHED_SOFTIRQ,</p> 
+   <p>255 HRTIMER_SOFTIRQ,</p> 
+   <p>256 RCU_SOFTIRQ, /* Preferable RCU should always be the last softirq */</p> 
+   <p>257 //add by xiaobai 2011.1.18</p> 
+   <p>258 XIAOBAI_SOFTIRQ, //这是我添加的，优先级最低</p> 
+   <p>259</p> 
+   <p>260 NR_SOFTIRQS, //这个就是上面所说的软中断结构体数组成员个数</p> 
+   <p>261 };</p> 
+   <p>上面通过枚举定义了NR_SOFTIRQS(10)个软中断的索引号，优先级最高是0（HI_SOFTIRQ），最低是我刚添加上去的XIAOBAI_SOFTIRQ，优先级为9。</p> 
+   <p>&nbsp;</p> 
+   <p>二、定义了索引号后，还要注册处理程序。</p> 
+   <p>通过函数open_sofuirq来注册软中断处理函数，使软中断索引号与中断处理函数对应。该函数在kernel/softirq.c中定义：</p> 
+   <p>/*kernel/softirq.c */</p> 
+   <p>321 void open_softirq(int nr, void (*action)(struct softirq_action *))</p> 
+   <p>322 {</p> 
+   <p>323 softirq_vec[nr].action = action;</p> 
+   <p>324 }</p> 
+   <p>其实该函数就是把软中断处理函数的函数指针存放到对应的结构体中，一般的，我们自己写的模块是不能调用这个函数的，为了使用这个函数，我修改了内核：</p> 
+   <p>322 void open_softirq(int nr, void (*action)(struct softirq_action *))</p> 
+   <p>323 {</p> 
+   <p>324 softirq_vec[nr].action = action;</p> 
+   <p>325 }</p> 
+   <p>326 EXPORT_SYMBOL(open_softirq); //这是我添加的，导出符号，这样我编写的程序就能调用</p> 
+   <p>在我的程序中如下调用：</p> 
+   <p>/*6th_irq_3/1st/test.c*/</p> 
+   <p>13 void xiaobai_action(struct softirq_action *t) //软中断处理函数</p> 
+   <p>14 {</p> 
+   <p>15 printk("hello xiaobai!\n");</p> 
+   <p>16 }</p> 
+   <p>。。。。。。。。</p> 
+   <p>48 open_softirq(XIAOBAI_SOFTIRQ, xiaobai_action);</p> 
+   <p>&nbsp;</p> 
+   <p>三、在中断处理函数返回前，触发对应的软中断。</p> 
+   <p>在中断处理函数完成了必要的操作后，就应该调用函数raise_sotfirq触发软中断，让软中断执行中断下半部的操作。</p> 
+   <p>/*kernel/softirq.c*/</p> 
+   <p>312 void raise_softirq(unsigned int nr)</p> 
+   <p>313 {</p> 
+   <p>314 unsigned long flags;</p> 
+   <p>315</p> 
+   <p>316 local_irq_save(flags);</p> 
+   <p>317 raise_softirq_irqoff(nr);</p> 
+   <p>318 local_irq_restore(flags);</p> 
+   <p>319 }</p> 
+   <p>所谓的触发软中断，并不是指马上执行该软中断，不然和在中断上执行没什么区别。它的作用只是告诉内核：下次执行软中断的时候，记得执行我这个软中断处理函数。</p> 
+   <p>当然，这个函数也得导出符号后才能调用：</p> 
+   <p>/*kernel/softirq.c*/</p> 
+   <p>312 void raise_softirq(unsigned int nr)</p> 
+   <p>313 {</p> 
+   <p>314 unsigned long flags;</p> 
+   <p>315</p> 
+   <p>316 local_irq_save(flags);</p> 
+   <p>317 raise_softirq_irqoff(nr);</p> 
+   <p>318 local_irq_restore(flags);</p> 
+   <p>319 }</p> 
+   <p>320 EXPORT_SYMBOL(raise_softirq);</p> 
+   <p>在我的程序中如下调用：</p> 
+   <p>/*6th_irq_3/1st/test.c*/</p> 
+   <p>18 irqreturn_t irq_handler(int irqno, void *dev_id) //中断处理函数</p> 
+   <p>19 {</p> 
+   <p>20 printk("key down\n");</p> 
+   <p>21 raise_softirq(XIAOBAI_SOFTIRQ);</p> 
+   <p>22 return IRQ_HANDLED;</p> 
+   <p>23 }</p> 
+   <p>&nbsp;</p> 
+   <p>经过三步，使用软中断实现下半部就成功了，看一下完整的函数：</p> 
+   <p>/*6th_irq_3/1st/test.c*/</p> 
+   <p>1 #include</p> 
+   <p>2 #include</p> 
+   <p>3</p> 
+   <p>4 #include</p> 
+   <p>5</p> 
+   <p>6 #define DEBUG_SWITCH 1</p> 
+   <p>7 #if DEBUG_SWITCH</p> 
+   <p>8 #define P_DEBUG(fmt, args...) printk("&lt;1&gt;" "[%s]"fmt, __FUNCTI ON__, ##args)</p> 
+   <p>9 #else</p> 
+   <p>10 #define P_DEBUG(fmt, args...) printk("&lt;7&gt;" "[%s]"fmt, __FUNCTI ON__, ##args)</p> 
+   <p>11 #endif</p> 
+   <p>12</p> 
+   <p>13 void xiaobai_action(struct softirq_action *t) //软中断处理函数</p> 
+   <p>14 {</p> 
+   <p>15 printk("hello xiaobai!\n");</p> 
+   <p>16 }</p> 
+   <p>17</p> 
+   <p>18 irqreturn_t irq_handler(int irqno, void *dev_id) //中断处理函数</p> 
+   <p>19 {</p> 
+   <p>20 printk("key down\n");</p> 
+   <p>21 raise_softirq(XIAOBAI_SOFTIRQ); //触发软中断</p> 
+   <p>22 return IRQ_HANDLED;</p> 
+   <p>23 }</p> 
+   <p>24</p> 
+   <p>25 static int __init test_init(void) //模块初始化函数</p> 
+   <p>26 {</p> 
+   <p>27 int ret;</p> 
+   <p>28</p> 
+   <p>29 /*注册中断处理函数：</p> 
+   <p>30 * IRQ_EINT1:中断号，定义在"include/mach/irqs.h"中</p> 
+   <p>31 * irq_handler：中断处理函数</p> 
+   <p>32 * IRQ_TIRGGER_FALLING：中断类型标记，下降沿触发中断</p> 
+   <p>33 * ker_INT_EINT1：中断的名字，显示在/proc/interrupts等文件中</p> 
+   <p>34 * NULL；现在我不使用dev_id，所以这里不传参数</p> 
+   <p>35 */</p> 
+   <p>36 ret = request_irq(IRQ_EINT1, irq_handler,</p> 
+   <p>37 IRQF_TRIGGER_FALLING, "key INT_EINT1", NULL);</p> 
+   <p>38 if(ret){</p> 
+   <p>39 P_DEBUG("request irq failed!\n");</p> 
+   <p>40 return ret;</p> 
+   <p>41 }</p> 
+   <p>42</p> 
+   <p>43 /*fostirq*/</p> 
+   <p>44 open_softirq(XIAOBAI_SOFTIRQ, xiaobai_action); //注册软中断处理程序</p> 
+   <p>45</p> 
+   <p>46 printk("hello irq\n");</p> 
+   <p>47 return 0;</p> 
+   <p>48 }</p> 
+   <p>49</p> 
+   <p>50 static void __exit test_exit(void) //模块卸载函数</p> 
+   <p>51 {</p> 
+   <p>52 free_irq(IRQ_EINT1, NULL);</p> 
+   <p>53 printk("good bye irq\n");</p> 
+   <p>54 }</p> 
+   <p>55</p> 
+   <p>56 module_init(test_init);</p> 
+   <p>57 module_exit(test_exit);</p> 
+   <p>58</p> 
+   <p>59 MODULE_LICENSE("GPL");</p> 
+   <p>60 MODULE_AUTHOR("xoao bai");</p> 
+   <p>61 MODULE_VERSION("v0.1");</p> 
+   <p>注意。在上面的程序，只是为了说明如何实现上下半步，而我的中断上下半步里面的操作是毫无意义的（只是打印）。上下半步的作用我在一开始就有介绍。</p> 
+   <p>接下来验证一下：</p> 
+   <p>[root: 1st]# insmod test.ko</p> 
+   <p>hello irq</p> 
+   <p>[root: 1st]# key down //上半部操作</p> 
+   <p>hello xiaobai! //下半部操作</p> 
+   <p>key down</p> 
+   <p>hello xiaobai!</p> 
+   <p>key down</p> 
+   <p>hello xiaobai!</p> 
+   <p>[root: 1st]# rmmod test</p> 
+   <p>good bye irq</p> 
+   <p>&nbsp;</p> 
+   <p>上面介绍，触发软中断函数raise_softirq并不会让软中断处理函数马上执行，它只是打了个标记，等到适合的时候再被实行。如在中断处理函数返回后，内核就会检查软中断是否被触发并执行触发的软中断。</p> 
+   <p>软中断会在do_softirq中被执行，其中核心部分在do_softirq中调用的__do_softirq中：</p> 
+   <p>/*kernel/softirq.c*/</p> 
+   <p>172 asmlinkage void __do_softirq(void)</p> 
+   <p>173 {</p> 
+   <p>。。。。。。</p> 
+   <p>194 do {</p> 
+   <p>195 if (pending &amp; 1) { //如果被触发，调用软中断处理函数</p> 
+   <p>196 int prev_count = preempt_count();</p> 
+   <p>197</p> 
+   <p>198 h-&gt;action(h); //调用软中断处理函数</p> 
+   <p>199</p> 
+   <p>200 if (unlikely(prev_count != preempt_count())) {</p> 
+   <p>201 printk(KERN_ERR "huh, entered softirq %td %p"</p> 
+   <p>202 "with preempt_count %08x,"</p> 
+   <p>203 " exited with %08x?\n", h - softirq_vec,</p> 
+   <p>204 h-&gt;action, prev_count, preempt_count());</p> 
+   <p>205 preempt_count() = prev_count;</p> 
+   <p>206 }</p> 
+   <p>207</p> 
+   <p>208 rcu_bh_qsctr_inc(cpu);</p> 
+   <p>209 }</p> 
+   <p>210 h++; //下移，获取另一个软中断</p> 
+   <p>211 pending &gt;&gt;= 1;</p> 
+   <p>212 } while (pending); //大循环内执行，知道所有被触发的软中断都执行完</p> 
+   <p>。。。。。。</p> 
+   <p>&nbsp;</p> 
+   <p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</p> 
+   <p>&nbsp;</p> 
+   <p>三、tasklet</p> 
+   <p>&nbsp;</p> 
+   <p>上面的介绍看到，软中断实现下半部的方法很麻烦，一般是不会使用的。一般，我们使用tasklet——利用软中断实现的下半部机制。</p> 
+   <p>&nbsp;</p> 
+   <p>在介绍软中断索引号的时候，有两个用于实现tasklet的软中断索引号：HI_SOFTIRQ和TASKLET_SOFTIRQ。两个tasklet唯一的区别就是优先级的大小，一般使用TAKSLET_SOFTIRQ。</p> 
+   <p>&nbsp;</p> 
+   <p>先看一下如何使用tasklet，用完之后再看内核中是如何实现的：</p> 
+   <p>步骤一、编写tasklet处理函数，定义并初始化结构体tasklet_struct：</p> 
+   <p>内核中是通过tasklet_struct来维护一个tasklet，介绍一下tasklet_struct里面的两个成员：</p> 
+   <p>/*linux/interrupt.h*/</p> 
+   <p>319 struct tasklet_struct</p> 
+   <p>320 {</p> 
+   <p>321 struct tasklet_struct *next;</p> 
+   <p>322 unsigned long state;</p> 
+   <p>323 atomic_t count;</p> 
+   <p>324 void (*func)(unsigned long); //tasklet处理函数</p> 
+   <p>325 unsigned long data; //给处理函数的传参</p> 
+   <p>326 };</p> 
+   <p>&nbsp;</p> 
+   <p>所以，在初始化tasklet_struct之前，需要先写好tasklet处理函数，如果需要传参，也需要指定传参，你可以直接传数据，也可以传地址。我定义的处理函数如下：</p> 
+   <p>/*6th_irq_3/2nd/test.c*/</p> 
+   <p>15 void xiaobai_func(unsigned long data)</p> 
+   <p>16 {</p> 
+   <p>17 printk("hello xiaobai!, data[%d]\n", (int)data); //也没干什么事情，仅仅打印。</p> 
+   <p>18 }</p> 
+   <p>&nbsp;</p> 
+   <p>同样，可以通过两种办法定义和初始化tasklet_struct。</p> 
+   <p>1、静态定义并初始化</p> 
+   <p>/*linux/interrupt.h*/</p> 
+   <p>328 #define&nbsp;DECLARE_TASKLET(name, func, data)&nbsp;\</p> 
+   <p>329 struct tasklet_struct name = { NULL, 0, ATOMIC_INIT(0), func, data }</p> 
+   <p>330</p> 
+   <p>331 #define&nbsp;DECLARE_TASKLET_DISABLED(name, func, data)&nbsp;\</p> 
+   <p>332 struct tasklet_struct name = { NULL, 0, ATOMIC_INIT</p> 
+   <p>上面两个函数都是定义一个叫name的tasklet_struct，并指定他的处理函数和传参分别是func和data。唯一的区别是，DCLARE_TASKLET_DISABLED初始化后的处于禁止状态，暂时不能被使用。</p> 
+   <p>2、动态定义并初始化</p> 
+   <p>跟以往的一样，需要先定义结构体，然后把结构体指针传给tasklet_init来动态初始化：</p> 
+   <p>/*kernel/softirq.c*/</p> 
+   <p>435 void tasklet_init(struct tasklet_struct *t,</p> 
+   <p>436 void (*func)(unsigned long), unsigned long data)</p> 
+   <p>&nbsp;</p> 
+   <p>在我的程序中，使用动态定义并初始化：</p> 
+   <p>/*6th_irq_3/2nd/test.c*/</p> 
+   <p>13 struct tasklet_struct xiaobai_tasklet; //定义tasklet结构体</p> 
+   <p>32 tasklet_init(&amp;xiaobai_tasklet, xiaobai_func, (unsigned long)123);</p> 
+   <p>我这里的传参直接传一个数值123。这操作也相当于：</p> 
+   <p>DECLEAR_TASKLET(xiaobai_tasklet, xiaobai_func, (unsigned long)123);</p> 
+   <p>&nbsp;</p> 
+   <p>步骤二、在中断返回前调度tasklet：</p> 
+   <p>&nbsp;</p> 
+   <p>跟软中断一样（其实tasklet就是基于软中断实现），这里说的调度并不是马上执行，只是打个标记，至于什么时候执行就要看内核的调度。</p> 
+   <p>调度使用函数tasklet_schedule或者tasklet_hi_schedule，两个的区别是一个使用TASKLET_SOFTIRQ，另一个使用HI_SOFTIRQ。这两个函数都是一tasklet_struct指针为参数：</p> 
+   <p>/*linux/interrupt.h*/</p> 
+   <p>365 static inline void tasklet_schedule(struct tasklet_struct *t)</p> 
+   <p>373 static inline void tasklet_hi_schedule(struct tasklet_struct *t)</p> 
+   <p>&nbsp;</p> 
+   <p>在我的函数中，使用tasklet_schedule：</p> 
+   <p>/*6th_irq_3/2nd/test.c*/</p> 
+   <p>23 tasklet_schedule(&amp;xiaobai_tasklet);</p> 
+   <p>&nbsp;</p> 
+   <p>步骤三、当模块卸载时，将tasklet_struct结构体移除：</p> 
+   <p>/*kernel/softirq.c*/</p> 
+   <p>447 void tasklet_kill(struct tasklet_struct *t)</p> 
+   <p>确保了&nbsp;tasklet&nbsp;不会被再次调度来运行，通常当一个设备正被关闭或者模块卸载时被调用。如果&nbsp;tasklet&nbsp;正在运行,&nbsp;程序会休眠，等待直到它执行完毕</p> 
+   <p>&nbsp;</p> 
+   <p>另外，还有禁止与激活tasklet的函数。被禁止的tasklet不能被调用，直到被激活：</p> 
+   <p>/*linux/interrupt.h*/</p> 
+   <p>386 static inline void tasklet_disable(struct tasklet_struct *t) //禁止</p> 
+   <p>393 static inline void tasklet_enable(struct tasklet_struct *t) //激活</p> 
+   <p>&nbsp;</p> 
+   <p>最后附上程序：</p> 
+   <p>/*6th_irq_3/2nd/test.c*/</p> 
+   <p>1 #include</p> 
+   <p>2 #include</p> 
+   <p>3</p> 
+   <p>4 #include</p> 
+   <p>5</p> 
+   <p>。。。。省略。。。。</p> 
+   <p>13 struct tasklet_struct xiaobai_tasklet; //定义tasklet结构体</p> 
+   <p>14</p> 
+   <p>15 void xiaobai_func(unsigned long data)</p> 
+   <p>16 {</p> 
+   <p>17 printk("hello xiaobai!, data[%d]\n", (int)data);</p> 
+   <p>18 }</p> 
+   <p>19</p> 
+   <p>20 irqreturn_t irq_handler(int irqno, void *dev_id) //中断处理函数</p> 
+   <p>21 {</p> 
+   <p>22 printk("key down\n");</p> 
+   <p>23 tasklet_schedule(&amp;xiaobai_tasklet);</p> 
+   <p>24 return IRQ_HANDLED;</p> 
+   <p>25 }</p> 
+   <p>26</p> 
+   <p>27 static int __init test_init(void) //模块初始化函数</p> 
+   <p>28 {</p> 
+   <p>29 int ret;</p> 
+   <p>30</p> 
+   <p>31 /*tasklet*/</p> 
+   <p>32 tasklet_init(&amp;xiaobai_tasklet, xiaobai_func, (unsigned long)123);</p> 
+   <p>33</p> 
+   <p>41 ret = request_irq(IRQ_EINT1, irq_handler,</p> 
+   <p>42 IRQF_TRIGGER_FALLING, "key INT_EINT1", NULL);</p> 
+   <p>43 if(ret){</p> 
+   <p>44 P_DEBUG("request irq failed!\n");</p> 
+   <p>45 return ret;</p> 
+   <p>46 }</p> 
+   <p>47</p> 
+   <p>48 printk("hello irq\n");</p> 
+   <p>49 return 0;</p> 
+   <p>50 }</p> 
+   <p>51</p> 
+   <p>52 static void __exit test_exit(void) //模块卸载函数</p> 
+   <p>53 {</p> 
+   <p>54 tasklet_kill(&amp;xiaobai_tasklet);</p> 
+   <p>55 free_irq(IRQ_EINT1, NULL);</p> 
+   <p>56 printk("good bye irq\n");</p> 
+   <p>57 }</p> 
+   <p>58</p> 
+   <p>59 module_init(test_init);</p> 
+   <p>60 module_exit(test_exit);</p> 
+   <p>&nbsp;</p> 
+   <p>最后验证一下，还是老样子，上下半步只是打印一句话，没有实质操作：</p> 
+   <p>[root: 2nd]# insmod test.ko</p> 
+   <p>hello irq</p> 
+   <p>[root: 2nd]# key down //上半部操作</p> 
+   <p>hello xiaobai!, data[123] //下半部操作</p> 
+   <p>key down</p> 
+   <p>hello xiaobai!, data[123]</p> 
+   <p>[root: 2nd]# rmmod test</p> 
+   <p>good bye irq</p> 
+   <p>&nbsp;</p> 
+   <p>既然知道怎么使用tasklet，接下来就要看看它是怎么基于软中断实现的</p> 
+   <p><a href="https://yqfile.alicdn.com/img_a04ac5233e68cba7426a664dd884dc31.png" rel="nofollow"><img src="https://yqfile.alicdn.com/img_a04ac5233e68cba7426a664dd884dc31.png" alt=""></a></p> 
+   <p>&nbsp;</p> 
+   <p>上面说明的是单处理器的情况下，如果是多处理器，每个处理器都会有一个tasklet_vec和tasklet_hi_vec链表，这个情况我就不介绍了。</p> 
+   <p>&nbsp;</p> 
+   <p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</p> 
+   <p>&nbsp;</p> 
+   <p>四、总结</p> 
+   <p>&nbsp;</p> 
+   <p>这节介绍了如何通过软中断（tasklet也是软中断的一种实现形式）机制来实现中断下半部。使用软中断实现的优缺点很明显：</p> 
+   <p>优点：运行在软中断上下文，优先级比普通进程高，调度速度快。</p> 
+   <p>缺点：由于处于中断上下文，所以不能睡眠。</p> 
+   <p>&nbsp;</p> 
+   <p>也许有人会问，那软中断和tasklet有什么区别？</p> 
+   <p>个人理解，tasklet是基于软中断实现的，基本上和软中断相同。但有一点不一样，如果在多处理器的情况下，内核不能保证软中断在哪个处理器上运行（听起来像废话），所以，软中断之间需要考虑共享资源的保护。而在tasklet，内核可以保证，两个同类型（TASKLET_SOFTIRQ和HI_SOFTIRQ）的tasklet不能同时执行，那就说明，同类型tasklet之间，可以不考虑同类型tasklet之间的并发情况。</p> 
+   <p>&nbsp;</p> 
+   <p>一般的，优先考虑使用tasklet。</p> 
+   <p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</p> 
+   <p>源代码：<a href="http://blog.chinaunix.net/attachment/attach/25/01/48/762501487639e4dfbb048c323ae7adc74302e12a67.rar" rel="nofollow"><img src="http://blog.chinaunix.net/blog/image/attachicons/rar.gif" alt="">&nbsp;6th_irq_3(1).rar&nbsp;</a></p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>1、工作队列的使用</p> 
+   <p>&nbsp;</p> 
+   <p>按惯例，在介绍工作队列如何实现之前，先说说如何使用工作队列实现下半部。</p> 
+   <p>&nbsp;</p> 
+   <p>步骤一、定义并初始化工作队列：</p> 
+   <p>&nbsp;</p> 
+   <p>创建工作队列函数：</p> 
+   <p>struct workqueue_struct *create_workqueue(const char *name)</p> 
+   <p>函数传参是内核中工作队列的名称，返回值是workqueue_struct结构体的指针，该结构体用来维护一个等待队列。</p> 
+   <p>我的代码如下：</p> 
+   <p>/*6th_irq_3/4th/test.c*/</p> 
+   <p>14 struct workqueue_struct *xiaobai_wq; //定义工作队列</p> 
+   <p>33 xiaobai_wq = create_workqueue("xiaobai");</p> 
+   <p>&nbsp;</p> 
+   <p>步骤二、定义并初始化work结构体：</p> 
+   <p>&nbsp;</p> 
+   <p>内核使用结构体来维护一个加入工作队列的任务：</p> 
+   <p>/*linux/workqueue.h*/</p> 
+   <p>25 struct work_struct {</p> 
+   <p>26 atomic_long_t data;</p> 
+   <p>27 #define WORK_STRUCT_PENDING 0 /* T if work item pending execution */</p> 
+   <p>28 #define WORK_STRUCT_FLAG_MASK (3UL)</p> 
+   <p>29 #define WORK_STRUCT_WQ_DATA_MASK (~WORK_STRUCT_FLAG_MASK)</p> 
+   <p>30 struct list_head entry;</p> 
+   <p>31 work_func_t func; //这个是重点，下半部实现的处理函数指针就放在这</p> 
+   <p>32 #ifdef CONFIG_LOCKDEP</p> 
+   <p>33 struct lockdep_map lockdep_map;</p> 
+   <p>34 #endif</p> 
+   <p>35 };</p> 
+   <p>&nbsp;</p> 
+   <p>同样有静态和动态两种方法：</p> 
+   <p>静态定义并初始化work结构体：</p> 
+   <p>/*linux/workqueue.h*/</p> 
+   <p>72 #define&nbsp;DECLARE_WORK(n, f)&nbsp;\</p> 
+   <p>73 struct work_struct n = __WORK_INITIALIZER(n, f)</p> 
+   <p>定义并初始化一个叫n的work_struct数据结构，它对应的的处理函数是f。</p> 
+   <p>对应的动态初始化方法，该函数返回work_struct指针，所以需要先定义一个work_struct结构：</p> 
+   <p>/*linux/workqueue.h*/</p> 
+   <p>107 #define&nbsp;INIT_WORK(_work, _func)&nbsp;\</p> 
+   <p>108 do { \</p> 
+   <p>109 (_work)-&gt;data = (atomic_long_t) WORK_DATA_INIT(); \</p> 
+   <p>110 INIT_LIST_HEAD(&amp;(_work)-&gt;entry); \</p> 
+   <p>111 PREPARE_WORK((_work), (_func)); \</p> 
+   <p>112 } while (0)</p> 
+   <p>113 #endif</p> 
+   <p>&nbsp;</p> 
+   <p>跟tasklet一样，在初始化的同时，需要将处理函数实现，代码如下：</p> 
+   <p>/*6th_irq_3/4th/test.c*/</p> 
+   <p>15 struct work_struct xiaobai_work; //定义work结构体</p> 
+   <p>16</p> 
+   <p>17 void xiaobai_func(struct work_struct *work) //处理函数</p> 
+   <p>18 {</p> 
+   <p>19 printk("hello xiaobai!\n"); //同样什么都没干，只是打印</p> 
+   <p>20 }</p> 
+   <p>34 INIT_WORK(&amp;xiaobai_work, xiaobai_func); //初始化work结构体</p> 
+   <p>&nbsp;</p> 
+   <p>步骤三、在中断处理函数中调度任务：</p> 
+   <p>&nbsp;</p> 
+   <p>工作队列和worl结构体都已经实现了，接下来就可以调度了，使用一下函数：</p> 
+   <p>/*kernel/workqueue.c*/</p> 
+   <p>161 int queue_work(struct workqueue_struct *wq, struct work_struct *work)</p> 
+   <p>将指定的任务（work_struct），添加到指定的工作队列中。同样的，调度并不代表处理函数能够马上执行，这由内核进程调度决定。</p> 
+   <p>&nbsp;</p> 
+   <p>步骤四、在卸载模块时，刷新并注销等待队列：</p> 
+   <p>&nbsp;</p> 
+   <p>刷新等待队列函数：</p> 
+   <p>/*kernel/workqueue.c*/</p> 
+   <p>411 void flush_workqueue(struct workqueue_struct *wq)</p> 
+   <p>该函数会一直等待，知道指定的等待队列中所有的任务都执行完毕并从等待队列中移除。</p> 
+   <p>注销等待队列：</p> 
+   <p>/*kernel/workqueue.c*/</p> 
+   <p>904 void destroy_workqueue(struct workqueue_struct *wq)</p> 
+   <p>该函数是是创建等待队列的反操作，注销掉指定的等待队列。</p> 
+   <p>&nbsp;</p> 
+   <p>四个步骤讲完，贴个代码：</p> 
+   <p>/*6th_irq_3/4th/test.c*/</p> 
+   <p>1 #include</p> 
+   <p>2 #include</p> 
+   <p>3</p> 
+   <p>4 #include</p> 
+   <p>5 #include</p> 
+   <p>6</p> 
+   <p>7 #define DEBUG_SWITCH 1</p> 
+   <p>8 #if DEBUG_SWITCH</p> 
+   <p>9 #define P_DEBUG(fmt, args...) printk("&lt;1&gt;" "[%s]"fmt, __FUNCTI ON__, ##args)</p> 
+   <p>10 #else</p> 
+   <p>11 #define P_DEBUG(fmt, args...) printk("&lt;7&gt;" "[%s]"fmt, __FUNCTI ON__, ##args)</p> 
+   <p>12 #endif</p> 
+   <p>13</p> 
+   <p>14 struct workqueue_struct *xiaobai_wq; //1.定义工作队列</p> 
+   <p>15 struct work_struct xiaobai_work; //2定义work结构体</p> 
+   <p>16</p> 
+   <p>17 void xiaobai_func(struct work_struct *work) //2实现处理函数</p> 
+   <p>18 {</p> 
+   <p>19 printk("hello xiaobai!\n");</p> 
+   <p>20 }</p> 
+   <p>21</p> 
+   <p>22 irqreturn_t irq_handler(int irqno, void *dev_id)</p> 
+   <p>23 {</p> 
+   <p>24 printk("key down\n");</p> 
+   <p>25 queue_work(xiaobai_wq ,&amp;xiaobai_work); //3调度任务</p> 
+   <p>26 return IRQ_HANDLED;</p> 
+   <p>27 }</p> 
+   <p>28 static int __init test_init(void) //模块初始化函数</p> 
+   <p>29 {</p> 
+   <p>30 int ret;</p> 
+   <p>31</p> 
+   <p>32 /*work*/</p> 
+   <p>33 xiaobai_wq = create_workqueue("xiaobai"); //1初始化工作对列</p> 
+   <p>34 INIT_WORK(&amp;xiaobai_work, xiaobai_func); //2初始化work结构体</p> 
+   <p>35</p> 
+   <p>36 ret = request_irq(IRQ_EINT1, irq_handler,</p> 
+   <p>37 IRQF_TRIGGER_FALLING, "key INT_EINT1", NULL);</p> 
+   <p>38 if(ret){</p> 
+   <p>39 P_DEBUG("request irq failed!\n");</p> 
+   <p>40 return ret;</p> 
+   <p>41 }</p> 
+   <p>42</p> 
+   <p>43 printk("hello irq\n");</p> 
+   <p>44 return 0;</p> 
+   <p>45 }</p> 
+   <p>46</p> 
+   <p>47 static void __exit test_exit(void) //模块卸载函数</p> 
+   <p>48 {</p> 
+   <p>49 flush_workqueue(xiaobai_wq); //4刷新工作队列</p> 
+   <p>50 destroy_workqueue(xiaobai_wq); //4注销工作队列</p> 
+   <p>51 free_irq(IRQ_EINT1, NULL);</p> 
+   <p>52 printk("good bye irq\n");</p> 
+   <p>53 }</p> 
+   <p>54</p> 
+   <p>55 module_init(test_init);</p> 
+   <p>56 module_exit(test_exit);</p> 
+   <p>57</p> 
+   <p>58 MODULE_LICENSE("GPL");</p> 
+   <p>59 MODULE_AUTHOR("xoao bai");</p> 
+   <p>60 MODULE_VERSION("v0.1");</p> 
+   <p>和以往的一样，下半部仅仅是打印，没实质操作，看效果：</p> 
+   <p>[root: 4th]# insmod test.ko</p> 
+   <p>hello irq</p> 
+   <p>[root: 4th]# key down</p> 
+   <p>hello xiaobai!</p> 
+   <p>key down</p> 
+   <p>hello xiaobai!</p> 
+   <p>[root: 4th]# rmmod test</p> 
+   <p>good bye irq</p> 
+   <p>&nbsp;</p> 
+   <p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</p> 
+   <p>&nbsp;</p> 
+   <p>二、使用共享的工作队列</p> 
+   <p>&nbsp;</p> 
+   <p>在内核中有一个默认的工作队列events，使用共享的工作队列可以省去创建和注销工作队列的步骤。当然，队列是共享的，用起来当然会不爽，如果有多个不同的任务都加入到这个工作对列中，每个任务调度的速度就会比较慢，肯定不如自己创建一个爽。不过，一般默认工作队列都能满足要求，不需要创建一个新的。</p> 
+   <p>&nbsp;</p> 
+   <p>少了上面创建和注销等待队列两步，使用共享工作队列步骤相对少一点</p> 
+   <p>&nbsp;</p> 
+   <p>步骤一、实现处理函数，定义并初始化work结构体：</p> 
+   <p>&nbsp;</p> 
+   <p>这一步骤上一节介绍的步骤二完全一样，所以就不说了。</p> 
+   <p>&nbsp;</p> 
+   <p>步骤二、调度任务：</p> 
+   <p>&nbsp;</p> 
+   <p>默认工作队列的中任务的调度不需要指定工作对列，所以函数有所不同：</p> 
+   <p>/*kernel/workqueue.c*/</p> 
+   <p>620 int schedule_work(struct work_struct *work)</p> 
+   <p>该函数会把work_struct结构体加入到默认工作对列events中。</p> 
+   <p>&nbsp;</p> 
+   <p>上函数：</p> 
+   <p>/*6th_irq_3/3rd/test.c*/</p> 
+   <p>1 #include</p> 
+   <p>2 #include</p> 
+   <p>3</p> 
+   <p>4 #include</p> 
+   <p>5 #include</p> 
+   <p>6</p> 
+   <p>7 #define DEBUG_SWITCH 1</p> 
+   <p>8 #if DEBUG_SWITCH</p> 
+   <p>9 #define P_DEBUG(fmt, args...) printk("&lt;1&gt;" "[%s]"fmt, __FUNCTI ON__, ##args)</p> 
+   <p>10 #else</p> 
+   <p>11 #define P_DEBUG(fmt, args...) printk("&lt;7&gt;" "[%s]"fmt, __FUNCTI ON__, ##args)</p> 
+   <p>12 #endif</p> 
+   <p>13</p> 
+   <p>14 struct work_struct xiaobai_work; //定义work结构体</p> 
+   <p>15</p> 
+   <p>16 void xiaobai_func(struct work_struct *work)</p> 
+   <p>17 {</p> 
+   <p>18 printk("hello xiaobai!\n");</p> 
+   <p>19 }</p> 
+   <p>20</p> 
+   <p>21 irqreturn_t irq_handler(int irqno, void *dev_id) //中断处理函数</p> 
+   <p>22 {</p> 
+   <p>23 printk("key down\n");</p> 
+   <p>24 schedule_work(&amp;xiaobai_work); //调度任务</p> 
+   <p>25 return IRQ_HANDLED;</p> 
+   <p>26 }</p> 
+   <p>27 static int __init test_init(void) //模块初始化函数</p> 
+   <p>28 {</p> 
+   <p>29 int ret;</p> 
+   <p>30</p> 
+   <p>31 /*work*/</p> 
+   <p>32 INIT_WORK(&amp;xiaobai_work, xiaobai_func); //初始化worl结构体</p> 
+   <p>33</p> 
+   <p>34 ret = request_irq(IRQ_EINT1, irq_handler,</p> 
+   <p>35 IRQF_TRIGGER_FALLING, "key INT_EINT1", NULL);</p> 
+   <p>36 if(ret){</p> 
+   <p>37 P_DEBUG("request irq failed!\n");</p> 
+   <p>38 return ret;</p> 
+   <p>39 }</p> 
+   <p>40</p> 
+   <p>41 printk("hello irq\n");</p> 
+   <p>42 return 0;</p> 
+   <p>43 }</p> 
+   <p>44</p> 
+   <p>45 static void __exit test_exit(void) //模块卸载函数</p> 
+   <p>46 {</p> 
+   <p>47 free_irq(IRQ_EINT1, NULL);</p> 
+   <p>48 printk("good bye irq\n");</p> 
+   <p>49 }</p> 
+   <p>50</p> 
+   <p>51 module_init(test_init);</p> 
+   <p>52 module_exit(test_exit);</p> 
+   <p>53</p> 
+   <p>54 MODULE_LICENSE("GPL");</p> 
+   <p>55 MODULE_AUTHOR("xoao bai");</p> 
+   <p>56 MODULE_VERSION("v0.1");</p> 
+   <p>再看一下实现效果，效果和之前的一样：</p> 
+   <p>[root: 3rd]# insmod test.ko</p> 
+   <p>hello irq</p> 
+   <p>[root: 3rd]# key down</p> 
+   <p>hello xiaobai!</p> 
+   <p>key down</p> 
+   <p>hello xiaobai!</p> 
+   <p>[root: 3rd]# rmmod test</p> 
+   <p>good bye irq</p> 
+   <p>&nbsp;</p> 
+   <p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</p> 
+   <p>&nbsp;</p> 
+   <p>三、工作队列的实现</p> 
+   <p>&nbsp;</p> 
+   <p>在介绍工作队列的实现之前，必须要介绍什么是工作者线程和三个数据结构。</p> 
+   <p>&nbsp;</p> 
+   <p>工作者线程，是指负责执行在内核队列中任务的内核线程。在工作队列中，有专门的工作者线程来处理加入到工作对列中的任务。工作对列对应的工作者线程可能不止一个，每个处理器有且仅有一个工作队列对应的工作者线程。当然，如果内核中两个工作对列，那每个处理器就分别有两个工作者线程。</p> 
+   <p>在内核中有一个默认的工作队列events，对于单处理器的ARM9，有一个对应的工作者线程。</p> 
+   <p>&nbsp;</p> 
+   <p>工作队列结构体workqueue_struct：</p> 
+   <p>59 struct workqueue_struct {</p> 
+   <p>60 struct cpu_workqueue_struct *cpu_wq; //一个工作者线程对应一个该结构体</p> 
+   <p>61 struct list_head list;</p> 
+   <p>62 const char *name;</p> 
+   <p>63 int singlethread;</p> 
+   <p>64 int freezeable; /* Freeze threads during suspend */</p> 
+   <p>65 int rt;</p> 
+   <p>66 #ifdef CONFIG_LOCKDEP</p> 
+   <p>67 struct lockdep_map lockdep_map;</p> 
+   <p>68 #endif</p> 
+   <p>69 };</p> 
+   <p>工作对列workqueue_struct有一个成员cpu_workqueue_struct，每个工作者线程对应一个cpu_workqueue。所以，对于单处理器的ARM9，一个工作对列只有一个cpu_workqueue_struct。</p> 
+   <p>&nbsp;</p> 
+   <p>结构体cpu_workqueue_struct：</p> 
+   <p>41 struct cpu_workqueue_struct {</p> 
+   <p>42</p> 
+   <p>43 spinlock_t lock;</p> 
+   <p>44 /*这是内核链表，所有分配在这个处理器的work_struct将通过链表连在一起，等待执行*/</p> 
+   <p>45 struct list_head worklist;</p> 
+   <p>46 wait_queue_head_t more_work;</p> 
+   <p>47 struct work_struct *current_work; //指向当前执行的work_struct</p> 
+   <p>48</p> 
+   <p>49 struct workqueue_struct *wq; //指向关联自己的工作队列</p> 
+   <p>50 struct task_struct *thread; //指向对应的内核线程，即工作者线程</p> 
+   <p>51</p> 
+   <p>52 int run_depth; /* Detect run_workqueue() recursion depth */</p> 
+   <p>53 } ____cacheline_aligned;</p> 
+   <p>由上面知道，当我们调用queue_work来调度任务时，并不是把work_struct添加到等待队列中，而是会被分配到工作对列的成员cpu_workqueue_struct中。</p> 
+   <p>&nbsp;</p> 
+   <p>work结构体work_struct：</p> 
+   <p>25 struct work_struct {</p> 
+   <p>26 atomic_long_t data;</p> 
+   <p>27 #define WORK_STRUCT_PENDING 0 /* T if work item pending execution */</p> 
+   <p>28 #define WORK_STRUCT_FLAG_MASK (3UL)</p> 
+   <p>29 #define WORK_STRUCT_WQ_DATA_MASK (~WORK_STRUCT_FLAG_MASK)</p> 
+   <p>30 struct list_head entry; //cpu_workqueue_struct通过这个成员，将wrok_struct连在一起</p> 
+   <p>31 work_func_t func; //每个任务的处理函数</p> 
+   <p>32 #ifdef CONFIG_LOCKDEP</p> 
+   <p>33 struct lockdep_map lockdep_map;</p> 
+   <p>34 #endif</p> 
+   <p>35 };</p> 
+   <p>&nbsp;</p> 
+   <p>可能上面讲得很乱，下面将来个图来讲解一下，双处理器的情况下：</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p><a href="http://blog168.chinaunix.net/attachment/201101/24/25014876_1295872994sst2.png" rel="nofollow"><img src="http://blog168.chinaunix.net/attachment/201101/24/25014876_1295872994sst2.png" alt=""></a><a href="http://blog168.chinaunix.net/attachment/201101/24/25014876_12958730122EEd.png" rel="nofollow"><img src="http://blog168.chinaunix.net/attachment/201101/24/25014876_12958730122EEd.png" alt=""></a><a href="http://blog168.chinaunix.net/attachment/201101/24/25014876_1295873020TCaZ.png" rel="nofollow"><img src="http://blog168.chinaunix.net/attachment/201101/24/25014876_1295873020TCaZ.png" alt=""></a></p> 
+   <p>&nbsp;</p> 
+   <p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</p> 
+   <p>&nbsp;</p> 
+   <p>四、选择哪个来实现下半部</p> 
+   <p>&nbsp;</p> 
+   <p>在2.6内核，提供三种实现中断下半部的方法，软中断、tasklet和工作队列，其中tasklet是基于软中断实现的，两者很相近。而工作队列完全不同，它是靠内核线程实现的。</p> 
+   <p>&nbsp;</p> 
+   <p>有这样的一张表：</p> 
+   <p><a href="http://blog168.chinaunix.net/attachment/201101/24/25014876_12958730473h73.png" rel="nofollow"><img src="http://blog168.chinaunix.net/attachment/201101/24/25014876_12958730473h73.png" alt=""></a></p> 
+   <p>简单来说，软中断和tasklet优先级较高，性能较好，调度快，但不能睡眠。而工作队列是内核的进程调度，相对来说较慢，但能睡眠。所以，如果你的下半部需要睡眠，那只能选择动作队列。否则最好用tasklet。</p> 
+   <p>&nbsp;</p> 
+   <p>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</p> 
+   <p>&nbsp;</p> 
+   <p>五、总结</p> 
+   <p>&nbsp;</p> 
+   <p>这节简单介绍了工作队列的使用和实现。其中，还有函数能够使指定工作队列的任务延时执行，相关的结构体和函数有：</p> 
+   <p>struct delayed_work</p> 
+   <p>DECLARE_DELAYED_WORK(n,f)</p> 
+   <p>INIT_DELAYED_WORK(struct delayed_work *work, void (*function)(void *));</p> 
+   <p>int queue_delayed_work(struct workqueue_struct *queue, struct delayed_work *work, unsigned long delay);</p> 
+   <p>schedule_delayed_work(struct delayed_work *work, unsigned long delay)</p> 
+   <p>有兴趣自己看看，很简单。</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

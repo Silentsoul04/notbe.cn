@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>指令级, ns级优化实例, 怎么做到调无可调 « NotBeCN</title>
+  <meta name="description" content="             这几天在做性能的优化, 主要是在kernel的调度模块加了信息采集, 导致延迟增加了100ns, 在经过一系列的优化之后, 延迟较少到了50ns, 不过在检查最后汇编代码的时候发现有个地方gcc工作得不是很好, 仔细研究了一下. 以下是记录    c代码void memdelay_enq...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/18/weixin_34067980_90126059.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">指令级, ns级优化实例, 怎么做到调无可调</h1>
+    <p class="post-meta">Jan 18, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>这几天在做性能的优化, 主要是在kernel的调度模块加了信息采集, 导致延迟增加了100ns, 在经过一系列的优化之后, 延迟较少到了50ns, 不过在检查最后汇编代码的时候<br>发现有个地方gcc工作得不是很好, 仔细研究了一下. 以下是记录</p> 
+   <pre><code>c代码
+void memdelay_enqueue_task(struct task_struct *p, int flags)
+{
+    if (unlikely(!(flags &amp; ENQUEUE_WAKEUP) || p-&gt;memdelay_migrate_enqueue)) {
+        memdelay_add_runnable(p);
+        p-&gt;memdelay_migrate_enqueue = 0;
+    } else {
+        memdelay_wakeup(p);
+    }
+}
+static inline void memdelay_wakeup(struct task_struct *task)
+{
+    if (unlikely(task-&gt;memdelay_slowpath))
+        return;
+
+    if (unlikely(task-&gt;in_iowait))
+        memdelay_task_change(task, MTS_IOWAIT, MTS_RUNNABLE);
+    else
+        memdelay_task_change(task, MTS_NONE, MTS_RUNNABLE);
+}</code></pre> 
+   <p>函数memdelay_enqueue_task汇编</p> 
+   <pre><code>   0xffffffff810d19a0 &lt;+0&gt;:     callq  0xffffffff81930e40 &lt;__fentry__&gt;
+   0xffffffff810d19a5 &lt;+5&gt;:     push   %rbp
+
+   0xffffffff810d19a6 &lt;+6&gt;:     and    $0x1,%esi
+                                              flags &amp; ENQUEUE_WAKEUP判断
+
+   0xffffffff810d19a9 &lt;+9&gt;:     mov    %rsp,%rbp
+                                              和上面的rbp形成栈帧, 为什么分开, 因为可以乱序
+
+   0xffffffff810d19ac &lt;+12&gt;:    push   %rbx
+   0xffffffff810d19ad &lt;+13&gt;:    mov    %rdi,%rbx
+                                               保存p到ebx, 因为ebx是caller保存, 所以要前面push
+
+   0xffffffff810d19b0 &lt;+16&gt;:    je     0xffffffff810d19d4 &lt;memdelay_enqueue_task+52&gt;
+                                               flags &amp; ENQUEUE_WAKEUP跳转
+
+   0xffffffff810d19b2 &lt;+18&gt;:    movzbl 0x8b8(%rdi),%eax
+                                               获取p-&gt;memdelay_migrate_enqueue
+
+   0xffffffff810d19b9 &lt;+25&gt;:    test   $0x40,%al
+                                               判断p-&gt;memdelay_migrate_enqueue
+   0xffffffff810d19bb &lt;+27&gt;:    jne    0xffffffff810d19d4 &lt;memdelay_enqueue_task+52&gt;
+
+   0xffffffff810d19bd &lt;+29&gt;:    test   %al,%al
+                                               判断task-&gt;memdelay_slowpath, memdelay_slowpath是最高位, 所以js
+   0xffffffff810d19bf &lt;+31&gt;:    js     0xffffffff810d19d1 &lt;memdelay_enqueue_task+49&gt;
+
+   0xffffffff810d19c1 &lt;+33&gt;:    test   $0x2,%al
+                                               判断task-&gt;in_iowait
+
+   0xffffffff810d19c3 &lt;+35&gt;:    mov    $0x2,%edx
+                                               MTS_RUNNABLE准备参数, 也是因为乱序
+
+   0xffffffff810d19c8 &lt;+40&gt;:    jne    0xffffffff810d19ef &lt;memdelay_enqueue_task+79&gt;
+                                               判断task-&gt;in_iowait跳转
+   0xffffffff810d19ca &lt;+42&gt;:    xor    %esi,%esi
+                                               第二个参数, 0, memdelay_...(task, MTS_NONE, MTS_RUNNABLE);
+   0xffffffff810d19cc &lt;+44&gt;:    callq  0xffffffff811f90e0 &lt;memdelay_task_change&gt;
+   0xffffffff810d19d1 &lt;+49&gt;:    pop    %rbx
+   0xffffffff810d19d2 &lt;+50&gt;:    pop    %rbp
+   0xffffffff810d19d3 &lt;+51&gt;:    retq
+   0xffffffff810d19d4 &lt;+52&gt;:    mov    $0x1,%edx
+   0xffffffff810d19d9 &lt;+57&gt;:    mov    $0x1,%esi
+   0xffffffff810d19de &lt;+62&gt;:    mov    %rbx,%rdi
+   0xffffffff810d19e1 &lt;+65&gt;:    callq  0xffffffff810d1950 &lt;memdelay_del_add&gt;
+   0xffffffff810d19e6 &lt;+70&gt;:    andb   $0xbf,0x8b8(%rbx)
+   0xffffffff810d19ed &lt;+77&gt;:    jmp    0xffffffff810d19d1 &lt;memdelay_enqueue_task+49&gt;
+   0xffffffff810d19ef &lt;+79&gt;:    mov    $0x1,%esi
+   0xffffffff810d19f4 &lt;+84&gt;:    callq  0xffffffff811f90e0 &lt;memdelay_task_change&gt;
+   0xffffffff810d19f9 &lt;+89&gt;:    jmp    0xffffffff810d19d1 &lt;memdelay_enqueue_task+49&gt;</code></pre> 
+   <h1>问题</h1> 
+   <p>对于上面的汇编, 会想到为什么需要push rbx, mov %rdi,%rbx来保存p指针, 因为rbx是callee保存, 因为这样会导致一次push, 一次pop, 2次内存访问, 用rcx不就好了, 不用push, pop了. r8 r9都可以用啊.</p> 
+   <h1>答案</h1> 
+   <p>经过一系列的实验, 研究之后终于发现gcc为什么这么做</p> 
+   <pre><code>memdelay_add_runnable(p);
+p-&gt;memdelay_migrate_enqueue = 0;</code></pre> 
+   <h2>原因</h2> 
+   <p>在调用函数memdelay_add_runnable之后, 还需要用到变量p, 调用memdelay_add_runnable的时候p保存在rdi里面, 调用memdelay_add_runnable之后, rdi的值就得不到保证了, 所以需要找个地方另存p, 也就是rdi</p> 
+   <p>另一个问题, 为什么要选择需要push, pop的rbx, 而不是简单rcx(rcx可以随便用)<br>解释起来也很简单, 如果选择rcx, 经过memdelay_add_runnable调用之后, 他的值也得不到保证, 所以只能选择callee保存的寄存器, 这样才不会被memdelay_add_runnable破坏, 既然这样, 那么memdelay_enqueue_task也不能破解callee保存的寄存器(比如rbx), 所以一定会导致push和pop</p> 
+   <p>找到原因之后就简单了, 把p-&gt;memdelay_migrate_enqueue = 0;提到调用memdelay_add_runnable的前面去(当然逻辑是可以提的), 这样p-&gt;memdelay_migrate_enqueue = 0这条语句就可以直接使用rdi来操作了</p> 
+   <pre><code>更改之后的汇编
+   0xffffffff810d19a0 &lt;+0&gt;:     callq  0xffffffff81930e40 &lt;__fentry__&gt;
+   0xffffffff810d19a5 &lt;+5&gt;:     push   %rbp
+   0xffffffff810d19a6 &lt;+6&gt;:     and    $0x1,%esi
+   0xffffffff810d19a9 &lt;+9&gt;:     mov    %rsp,%rbp
+   0xffffffff810d19ac &lt;+12&gt;:    je     0xffffffff810d19cf &lt;memdelay_enqueue_task+47&gt;
+   0xffffffff810d19ae &lt;+14&gt;:    movzbl 0x8b8(%rdi),%eax
+   0xffffffff810d19b5 &lt;+21&gt;:    test   $0x40,%al
+   0xffffffff810d19b7 &lt;+23&gt;:    jne    0xffffffff810d19cf &lt;memdelay_enqueue_task+47&gt;
+   0xffffffff810d19b9 &lt;+25&gt;:    test   %al,%al
+   0xffffffff810d19bb &lt;+27&gt;:    js     0xffffffff810d19cd &lt;memdelay_enqueue_task+45&gt;
+   0xffffffff810d19bd &lt;+29&gt;:    test   $0x2,%al
+   0xffffffff810d19bf &lt;+31&gt;:    mov    $0x2,%edx
+   0xffffffff810d19c4 &lt;+36&gt;:    jne    0xffffffff810d19e7 &lt;memdelay_enqueue_task+71&gt;
+   0xffffffff810d19c6 &lt;+38&gt;:    xor    %esi,%esi
+   0xffffffff810d19c8 &lt;+40&gt;:    callq  0xffffffff811f90e0 &lt;memdelay_task_change&gt;
+   0xffffffff810d19cd &lt;+45&gt;:    pop    %rbp
+   0xffffffff810d19ce &lt;+46&gt;:    retq
+   0xffffffff810d19cf &lt;+47&gt;:    andb   $0xbf,0x8b8(%rdi) 直接rdi操作之后
+   0xffffffff810d19d6 &lt;+54&gt;:    mov    $0x1,%edx
+   0xffffffff810d19db &lt;+59&gt;:    mov    $0x1,%esi
+   0xffffffff810d19e0 &lt;+64&gt;:    callq  0xffffffff810d1950 &lt;memdelay_del_add&gt;
+   0xffffffff810d19e5 &lt;+69&gt;:    pop    %rbp
+   0xffffffff810d19e6 &lt;+70&gt;:    retq
+   0xffffffff810d19e7 &lt;+71&gt;:    mov    $0x1,%esi
+   0xffffffff810d19ec &lt;+76&gt;:    callq  0xffffffff811f90e0 &lt;memdelay_task_change&gt;
+   0xffffffff810d19f1 &lt;+81&gt;:    pop    %rbp
+   0xffffffff810d19f2 &lt;+82&gt;:    retq</code></pre> 
+   <p>函数长度从89减少到82, rbx的操作也没有了, 指令减少3条, 内存操作减少2条<br>测试下来, 延迟减少10ns</p> 
+   <p>从3.4533915667us到3.4438795333us</p> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

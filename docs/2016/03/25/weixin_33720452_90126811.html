@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>《LINUX3.0内核源代码分析》第二章：中断和异常 【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://blog.chinaunix.net/uid-25845340-id-2982887.html    摘要：第二章主要讲述linux如何处理ARM cortex A9多核处理器的中断、异常。介绍了中断向量表的入口、通用的中断处理代码、中断和软中断、延迟处理、中断异常的...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/03/25/weixin_33720452_90126811.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">《LINUX3.0内核源代码分析》第二章：中断和异常 【转】</h1>
+    <p class="post-meta">Mar 25, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p align="left"><span style="color:#000000;"><strong>转自：<a href="http://blog.chinaunix.net/uid-25845340-id-2982887.html" rel="nofollow">http://blog.chinaunix.net/uid-25845340-id-2982887.html</a></strong></span></p> 
+   <p align="left"><span style="color:#000000;"><strong>摘要</strong>：第二章主要讲述linux如何处理ARM cortex A9多核处理器的中断、异常。介绍了中断向量表的入口、通用的中断处理代码、中断和软中断、延迟处理、中断异常的返回过程。</span></p> 
+   <p align="left"><span style="color:#000000;">第二章内容较多，会分几个部分讲述。本部分主要讲进入、退出中断的过程，这部分代码涉及的都是汇编部分。</span></p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left"><strong>法律声明</strong>：《LINUX3.0内核源代码分析》系列文章由谢宝友（<a href="mailto:scxby@163.com" rel="nofollow">scxby@163.com</a>）发表于<a href="http://xiebaoyou.blog.chinaunix.net/" rel="nofollow">http://xiebaoyou.blog.chinaunix.net</a>，文章中的LINUX3.0源代码遵循GPL协议。除此以外，文档中的其他内容由作者保留所有版权。谢绝转载。</p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">本连载文章并不是为了形成一本适合出版的书籍，而是为了向有一定内核基本的读者提供一些linux3.0源码分析。因此，请读者结合《深入理解LINUX内核》第三版阅读本连载。</p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">由于我的主要工作不是BSP，对CPU体系结构不算太熟悉。如果非要说熟悉哪种CPU的话，应该是对MIPS熟悉一点。ARM方面纯粹是临阵磨枪，为了写本系列文章，前两个月临时看了一下相关书籍。如有不清楚或者错误的地方，敬请大家指出，先谢过了^-^。</p> 
+   <p align="left">&nbsp;</p> 
+   <p>请读者先看看《<span style="font-family:'宋体';">ARM嵌入式开发》第9章，对ARM的6种异常有所了解。并明白在进入中断和异常时，硬件都完成了哪些事情。</span></p> 
+   <p><span style="font-family:'宋体';font-size:x-large;">1.1.1</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="font-size:x-large;">中断向量和简单中断处理</span></p> 
+   <p><span style="font-family:'宋体';">ARM中断向量表在entry-armv.S中，如下：</span></p> 
+   <p><span style="font-family:'宋体';">__vectors_start:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;ARM(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;swi&nbsp;&nbsp;&nbsp;SYS_ERROR0&nbsp;&nbsp;&nbsp;&nbsp;)/* reset异常&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;svc&nbsp;&nbsp;&nbsp;#0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;nop&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;W(b)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;vector_und + stubs_offset/*&nbsp;未定义指令&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;W(ldr)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pc, .LCvswi + stubs_offset/*&nbsp;系统调用&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;W(b)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;vector_pabt + stubs_offset/*&nbsp;指令预取异常&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;W(b)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;vector_dabt + stubs_offset/*&nbsp;数据访问中止异常&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;W(b)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;vector_addrexcptn + stubs_offset/*&nbsp;保留&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;W(b)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;vector_irq + stubs_offset/*&nbsp;中断&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;W(b)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;vector_fiq + stubs_offset/*&nbsp;快速中断&nbsp;*/</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.globl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__vectors_end</span></p> 
+   <p><span style="font-family:'宋体';">__vectors_end:</span></p> 
+   <p>&nbsp;</p> 
+   <p>不象<span style="font-family:'宋体';">MIPS，ARM中断向量表中每一个中断向量只能存储一条指令，因此必须使用一条跳转指令，跳转到各自的处理程序。当然，为了提高快速中断的处理速度，可以将它的处理代码直接跟随在中断向量表后面。但是linux没有这样实现。</span></p> 
+   <p>在这<span style="font-family:'宋体';">8个向量中，&nbsp;vector_addrexcptn和vector_fiq比较简单：</span></p> 
+   <p><span style="font-family:'宋体';">vector_fiq:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;disable_fiq&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;简单的禁止fiq，这样，中断处理退回后，不会再次产生fiq中断了。也就是说，FIQ中断只可能产生一次。&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;subs&nbsp;pc, lr, #4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* lr指向当前异常地址+8的地方，这里将其减去4，即是退出异常时，要返回的地址。这里直接返回。&nbsp;*/</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">/*=============================================================================</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;* Address exception handler</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*-----------------------------------------------------------------------------</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;* These aren't too critical.</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;* (they're not supposed to happen, and won't happen in 32-bit data mode).</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*&nbsp;根据注释，这里是处理地址异常，它不但不重要，而且不大可能产生。因此就是一个死循环，将系统挂死在这里。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*&nbsp;根据《ARM嵌入式系统开发》所述，这是一个保留异常。可能真的不大可能发生。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">vector_addrexcptn:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;vector_addrexcptn</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">reset异常更简单，它仅仅是模拟调用一次SYS_ERROR0，但这应该是内核初始化完成之后，才这样简单。在flash上的复位异常是整个初始化的入口，应该非常复杂。</span></p> 
+   <p><span style="font-family:'宋体';">ARM(&nbsp;&nbsp;&nbsp;swi&nbsp;&nbsp;&nbsp;SYS_ERROR0&nbsp;&nbsp;&nbsp;&nbsp;)/* reset异常，简单的调用SYS_ERROR0系统调用即可&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;svc&nbsp;&nbsp;&nbsp;#0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)/*&nbsp;应该不会运行到这里，呵呵，这仅仅是我的猜想&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;nop&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p>&nbsp;</p> 
+   <p>这<span style="font-family:'宋体';">8个中断异常入口，除系统调用异常外，都是使用b指令进行跳转。系统调用异常使用是这样的：</span></p> 
+   <p><span style="font-family:'宋体';">W(ldr)&nbsp;&nbsp;pc, .LCvswi + stubs_offset</span></p> 
+   <p>由于系统调用异常的代码编译在其他文件中，其入口地址与异常向量相隔较远，使用<span style="font-family:'宋体';">b指令无法跳转过去。&nbsp;因此将其地址存放到LCvswi中，并从内存地址中加载其入口地址。这样，系统调用的速度稍微慢一点。</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';font-size:x-large;">1.1.2</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="font-size:x-large;">从汇编跳转到<span style="font-family:'宋体';">C代码</span></span></p> 
+   <p>未定义指令异常、指令预取异常、数据访问中止异常、中断的处理代码分别是<span style="font-family:'宋体';">vector_und、vector_pabt、vector_dabt和vector_irq。这几个函数是由以下代码生成的：</span></p> 
+   <p><span style="font-family:'宋体';">vector_stub&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;irq, IRQ_MODE, 4</span></p> 
+   <p><span style="font-family:'宋体';">vector_stub&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dabt, ABT_MODE, 8</span></p> 
+   <p><span style="font-family:'宋体';">vector_stub&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pabt, ABT_MODE, 4</span></p> 
+   <p><span style="font-family:'宋体';">vector_stub&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;und, UND_MODE</span></p> 
+   <p>&nbsp;</p> 
+   <p>我们以<span style="font-family:'宋体';">vector_stub&nbsp;&nbsp;&nbsp;&nbsp;irq, IRQ_MODE, 4为例，看看vector_stub生成了什么代码：</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;生成通用中断、异常处理代码的宏。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* correction用于调整lr的值。这是因为进入异常时，pc指针是发生异常时的指针后面8个字节或者12个字节处。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;不同的异常需要跳转到不同的返回地址。有的需要重新执行指令，有的则需要跳到下一条指令处。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.macro&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;vector_stub, name, mode, correction=0</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;将异常入口强制进行32字节对齐，32字节是一个缓存行的大小。这应当是出于性能的考虑。&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.align&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;5</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">vector_\name:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;需要调整返回值，则递减lr寄存器&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.if \correction&nbsp;</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;sub&nbsp;&nbsp;&nbsp;lr, lr, #\correction</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.endif</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ Save r0, lr_&nbsp;(parent PC) and spsr_</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ (parent CPSR)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将r0,lr保存到堆栈中。这里并没有移动堆栈指针。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;这是因为:每种处理器模式都有自己的堆栈。接下来系统会切换到svc模式，将堆栈切换到每个任务的系统堆栈去。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;执行后，[sp] = r0, [sp+4]=lr，这里保存r0和lr是因为后面要使用这两个寄存器，即这两个寄存器会被破坏。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;请注意:中断和异常并不会保存所有寄存器。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;stmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sp, {r0, lr}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ save r0, lr</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* spsr是异常发生前的状态寄存器，退出异常后，需要根据它恢复现场，因此需要将它保存起来。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;首先将它装载到lr寄存器，再将它存储到[sp+8]处。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;mrs&nbsp;&nbsp;lr, spsr</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;lr, [sp, #8]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ save spsr</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ Prepare for SVC32 mode.&nbsp;&nbsp;IRQs remain disabled.</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;以下三句，是准备将处理器模式设置为SVC32模式。这样，当前堆栈也会切换到SVC32模式下的堆栈。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;mrs&nbsp;&nbsp;r0, cpsr</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;eor&nbsp;&nbsp;&nbsp;r0, r0, #(\mode ^ SVC_MODE | PSR_ISETSTATE)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;msr&nbsp;&nbsp;spsr_cxsf, r0</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ the branch table must immediately follow this code</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* lr中保存了异常前的状态，与0x0f and后，可以得到异常前的处理器模式。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;and&nbsp;&nbsp;lr, lr, #0x0f</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/* 1f就是宏生成的代码后面的跳转表，这里根据异常前的处理器模式，决定跳转到哪一个处理代码&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;adr&nbsp;&nbsp;&nbsp;r0, 1f&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;lr, [r0, lr, lsl #2]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;/* sp是SVC32模式下的堆栈指针，这里将它移到r0中，就可以作为C函数的第一个参数，即C函数中的pt_regs参数&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r0, sp&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/* pc指针此时指向了1f，即跳转表，因此将它加上lr&lt;&lt;2，就可以按处理器模式进行跳转了&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;ARM(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;lr, [pc, lr, lsl #2]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;/*&nbsp;这条指令是从异常返回，由于我们修改了spsr寄存器，因此会进入SVC32模式，并不是真的从异常返回了&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;movs&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pc, lr&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ branch to handler in SVC mode</span></p> 
+   <p><span style="font-family:'宋体';">ENDPROC(vector_\name)</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.align&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;2</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ handler addresses follow this label</span></p> 
+   <p><span style="font-family:'宋体';">1:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.endm</span></p> 
+   <p>&nbsp;</p> 
+   <p>分析完<span style="font-family:'宋体';">vector_stub宏代码，我们再看看中断处理函数是如何生成的：</span></p> 
+   <p><span style="font-family:'宋体';">/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*&nbsp;借助宏vector_stub生成vector_irq主体代码</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">vector_stub&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;irq, IRQ_MODE, 4</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;下面的跳转表必须紧跟在vector_stub宏后面，参见前文对vector_stub的分析。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;从用户态进入中断的处理函数&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_usr&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;0&nbsp;&nbsp;(USR_26 / USR_32)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;错误，不应该从FIQ状态进入IRQ状态&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;1&nbsp;&nbsp;(FIQ_26 / FIQ_32)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;2&nbsp;&nbsp;(IRQ_26 / IRQ_32)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;从SVC模式进入中断&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_svc&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;3&nbsp;&nbsp;(SVC_26 / SVC_32)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;4</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;5</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;6</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;7</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;8</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;9</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;a</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;b</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;c</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;d</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;e</span></p> 
+   <p align="left">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;__irq_invalid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;f</p> 
+   <p align="left">&nbsp;</p> 
+   <p>接下来我们看看<span style="font-family:'宋体';">__irq_invalid，这段代码一般情况不应当被调用。</span></p> 
+   <p><span style="font-family:'宋体';">__irq_invalid:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将所有寄存器保存到堆栈中，并将BAD_IRQ作为错误原因写入r1寄存器。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;inv_entry BAD_IRQ</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;跳转到通用错误处理</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;common_invalid</span></p> 
+   <p><span style="font-family:'宋体';">ENDPROC(__irq_invalid)</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">common_invalid代码如下：</span></p> 
+   <p><span style="font-family:'宋体';">common_invalid:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;如果需要栈帧，就将fp设置为0，这样在进行堆栈回溯时，就可以知道这里的堆栈是一个中断的栈帧了。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;zero_fp</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* r0保存的是中断栈开始的地方，将中断前的r0-r2寄存器现场恢复到r4-r6中。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;ldmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, {r4 - r6}</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;调整r0，使其指向中断现场的PC</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;&nbsp;r0, sp, #S_PC&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ here for interlock avoidance</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r7, #-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;""&nbsp;&nbsp;&nbsp;""&nbsp;&nbsp;&nbsp;&nbsp;""&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;""</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将中断前的r0存到sp中。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;r4, [sp]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ save preserved r0</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;这里没有看清楚，飘过。清楚的同学发一个邮件给我scxby@163.com */</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;stmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, {r5 - r7}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ lr_,</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ cpsr_, "old_r0"</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/* sp是SVC32模式上的堆栈地址，指向pt_regs，即中断前的寄存器现场&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r0, sp</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;跳转到C处理函数，这里编译脚本应当有处理，这样才能确保bad_mode与当前指令相近。否则b指令跳不过去。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bad_mode</span></p> 
+   <p><span style="font-family:'宋体';">ENDPROC(__und_invalid)</span></p> 
+   <p align="left">&nbsp;</p> 
+   <p><span style="font-family:'宋体';font-size:x-large;">1.1.1.1</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="font-size:x-large;">从用户态进入中断</span></p> 
+   <p><span style="font-family:'宋体';">_irq_usr函数的第一步是保存用户态寄存器现场到svc32堆栈中，这是通过调用usr_enry来实现的：</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.macro&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;usr_entry</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;UNWIND(.fnstart&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;UNWIND(.cantunwind&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ don't unwind the user space</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将svc32堆栈指针向低地址方向移动一个pt_regs结构大小，用于保存寄存器现场。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;sub&nbsp;&nbsp;&nbsp;sp, sp, #S_FRAME_SIZE</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;向svc32堆栈中保存寄存器现场。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;ARM(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stmib&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sp, {r1 - r12}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;stmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sp, {r0 - r12}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* r0是中断栈指针，从其中取出中断前的r0-r2现场放到r1-r4中。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;ldmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, {r1 - r3}</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;&nbsp;r0, sp, #S_PC&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ here for interlock avoidance</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r4, #-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;""&nbsp;&nbsp;""&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;""&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;""</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;从中断栈中取出真实的r0存放到pt_regs-&gt;r0中。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;r1, [sp]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ save the "real" r0 copied</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ from the exception stack</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ We are now ready to fill in the remaining blanks on the stack:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;r2 - lr_, already fixed up for correct return/restart</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;r3 - spsr_</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;r4 - orig_r0 (see pt_regs definition in ptrace.h)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ Also, separately save sp_usr and lr_usr</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将中断异常栈中取出中断前ARM_pc、ARM_cpsr保存到svc32栈中。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;stmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, {r2 - r4}</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将栈指针和lr压入栈</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;ARM(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stmdb&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, {sp, lr}^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;store_user_sp_lr r0, r1, S_SP - S_PC&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ Enable the alignment trap while in kernel mode</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;alignment_trap r0</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ Clear FP to mark the first stack frame</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将fp设置为0，这样可以标示一个中断栈帧。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;zero_fp</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.endm</span></p> 
+   <p>&nbsp;</p> 
+   <p>中断处理的主要过程如下：</p> 
+   <p><span style="font-family:'宋体';">/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*&nbsp;从用户态进入中断。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">__irq_usr:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将寄存器现场保存起来。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;usr_entry</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;对低版本的ARM核来说，用户态无法实现原子比较交换。如果用户态在处理原子比较交换的过程中发生中断，需要特殊处理，略过。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;kuser_cmpxchg_check</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;如果打开了IRQSOFF_TRACER检测开关，则在这里记录下关中断的时间。这在实时系统中比较有用。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;请记住，系统运行到这里，仍然是处于关中断状态的。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">#ifdef CONFIG_IRQSOFF_TRACER</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;bl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;trace_hardirqs_off</span></p> 
+   <p><span style="font-family:'宋体';">#endif</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;根据当前sp指针，将该指针最右边13位清0，获得当前任务的thread_info。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;get_thread_info tsk</span></p> 
+   <p><span style="font-family:'宋体';">#ifdef CONFIG_PREEMPT</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;递增任务的抢占计数</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r8, [tsk, #TI_PREEMPT]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ get preempt count</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;&nbsp;r7, r8, #1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ increment it</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;r7, [tsk, #TI_PREEMPT]</span></p> 
+   <p><span style="font-family:'宋体';">#endif</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;irq_handler</span></p> 
+   <p><span style="font-family:'宋体';">#ifdef CONFIG_PREEMPT</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;获得当前的抢占计数</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r0, [tsk, #TI_PREEMPT]</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;并将r8中的值保存回去。相当于将前一步递增的抢占计数减回去了。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;r8, [tsk, #TI_PREEMPT]</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* r0,r7是调用irq_handler前后的抢占计数，这里进行比较，是防止驱动的ISR程序没有配对操作抢占计数导致系统错误。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;teq&nbsp;&nbsp;&nbsp;r0, r7</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;如果抢占计数被破坏，则强制写入0.</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;ARM(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;strne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, [r0, -r0]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;movne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;THUMB(&nbsp;&nbsp;&nbsp;&nbsp;strne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, [r0]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p><span style="font-family:'宋体';">#endif</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;从中断退回用户态。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;why, #0</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ret_to_user_from_irq</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;UNWIND(.fnend&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</span></p> 
+   <p align="left">ENDPROC(__irq_usr)</p> 
+   <p align="left">&nbsp;</p> 
+   <p>在没有配置<span style="font-family:'宋体';">MULTI_IRQ_HANDLER&nbsp;的情况下，irq_handler的逻辑很简单，就是简单的调用arch_irq_handler_default。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.macro&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;arch_irq_handler_default</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;get_irqnr_preamble r5, lr</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将中断号读取到r0寄存器。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">1:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;get_irqnr_and_base r0, r6, r5, lr</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;如果还存在中断，就将sp作为第二个参数，调用asm_do_IRQ。sp目前指向pt_regs。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;movne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r1, sp</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@ routine called with r0 = irq number, r1 = struct pt_regs *</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;@</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;这里将lr设置为get_irqnr_and_base的第二条指令，因为第二次循环时，不必执行其第一条指令(加载寄存器基址)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;adrne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;lr, BSYM(1b)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将中断号、pt_regs(中断前的寄存器现场)传递给asm_do_IRQ。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;请注意，当asm_do_IRQ返回时，会返回到get_irqnr_and_base处，这里相当于是一个循环处理，直到所有中断都已经处理完毕才退出循环。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;bne&nbsp;&nbsp;asm_do_IRQ</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">#ifdef CONFIG_SMP</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/*</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* XXX</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* this macro assumes that irqstat (r6) and base (r5) are</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* preserved from get_irqnr_and_base above</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;这里是从寄存器中读取ipi标志</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;ALT_SMP(test_for_ipi r0, r6, r5, lr)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;ALT_UP_B(9997f)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;movne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r1, sp</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;同理，这里也是将返回地址设置为ALT_SMP的第二条指令，构造成一个循环。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;adrne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;lr, BSYM(1b)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;只要存在IPI就调用do_IPI，并循环直到处理完所有IPI。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;bne&nbsp;&nbsp;do_IPI</span></p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:'宋体';">#ifdef CONFIG_LOCAL_TIMERS</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;/**</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;同理，这里循环处理多核系统中的本地时钟中断。</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;test_for_ltirq r0, r6, r5, lr</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;movne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, sp</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;adrne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;lr, BSYM(1b)</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;bne&nbsp;&nbsp;do_local_timer</span></p> 
+   <p><span style="font-family:'宋体';">#endif</span></p> 
+   <p><span style="font-family:'宋体';">#endif</span></p> 
+   <p><span style="font-family:'宋体';">9997:</span></p> 
+   <p><span style="font-family:'宋体';">&nbsp;&nbsp;&nbsp;&nbsp;.endm</span></p> 
+   <p>&nbsp;</p> 
+   <p align="left">至此，我们已经将汇编部分分析完毕。在跳转到C代码前，汇编代码会将中断前的现场保存到堆栈中，并形成一个pt_regs结构传给C函数。最终，会循环调用asm_do_IRQ、do_IPI、do_local_timer。仅仅在多核下，才可能处理IPI和local_timer。</p> 
+   <p align="left">&nbsp;</p> 
+   <p><span style="font-family:Cambria;font-size:x-large;">1.1.1.1</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="font-size:x-large;">退回用户态</span></p> 
+   <p>从中断返回到用户态是由ret_to_user_from_irq进行处理的，在恢复寄存器现场前，需要处理抢占、检查信号等等。</p> 
+   <p>/**</p> 
+   <p>&nbsp;*&nbsp;从中断返回用户态，在软中断或者中断处理函数退出时，系统确保已经关闭了中断。</p> 
+   <p>&nbsp;*/</p> 
+   <p>ENTRY(ret_to_user_from_irq)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;从任务的TI_FLAGS标志判断是否需要处理抢占或者信号。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r1, [tsk, #TI_FLAGS]</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;r1, #_TIF_WORK_MASK</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;处理抢占或者信号</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;bne&nbsp;&nbsp;work_pending</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;运行到这里，说明没有抢占或者信号需要处理，或者已经处理完毕，开始退回用户态了。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>no_work_pending:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;退回用户态时，必然会打开中断，因此这里记录下打开中断的事实，供调试用。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>#if defined(CONFIG_IRQSOFF_TRACER)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;asm_trace_hardirqs_on</p> 
+   <p>#endif</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/* perform architecture specific actions before user return */</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;在返回用户态前，处理各个体系结构的钩子，对我们分析的单板来说，没有钩子需要处理。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;arch_ret_to_user r1, lr</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;恢复寄存器现场，并切回用户态。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;restore_user_regs fast = 0, offset = 0</p> 
+   <p>ENDPROC(ret_to_user_from_irq)</p> 
+   <p>&nbsp;</p> 
+   <p>在切换回用户态前，需要处理抢占和信号：</p> 
+   <p>work_pending:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;检查任务的_TIF_NEED_RESCHED，如果置位，则说明需要处理任务抢占，在这里调度到高优先级任务。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;r1, #_TIF_NEED_RESCHED</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;bne&nbsp;&nbsp;work_resched</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;接着处理信号。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;r1, #_TIF_SIGPENDING|_TIF_NOTIFY_RESUME</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;没有信号需要处理，则跳转到no_work_pending并退回用户态。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;beq&nbsp;&nbsp;no_work_pending</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r0, sp&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ 'regs'</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r2, why&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ 'syscall'</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;r1, #_TIF_SIGPENDING&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ delivering a signal?</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;movne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;why, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ prevent further restarts</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;这里处理信号</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;bl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;do_notify_resume</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;然后重新关中断并判断是否有更多任务需要处理。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ret_slow_syscall&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ Check work again</p> 
+   <p>&nbsp;</p> 
+   <p>/**</p> 
+   <p>&nbsp;*&nbsp;这里处理抢占，注意这里可以调用schedule，而不用调用preempt_schedule。这是有原因的。</p> 
+   <p>&nbsp;*&nbsp;另外，这个标号也不能随意移到其他地方。因为调用schedule后，流程会转到ret_slow_syscall。</p> 
+   <p>&nbsp;* ret_slow_syscall上会关中断，然后将中断、异常返回流程重新处理一次。</p> 
+   <p>&nbsp;*&nbsp;需要关中断的原因，是schedule函数会强制将中断打开。</p> 
+   <p>&nbsp;*/</p> 
+   <p>work_resched:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;bl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;schedule</p> 
+   <p>/*</p> 
+   <p>&nbsp;* "slow" syscall return path.&nbsp;&nbsp;"why" tells us if this was a real syscall.</p> 
+   <p>&nbsp;*/</p> 
+   <p>ENTRY(ret_to_user)</p> 
+   <p>ret_slow_syscall:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;disable_irq&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ disable interrupts</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:Cambria;font-size:x-large;">1.1.1.2</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="font-size:x-large;">从<span style="font-family:Cambria;">svc32</span>模式进入中断</span></p> 
+   <p>当中断嵌套或者中断打断系统调用等异常时，中断会从svc32模式进入中断。在开始中断处理前，系统仍然需要保存寄存器现场。这是通过调用宏svc_entry来实现的。</p> 
+   <p>/**</p> 
+   <p>&nbsp;*&nbsp;当从svc模式进入中断处理程序时，使用本宏保存寄存器现场到堆栈中，并形成pt_regs结构传递给C函数。</p> 
+   <p>&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;.macro&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;svc_entry, stack_hole=0</p> 
+   <p>&nbsp;UNWIND(.fnstart&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</p> 
+   <p>&nbsp;UNWIND(.save {r0 - pc}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</p> 
+   <p>&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将当前指针向低地址移动，以保存寄存器现场。这里减去4是为了将sp指向pt_regs中r1的位置。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;sub&nbsp;&nbsp;&nbsp;sp, sp, #(S_FRAME_SIZE + \stack_hole - 4)</p> 
+   <p>#ifdef CONFIG_THUMB2_KERNEL/*&nbsp;新内核支持将内核编译为THUMB-2，以节省代码空间，我们的系统不支持这个功能&nbsp;*/</p> 
+   <p>&nbsp;SPFIX(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;r0, [sp]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ temporarily saved</p> 
+   <p>&nbsp;SPFIX(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r0, sp&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</p> 
+   <p>&nbsp;SPFIX(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;r0, #4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ test original stack alignment</p> 
+   <p>&nbsp;SPFIX(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r0, [sp]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ restored</p> 
+   <p>#else</p> 
+   <p>&nbsp;SPFIX(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;sp, #4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</p> 
+   <p>#endif</p> 
+   <p>&nbsp;SPFIX(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;subeq&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sp, sp, #4&nbsp;)</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将r1-r12保存到堆栈中。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;stmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sp, {r1 - r12}</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* r0,sp,lr,spsr已经被汇编代码使用，因此需要根据r0从中断栈(我们目前正在使用的是svc栈)中取出</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, {r1 - r3}</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* r5指向pt_regs的ARM_sp即r13</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;&nbsp;r5, sp, #S_SP - 4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ here for interlock avoidance</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r4, #-1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;""&nbsp;&nbsp;""&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;""&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;""</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将r0调整到刚进入宏的位置</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;&nbsp;r0, sp, #(S_FRAME_SIZE + \stack_hole - 4)</p> 
+   <p>&nbsp;SPFIX(&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;addeq&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, r0, #4&nbsp;)</p> 
+   <p>&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;保存r0，同时将sp向下调整4字节，现在sp指向pt_regs了。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;r1, [sp, #-4]!&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ save the "real" r0 copied</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ from the exception stack</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r1, lr</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@ We are now ready to fill in the remaining blanks on the stack:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;r0 - sp_svc</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;r1 - lr_svc</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;r2 - lr_, already fixed up for correct return/restart</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;r3 - spsr_</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@&nbsp;&nbsp;r4 - orig_r0 (see pt_regs definition in ptrace.h)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;@</p> 
+   <p>&nbsp;&nbsp;&nbsp;stmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r5, {r0 - r4}/*&nbsp;将中断栈中的数据保存到pt_regs */</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;.endm</p> 
+   <p>&nbsp;</p> 
+   <p>当不是从用户态进入中断时，中断处理代码要稍显复杂一点，主要是需要处理抢占：</p> 
+   <p>/**</p> 
+   <p>&nbsp;*&nbsp;从svc32模式进入中断的处理过程</p> 
+   <p>&nbsp;*/</p> 
+   <p>__irq_svc:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;首先保存寄存器现场。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;svc_entry</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;进入中断后，系统自动将中断关闭，这里调用trace_hardirqs_off记录下中断被关闭的事实，用于跟踪调试。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>#ifdef CONFIG_TRACE_IRQFLAGS</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;bl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;trace_hardirqs_off</p> 
+   <p>#endif</p> 
+   <p>#ifdef CONFIG_PREEMPT</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;对可抢占内核来说，这里将任务的抢占计数加1，在整个中断处理过程中，进程都不能被抢占。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;get_thread_info tsk</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r8, [tsk, #TI_PREEMPT]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ get preempt count</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;add&nbsp;&nbsp;r7, r8, #1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ increment it</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;r7, [tsk, #TI_PREEMPT]</p> 
+   <p>#endif</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;irq_handler</p> 
+   <p>#ifdef CONFIG_PREEMPT</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;恢复抢占计数。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;str&nbsp;&nbsp;&nbsp;&nbsp;r8, [tsk, #TI_PREEMPT]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ restore preempt count</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;将任务的TI_FLAGS标志加载到r0中，这样后面会根据r0判断_TIF_NEED_RESCHED，以处理任务抢占</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r0, [tsk, #TI_FLAGS]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ get flags</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;如果在进入中断前，系统处于系统调用状态，那么抢占计数就可能为0.</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;这里比较抢占计数是否为0，如果为0，则进行抢占处理。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;teq&nbsp;&nbsp;&nbsp;r8, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ if preempt count != 0</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;如果系统关抢占了，那么强制针r0清0，这样就不可能调用svc_preempt</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;movne&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r0, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ force flags to 0</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;如果系统没有关抢占，并且任务存在_TIF_NEED_RESCHED标志，则调用svc_preempt处理抢占。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;r0, #_TIF_NEED_RESCHED</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;blne&nbsp;svc_preempt</p> 
+   <p>#endif</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;在此中断处于关闭状态，从pt_regs中获得中断前的SPSR寄存器，接下来将会用这个寄存器恢复状态。&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r4, [sp, #S_PSR]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ irqs are already disabled</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/*&nbsp;如果恢复状态后，将会打开中断，则调用trace_hardirqs_on进行跟踪&nbsp;*/</p> 
+   <p>#ifdef CONFIG_TRACE_IRQFLAGS</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;r4, #PSR_I_BIT</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;bleq&nbsp;trace_hardirqs_on</p> 
+   <p>#endif</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;退回svc32模式</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;svc_exit r4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ return from exception</p> 
+   <p>&nbsp;UNWIND(.fnend&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;)</p> 
+   <p>ENDPROC(__irq_svc)</p> 
+   <p>&nbsp;</p> 
+   <p>处理抢占的代码并不复杂，如下：</p> 
+   <p>#ifdef CONFIG_PREEMPT</p> 
+   <p>svc_preempt:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;mov&nbsp;r8, lr</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;这里调用preempt_schedule_irq处理抢占调度，今后在分析调度时，将会详细介绍这个函数。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>1:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bl&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;preempt_schedule_irq&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ irq en/disable is done inside</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;* preempt_schedule_irq返回时，会重新将中断关闭，这里加载TI_FLAGS标志是安全的。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r0, [tsk, #TI_FLAGS]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ get new tasks TI_FLAGS</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;tst&nbsp;&nbsp;&nbsp;&nbsp;r0, #_TIF_NEED_RESCHED</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;如果任务没有抢占标志，那么退回上层继续处理，恢复寄存器现场，返回上层中断。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/&nbsp;&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;moveq&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pc, r8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ go again</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;否则表示任务再次被抢占，循环处理抢占。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;b&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;1b</p> 
+   <p>#endif</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p><span style="font-family:Cambria;font-size:x-large;">1.1.1.3</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="font-size:x-large;">退回<span style="font-family:Cambria;">svc32</span>模式</span></p> 
+   <p>从中断退出的代码如下：</p> 
+   <p>#ifndef CONFIG_THUMB2_KERNEL</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;.macro&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;svc_exit, rpsr</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;msr&nbsp;&nbsp;spsr_cxsf, \rpsr /*&nbsp;恢复rpsr */</p> 
+   <p>#if defined(CONFIG_CPU_V6)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;恢复r0寄存器</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldr&nbsp;&nbsp;&nbsp;&nbsp;r0, [sp]</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;由于发生了中断，需要执行strex指令，这样上层中断中的spinlock会认为排它性装载失效，重启spinlock循环。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;在mips等体系结构中，这是由硬件完成的。可能ARM硬件不能完成这件事。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;strex&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;r1, r2, [sp]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ clear the exclusive monitor</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;/**</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*&nbsp;恢复所有寄存器，并恢复cpsr。将处理器状态切回中断前。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldmib&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sp, {r1 - pc}^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ load r1 - pc, cpsr</p> 
+   <p>#elif defined(CONFIG_CPU_32v6K)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;clrex&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ clear the exclusive monitor</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sp, {r0 - pc}^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ load r0 - pc, cpsr</p> 
+   <p>#else</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;ldmia&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sp, {r0 - pc}^&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;@ load r0 - pc, cpsr</p> 
+   <p>#endif</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;.endm</p> 
+   <p align="left">&nbsp;</p> 
+   <p align="left">至此，进入中断和退出中断的基本流程已经梳理完成。我们将在下一部分讲中断处理函数的C语言部分。包含ISR和软中断的处理。</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

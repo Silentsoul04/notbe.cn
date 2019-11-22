@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux移植随笔：对tslib库的ts_test测试程序代码的一点分析【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.latelee.org/embedded-linux/porting-linux-tstest-code.html    本文是作者对tslib库的ts_test.c文件进行分析的随笔，其实tslib的几个测试程序结构差不多，譬如ts_print.c和ts_p...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/01/04/weixin_33809981_90132202.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux移植随笔：对tslib库的ts_test测试程序代码的一点分析【转】</h1>
+    <p class="post-meta">Jan 4, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://www.latelee.org/embedded-linux/porting-linux-tstest-code.html" rel="nofollow">http://www.latelee.org/embedded-linux/porting-linux-tstest-code.html</a></p> 
+   <p>本文是作者对tslib库的ts_test.c文件进行分析的随笔，其实tslib的几个测试程序结构差不多，譬如ts_print.c和ts_print_raw.c等。</p> 
+   <p>本文并没有涉及太多概念，也没有详细介绍这些概念，但并不代表作者对此不了解，也不代表作者对此很精通。如文中提到的input，虽只出现一个单词，但是相信许多人都知道它在文中指的是Linux操作系统下的input子系统，该子系统不简单，看三天三夜也未必能全面掌握。作者水平有限，真正接触tslib不超过一周，错误在所难免，欢迎指正(可在文后留言，亦可在本站搜索作者联系方式)。</p> 
+   <p>本文不涉及tslib的移植，如果感兴趣，可以看看这篇文章(有图有真相)：</p> 
+   <p>Linux移植随笔：终于解决Tslib的问题了</p> 
+   <p>运行ts_test，在触摸屏上方显示三个按钮，按钮正文显示两行信息(效果图可参考上面给出的链接文章)，当用笔触摸屏幕时，屏幕上有相应的显示(取决于“Drag”和“Draw”按钮)，终端上会显示一些信息。一般地，没有添加任何调试信息时显示如下：</p> 
+   <p>1302776697.620288:&nbsp;&nbsp;&nbsp;&nbsp; 99&nbsp;&nbsp;&nbsp;&nbsp; 20&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 1</p> 
+   <p>前面两个是timeval结构体的两个成员：tv_sec和tv_usec，中间两列分别是X和Y的坐标，最后为pressure，这里可以理解成“触摸事件”，为1表示触摸笔点击了(接触)屏幕，为0表示触摸笔离开了屏幕。</p> 
+   <p>我们将ts_test.c文件中的main函数分成4个部分(添加调试信息后的完整的源代码文件附于文后)：</p> 
+   <p>1、设置信号处理，有3个：SIGSEGV、SIGINT和SIGTERM；</p> 
+   <p>2、打开触摸屏设备、读取配置信息(ts.conf文件)；</p> 
+   <p>3、画框(按钮)并显示字符串；</p> 
+   <p>4、事件处理，包括在终端上显示信息、在屏幕上显示十字架或用触摸笔画的线条。</p> 
+   <p>下面分别讲一下：</p> 
+   <p>1、信号处理</p> 
+   <p>调用signal函数处理3种信号：</p> 
+   <blockquote> 
+    <p>signal(SIGSEGV,&nbsp;sig);</p> 
+    <p>signal(SIGINT,&nbsp;sig);</p> 
+    <p>signal(SIGTERM,&nbsp;sig);</p> 
+   </blockquote> 
+   <p>其中sig函数如下：</p> 
+   <blockquote> 
+    <p>static&nbsp;void&nbsp;sig(int&nbsp;sig)<br>{<br>close_framebuffer();<br>fflush(stderr);<br>printf(“signal %d caughtn”,&nbsp;sig);<br>fflush(stdout);<br>exit(1);<br>}</p> 
+   </blockquote> 
+   <p>第一个为SIGSEGV，即Segmentation violation。网上有资料显示，如果在ts.conf中module_raw input前留有空格，会出现Segmentation fault。不过不敢确定出现段错误是系统处理的还是tslib处理的——因为终端没有显示sig函数中打印的字符串。</p> 
+   <p>第二个是SIGINT，Interrupt，按Ctrl+c产生，如果在运行ts_test时按Ctrl+c，程序会退出，同时终端上显示：^Csignal 2 caught。^C是按Ctrl+C显示的，而signal 2 caught则是sig函数中打印的。详细的signal号可以在&lt;bits/signum.h&gt;中找到。在我的系统中，是/usr/include/bits/signum.h 。</p> 
+   <p>最后一个是SIGTERM，Termination，由kill(1)命令发送的系统默认终止信号，kill(1)表示“kill”是kill命令，而非系统调用的kill函数。</p> 
+   <p>2、触摸屏设备及配置</p> 
+   <p>打开触摸屏设备：</p> 
+   <blockquote> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if(&nbsp;(tsdevice&nbsp;=&nbsp;getenv(“TSLIB_TSDEVICE”))&nbsp;!=&nbsp;NULL&nbsp;)&nbsp;{<br>ts&nbsp;=&nbsp;ts_open(tsdevice,0);<br>}&nbsp;else&nbsp;{<br>if&nbsp;(!(ts&nbsp;=&nbsp;ts_open(“/dev/input/event0″,&nbsp;0)))<br>ts&nbsp;=&nbsp;ts_open(“/dev/touchscreen/ucb1x00″,&nbsp;0);<br>}</p> 
+   </blockquote> 
+   <p>前面提到的文章中说tslib默认的设备文件系统为“/dev/input/event0”，从这里的代码就可以看出来了。</p> 
+   <p>读取ts.conf文件：</p> 
+   <blockquote> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if&nbsp;(ts_config(ts))&nbsp;{<br>perror(“ts_config”);<br>exit(1);<br>}</p> 
+   </blockquote> 
+   <p>这里<strong>可能</strong>会发生一个非常经典的出错提示信息，有兴趣的可以看看这篇文章：</p> 
+   <p><a href="http://www.latelee.org/embedded-linux/porting-linux-from-tsconfig.html" rel="nofollow">Linu移植随笔：由ts_config：Success想到的</a></p> 
+   <p>3、画图及显示字符串</p> 
+   <p>在屏幕上画图：</p> 
+   <blockquote> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;x&nbsp;=&nbsp;xres/2;</p> 
+    <p>y&nbsp;=&nbsp;yres/2;</p> 
+    <p>for&nbsp;(i&nbsp;=&nbsp;0;&nbsp;i&nbsp;&lt;&nbsp;NR_COLORS;&nbsp;i++)</p> 
+    <p>setcolor&nbsp;(i,&nbsp;palette&nbsp;[i]);</p> 
+    <p>/*&nbsp;Initialize&nbsp;buttons&nbsp;*/</p> 
+    <p>memset&nbsp;(&amp;buttons,&nbsp;0,&nbsp;sizeof&nbsp;(buttons));</p> 
+    <p>buttons&nbsp;[0].w&nbsp;=&nbsp;buttons&nbsp;[1].w&nbsp;=&nbsp;buttons&nbsp;[2].w&nbsp;=&nbsp;xres&nbsp;/&nbsp;4;</p> 
+    <p>buttons&nbsp;[0].h&nbsp;=&nbsp;buttons&nbsp;[1].h&nbsp;=&nbsp;buttons&nbsp;[2].h&nbsp;=&nbsp;20;</p> 
+    <p>buttons&nbsp;[0].x&nbsp;=&nbsp;0;</p> 
+    <p>buttons&nbsp;[1].x&nbsp;=&nbsp;(3&nbsp;*&nbsp;xres)&nbsp;/&nbsp;8;</p> 
+    <p>buttons&nbsp;[2].x&nbsp;=&nbsp;(3&nbsp;*&nbsp;xres)&nbsp;/&nbsp;4;</p> 
+    <p>buttons&nbsp;[0].y&nbsp;=&nbsp;buttons&nbsp;[1].y&nbsp;=&nbsp;buttons&nbsp;[2].y&nbsp;=&nbsp;10;</p> 
+    <p>buttons&nbsp;[0].text&nbsp;=&nbsp;“Drag”;</p> 
+    <p>buttons&nbsp;[1].text&nbsp;=&nbsp;“Draw”;</p> 
+    <p>buttons&nbsp;[2].text&nbsp;=&nbsp;“Quit”;</p> 
+    <p>refresh_screen&nbsp;();</p> 
+   </blockquote> 
+   <p>其中xres为240，yres为320，(0，0)为左上角坐标(了解计算机图形学的<strong>可能</strong>知道)。根据这些代码，可以知道3个按钮的坐标范围。</p> 
+   <p>“Drag”按钮x坐标为0~60，“Draw”按钮x坐标为90~150，而“Quit”按钮x坐标为180~240。而3个按钮y坐标都一样，范围是10~30。</p> 
+   <p>接着在屏幕上显示：</p> 
+   <blockquote> 
+    <p>static&nbsp;void&nbsp;refresh_screen&nbsp;()</p> 
+    <p>{</p> 
+    <p>int&nbsp;i;</p> 
+    <p>fillrect&nbsp;(0,&nbsp;0,&nbsp;xres&nbsp;–&nbsp;1,&nbsp;yres&nbsp;–&nbsp;1,&nbsp;0);</p> 
+    <p>put_string_center&nbsp;(xres/2,&nbsp;yres/4,&nbsp;&nbsp;&nbsp;“TSLIB test program”,&nbsp;1);</p> 
+    <p>put_string_center&nbsp;(xres/2,&nbsp;yres/4+20,“Touch screen to move crosshair”,&nbsp;2);</p> 
+    <p>#ifdef&nbsp;TS_DEBUG</p> 
+    <p>/*&nbsp;just&nbsp;a&nbsp;test&nbsp;*/</p> 
+    <p>int&nbsp;j;</p> 
+    <p>int&nbsp;y&nbsp;=&nbsp;yres/4+30;</p> 
+    <p>for&nbsp;(j&nbsp;=&nbsp;0;&nbsp;j&nbsp;&lt;&nbsp;255;&nbsp;j++,&nbsp;y+=20)</p> 
+    <p>{</p> 
+    <p>put_string(0,&nbsp;y,&nbsp;“Hello from Late Lee”,&nbsp;j);</p> 
+    <p>//printf(“y:%d, j:%dn”, y, j);</p> 
+    <p>for&nbsp;(i&nbsp;=&nbsp;0;&nbsp;i&nbsp;&lt;&nbsp;NR_BUTTONS;&nbsp;i++)</p> 
+    <p>button_draw&nbsp;(&amp;buttons&nbsp;[i]);</p> 
+    <p>}</p> 
+    <p>/*&nbsp;end&nbsp;of&nbsp;the&nbsp;test&nbsp;*/</p> 
+    <p>#endif</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>先显示两行字符串，再调用button_draw函数画按钮：</p> 
+   <blockquote> 
+    <p>static&nbsp;void&nbsp;button_draw&nbsp;(struct&nbsp;ts_button&nbsp;*button)</p> 
+    <p>{</p> 
+    <p>int&nbsp;s&nbsp;=&nbsp;(button-&gt;flags&nbsp;&amp;&nbsp;BUTTON_ACTIVE)&nbsp;?&nbsp;3&nbsp;:&nbsp;0;</p> 
+    <p>rect&nbsp;(button-&gt;x,&nbsp;button-&gt;y,&nbsp;button-&gt;x&nbsp;+&nbsp;button-&gt;w&nbsp;–&nbsp;1,</p> 
+    <p>button-&gt;y&nbsp;+&nbsp;button-&gt;h&nbsp;–&nbsp;1,&nbsp;button_palette&nbsp;[s]);</p> 
+    <p>fillrect&nbsp;(button-&gt;x&nbsp;+&nbsp;1,&nbsp;button-&gt;y&nbsp;+&nbsp;1,</p> 
+    <p>button-&gt;x&nbsp;+&nbsp;button-&gt;w&nbsp;–&nbsp;2,</p> 
+    <p>button-&gt;y&nbsp;+&nbsp;button-&gt;h&nbsp;–&nbsp;2,&nbsp;button_palette&nbsp;[s&nbsp;+&nbsp;1]);</p> 
+    <p>put_string_center&nbsp;(button-&gt;x&nbsp;+&nbsp;button-&gt;w&nbsp;/&nbsp;2,</p> 
+    <p>button-&gt;y&nbsp;+&nbsp;button-&gt;h&nbsp;/&nbsp;2,</p> 
+    <p>button-&gt;text,&nbsp;button_palette&nbsp;[s&nbsp;+&nbsp;2]);<br>}</p> 
+   </blockquote> 
+   <p>&nbsp;</p> 
+   <p>button_palette为调色板索引号，前面3个是不激活(接触)按钮的颜色，后3个是激活按钮时的颜色。依次为边框色、填充色和文字颜色。</p> 
+   <blockquote> 
+    <p>/*&nbsp;[inactive]&nbsp;border&nbsp;fill&nbsp;text&nbsp;[active]&nbsp;border&nbsp;fill&nbsp;text&nbsp;*/</p> 
+    <p>static&nbsp;int&nbsp;button_palette&nbsp;[6]&nbsp;=</p> 
+    <p>{</p> 
+    <p>1,&nbsp;4,&nbsp;2,</p> 
+    <p>1,&nbsp;5,&nbsp;0</p> 
+    <p>};</p> 
+   </blockquote> 
+   <p>这里的palette(调色板)是作者在原代码基本上额外添加几种颜色：</p> 
+   <blockquote> 
+    <p>static&nbsp;int&nbsp;palette&nbsp;[]&nbsp;=<br>{<br>0x000000,&nbsp;0xffe080,&nbsp;0xffffff,&nbsp;0xe0c0a0,&nbsp;0x304050,<br>0x80b8c0,&nbsp;0x6600cc,&nbsp;0xff0000,&nbsp;0x00ff00,&nbsp;0x0000ff,&nbsp;0xffff00<br>};</p> 
+   </blockquote> 
+   <p>后面5种分别为紫色、红色、、绿色、蓝色、黄色(前面几种除0x000000(黑色)和0xffffff(白色)外不好用文字描述)。</p> 
+   <p>在前面的refresh_screen添加了如下函数：</p> 
+   <blockquote> 
+    <p>put_string(0,&nbsp;y,&nbsp;“Hello from Late Lee”,&nbsp;j);</p> 
+   </blockquote> 
+   <p>本意是打印0~255种颜色的字体，可事与愿违，屏幕上只显示10种颜色。从上面的palette数组中我们知道一共有11种颜色，而在main函数中用如下语句设置颜色：</p> 
+   <p>for&nbsp;(i&nbsp;=&nbsp;0;&nbsp;i&nbsp;&lt;&nbsp;NR_COLORS;&nbsp;i++)</p> 
+   <blockquote> 
+    <p>&nbsp; &nbsp; &nbsp; &nbsp; setcolor&nbsp;(i,&nbsp;palette&nbsp;[i]);</p> 
+   </blockquote> 
+   <p>一种可能的解释是：第1种黑色在屏幕上显示了，但看不出来(可以用触摸笔触摸按钮，看按钮的各种颜色变化)。</p> 
+   <p>4、事件处理</p> 
+   <p>这是一个while(1)循环，当用触摸笔点击“Quit”按钮或按“Ctrl+C”时退出。</p> 
+   <p>首先在屏幕上显示十字架：</p> 
+   <blockquote> 
+    <p>/*&nbsp;Show&nbsp;the&nbsp;cross&nbsp;*/</p> 
+    <p>if&nbsp;((mode&nbsp;&amp;&nbsp;15)&nbsp;!=&nbsp;1)&nbsp;{</p> 
+    <p>put_cross(x,&nbsp;y,&nbsp;2&nbsp;|&nbsp;XORMODE);</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>之后读取坐标：</p> 
+   <p>ret = ts_read(ts, &amp;samp, 1);</p> 
+   <p>&nbsp;</p> 
+   <p>跟着判断屏幕上3个按钮的事件：</p> 
+   <blockquote> 
+    <p>for&nbsp;(i&nbsp;=&nbsp;0;&nbsp;i&nbsp;&lt;&nbsp;NR_BUTTONS;&nbsp;i++)</p> 
+    <p>if&nbsp;(button_handle&nbsp;(&amp;buttons&nbsp;[i],&nbsp;&amp;samp))</p> 
+    <p>switch&nbsp;(i)&nbsp;{</p> 
+    <p>case&nbsp;0:</p> 
+    <p>mode&nbsp;=&nbsp;0;</p> 
+    <p>refresh_screen&nbsp;();</p> 
+    <p>break;</p> 
+    <p>case&nbsp;1:</p> 
+    <p>mode&nbsp;=&nbsp;1;</p> 
+    <p>refresh_screen&nbsp;();</p> 
+    <p>break;</p> 
+    <p>case&nbsp;2:</p> 
+    <p>quit_pressed&nbsp;=&nbsp;1;</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>当是“Drag”时，mode为0，而“Draw”时mode为1。</p> 
+   <p>&nbsp;</p> 
+   <p>然后在终端(至于printf与终端、串口之间的关联，非本文范围，不讨论)上显示坐标：</p> 
+   <blockquote> 
+    <p>printf(“%ld.%06ld: %6d %6d %6dn”,&nbsp;samp.tv.tv_sec,&nbsp;samp.tv.tv_usec,</p> 
+    <p>samp.x,&nbsp;samp.y,&nbsp;samp.pressure);</p> 
+   </blockquote> 
+   <p>后面根据每个按钮作出不同响应：</p> 
+   <blockquote> 
+    <p>if&nbsp;(samp.pressure&nbsp;&gt;&nbsp;0)&nbsp;{</p> 
+    <p>if&nbsp;(mode&nbsp;==&nbsp;0x80000001)</p> 
+    <p>line&nbsp;(x,&nbsp;y,&nbsp;samp.x,&nbsp;samp.y,&nbsp;2);</p> 
+    <p>x&nbsp;=&nbsp;samp.x;</p> 
+    <p>y&nbsp;=&nbsp;samp.y;</p> 
+    <p>mode&nbsp;|=&nbsp;0x80000000;</p> 
+    <p>debug(“mode(pressure&gt;0): %x x: %d y: %dn”,&nbsp;mode,&nbsp;x,&nbsp;y);</p> 
+    <p>}&nbsp;else</p> 
+    <p>mode&nbsp;&amp;=&nbsp;~0x80000000;</p> 
+    <p>debug(“the end of while (1), mode: %xn”,&nbsp;mode);</p> 
+    <p>if&nbsp;(quit_pressed)</p> 
+    <p>break;</p> 
+   </blockquote> 
+   <p>当触摸笔点击屏幕时，samp.pressure&nbsp;值为1，此时才会产生相应的操作：当mode为1(实际值为0x80000001)时，会调用line函数画线条，该函数最后一个参数为2，应该是对应前面palette数组的第3个颜色值，即白色。而当mode为0(实际值为0x80000000)时，即在屏幕上显示十字架者，除了将新采集到的坐标值赋与x、y外，还将mode和0x80000000按位或(“|”)，这个值作用于while(1)循环。当触摸笔点击“Quit”时，即quit_pressed值为1，退出while(1)循环。</p> 
+   <p>还记得前面显示十字架的代码吗？</p> 
+   <blockquote> 
+    <p>/*&nbsp;Show&nbsp;the&nbsp;cross&nbsp;*/</p> 
+    <p>if&nbsp;((mode&nbsp;&amp;&nbsp;15)&nbsp;!=&nbsp;1)&nbsp;{</p> 
+    <p>put_cross(x,&nbsp;y,&nbsp;2&nbsp;|&nbsp;XORMODE);</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>当mode为0(实际值为0x80000000)时，它与15相与，结果为0，会显示十字架了。</p> 
+   <p>在while(1)结束前将mode复原：</p> 
+   <p>mode &amp;= ~0x80000000;</p> 
+   <p>&nbsp;</p> 
+   <p>最后，关闭显示屏。</p> 
+   <p>&nbsp;</p> 
+   <p>现在看一下button_handle函数，为了更清晰地显示该函数中的层次，将几个大括号移动一下：</p> 
+   <p>&nbsp;</p> 
+   <blockquote> 
+    <p>static&nbsp;int&nbsp;button_handle&nbsp;(struct&nbsp;ts_button&nbsp;*button,&nbsp;struct&nbsp;ts_sample&nbsp;*samp)</p> 
+    <p>{</p> 
+    <p>int&nbsp;inside&nbsp;=&nbsp;(samp-&gt;x&nbsp;&gt;=&nbsp;button-&gt;x)&nbsp;&amp;&amp;&nbsp;(samp-&gt;y&nbsp;&gt;=&nbsp;button-&gt;y)&nbsp;&amp;&amp;</p> 
+    <p>(samp-&gt;x&nbsp;&lt;&nbsp;button-&gt;x&nbsp;+&nbsp;button-&gt;w)&nbsp;&amp;&amp;</p> 
+    <p>(samp-&gt;y&nbsp;&lt;&nbsp;button-&gt;y&nbsp;+&nbsp;button-&gt;h);</p> 
+    <p>if&nbsp;(samp-&gt;pressure&nbsp;&gt;&nbsp;0)</p> 
+    <p>{</p> 
+    <p>if&nbsp;(inside)</p> 
+    <p>{</p> 
+    <p>if&nbsp;(!(button-&gt;flags&nbsp;&amp;&nbsp;BUTTON_ACTIVE))</p> 
+    <p>{</p> 
+    <p>button-&gt;flags&nbsp;|=&nbsp;BUTTON_ACTIVE;</p> 
+    <p>debug(“(inside button: !BUTTON_ACTIVE)button-&gt;flags:%dn”,&nbsp;button-&gt;flags);</p> 
+    <p>button_draw&nbsp;(button);</p> 
+    <p>}</p> 
+    <p>}</p> 
+    <p>else&nbsp;if&nbsp;(button-&gt;flags&nbsp;&amp;&nbsp;BUTTON_ACTIVE)</p> 
+    <p>{</p> 
+    <p>button-&gt;flags&nbsp;&amp;=&nbsp;~BUTTON_ACTIVE;</p> 
+    <p>debug(“(outside button BUTTON_ACTIVE)button-&gt;flags:%dn”,&nbsp;button-&gt;flags);</p> 
+    <p>button_draw&nbsp;(button);</p> 
+    <p>}</p> 
+    <p>}</p> 
+    <p>else&nbsp;if&nbsp;(button-&gt;flags&nbsp;&amp;&nbsp;BUTTON_ACTIVE)</p> 
+    <p>{</p> 
+    <p>button-&gt;flags&nbsp;&amp;=&nbsp;~BUTTON_ACTIVE;</p> 
+    <p>debug(“(pressure == 0 return here)button-&gt;flags:%dn”,&nbsp;button-&gt;flags);</p> 
+    <p>button_draw&nbsp;(button);</p> 
+    <p>return&nbsp;1;</p> 
+    <p>}</p> 
+    <p>return&nbsp;0;</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>&nbsp;</p> 
+   <p>inside为1时表示触摸笔点击的坐标位于按钮之内，前面已经写出几个按钮的坐标范围了。当触摸笔接触屏幕时，即pressure&gt;0，如果落点位于按钮范围之内，假如按钮是非激活状态，则激活按钮(设置flags为BUTTON_ACTIVE)，反之，则不激活按钮。flags的值主要是用于显示按钮的各种颜色(即边框、填充色及字符串颜色)，详细可以看代码。</p> 
+   <p>当释放触摸笔时，如果按钮激活的话，返回值为1，这时才能让&nbsp;if (button_handle (&amp;buttons [i], &amp;samp))语句继续执行。如果不是的话，返回0(当触摸笔在不是按钮处乱点、乱画时，应该就是这种情况)。</p> 
+   <p>&nbsp;</p> 
+   <p>至此，这个文件大约胡乱分析完了。不过，我们只知道由ts_read得到坐标的采样，却不知道从何处而来。下面就跟踪坐标采样的过程。</p> 
+   <p>由</p> 
+   <p>ret = ts_read(ts, &amp;samp, 1);</p> 
+   <p>将坐标信息放到samp结构体中，ts_read函数来自ts_read.c文件，只有一个关键语句：</p> 
+   <p>result = ts-&gt;list-&gt;ops-&gt;read(ts-&gt;list, samp, nr);</p> 
+   <p>&nbsp;</p> 
+   <p>其中ts-&gt;list-&gt;ops成员为tslib_ops结构体指针，该结构体定义如下：</p> 
+   <blockquote> 
+    <p>struct&nbsp;tslib_ops&nbsp;{</p> 
+    <p>int&nbsp;(*read)(struct&nbsp;tslib_module_info&nbsp;*inf,&nbsp;struct&nbsp;ts_sample&nbsp;*samp,&nbsp;int&nbsp;nr);</p> 
+    <p>int&nbsp;(*fini)(struct&nbsp;tslib_module_info&nbsp;*inf);</p> 
+    <p>};</p> 
+   </blockquote> 
+   <p>它有两个函数指针，其中的read就是要实现的。线索到此似乎断了。因为函数指针也是指针(这是废话，请无视之)，它总得要指向一个东西才行，但是这里却找不到。</p> 
+   <p>&nbsp;</p> 
+   <p>不过，前面提及到ts_config函数，这个函数就是读取指定的文件ts.conf(由TSLIB_CONFFILE环境变量指定)。这个文件很简单，就是一些模块信息，比如输入设备，可以用module_raw input指定input，或者用module_raw h3600指定使用HP iPaq h3600，等等。ts.conf文件由ts_config.c文件的ts_config函数读取，由于实际中使用的是input模块，ts.conf文件第一行为module_raw input，由</p> 
+   <blockquote> 
+    <p>else&nbsp;if&nbsp;(strcasecmp(tok,&nbsp;“module_raw”)&nbsp;==&nbsp;0)&nbsp;{</p> 
+    <p>module_name&nbsp;=&nbsp;strsep(&amp;p,&nbsp;” t”);</p> 
+    <p>ret&nbsp;=&nbsp;ts_load_module_raw(ts,&nbsp;module_name,&nbsp;p);</p> 
+    <p>}</p> 
+   </blockquote> 
+   <p>读取模块名称并加载。</p> 
+   <p>input模块使用的是input_raw.c文件，该文件中有如下结构体的定义：</p> 
+   <blockquote> 
+    <p>static&nbsp;const&nbsp;struct&nbsp;tslib_ops&nbsp;__ts_input_ops&nbsp;=&nbsp;{</p> 
+    <p>.read&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;ts_input_read,</p> 
+    <p>.fini&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;ts_input_fini,</p> 
+    <p>};</p> 
+   </blockquote> 
+   <p>它使用的正是结构体tslib_ops，变量名称为__ts_input_ops。该变量在同一文件的input_mod_init函数中使用到。</p> 
+   <blockquote> 
+    <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;i-&gt;module.ops&nbsp;=&nbsp;&amp;__ts_input_ops;</p> 
+    <p>i-&gt;current_x&nbsp;=&nbsp;0;</p> 
+    <p>i-&gt;current_y&nbsp;=&nbsp;0;</p> 
+    <p>i-&gt;current_p&nbsp;=&nbsp;0;</p> 
+    <p>i-&gt;sane_fd&nbsp;=&nbsp;0;</p> 
+    <p>i-&gt;using_syn&nbsp;=&nbsp;0;</p> 
+    <p>i-&gt;grab_events&nbsp;=&nbsp;0;</p> 
+   </blockquote> 
+   <p>而这个函数大约可以理解为Linux驱动程序中的xxx_init函数。同样地，__ts_input_ops中的fini指针指向的ts_input_fini函数可以理解为xxx_exit函数。</p> 
+   <p>至此，除了触摸屏的驱动程序和tslib读取坐标函数外，其它表面上看得到的东西已经大致了解了。本文也该结束了。附图一张：</p> 
+   <p><a href="https://yqfile.alicdn.com/img_ae6655a152280503927e3e68361ead12.jpg" rel="nofollow"><img class="alignnone size-full wp-image-188" src="https://yqfile.alicdn.com/img_ae6655a152280503927e3e68361ead12.jpg" alt="触摸屏测试来自latelee.org" width="640" height="480"></a></p> 
+   <p>(图中字体颜色不清楚，后4行颜色分别是红、绿、蓝、黄)</p> 
+   <p>&nbsp;</p> 
+   <p>后记：</p> 
+   <p>网上很流行代码分析，特别是Linux、U-Boot，那些文章讲的都很详细。不过，这篇分析tslib库中的一个测试程序的文章，没什么深度，也不详细。主要原因是作者水平有限，很多东西都不懂，说来惭愧，连按位与、按位或，都要亲自用代码测试一次才敢写出结论。此外，文中也有许多猜测的地方，主要是由于作者经过实践，看到了结果，因此想当然地认为结论是这样。“纸上得来终觉浅，绝知此事要躬行”，但也可能会由于一些错误的认识而导致错误的实践结果。作者接触tslib时日不多，本文完成时间花费约3到4天时间。</p> 
+   <p>小子无知，虽不妄自菲薄，但亦诚惶诚恐，如履薄冰。</p> 
+   <p>最新后记：</p> 
+   <p>在本文即将完成之时，由于误操作，使得开发板的文件系统引导不起来，文中代码所示例的调试信息无法演示。版本控制再次引导作者的注意，由此而学习git，并且有了初步的认识。关于未来更多的学习及文章，请继续关注<a href="http://latelee.org/" rel="nofollow">迟思堂工作室</a>。</p> 
+   <p>主要参考：</p> 
+   <p>1、tslib库的很多代码；</p> 
+   <p>2、开发板上的系统、触摸屏上显示的数据、串口上显示的坐标及调试信息。</p> 
+   <p>最后附上经过修改(只是稍微修改一下下而已)的ts_test.c源代码：</p> 
+   <p>迟 记于4月下旬</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>kernel 3.10内核源码分析--TLB相关--TLB概念、flush、TLB lazy模式 【转】 « NotBeCN</title>
+  <meta name="description" content="             &nbsp;    转自：http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;id=4808877&amp;uid=14528823    &nbsp;         一、概念及基本原理TLB即Translation Look...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/01/15/weixin_33921089_90133585.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">kernel 3.10内核源码分析--TLB相关--TLB概念、flush、TLB lazy模式 【转】</h1>
+    <p class="post-meta">Jan 15, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>&nbsp;</p> 
+   <p>转自：<a href="http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;id=4808877&amp;uid=14528823" rel="nofollow">http://blog.chinaunix.net/xmlrpc.php?r=blog/article&amp;id=4808877&amp;uid=14528823</a></p> 
+   <p>&nbsp;</p> 
+   <div class="cnblogs_code"> 
+    <pre><span style="color:#000000;">一、概念及基本原理
+TLB即Translation Lookaside Buffer，是MMU中的一种硬件cache，用于缓存页表，即缓存线性地址(虚拟地址)到物理地址的映射关系。
+如果没有TLB，那么正常的内存数据访问前需要先通过线性地址查进程页表将其转换为物理地址，页表实际也是放在物理内存中的，页表分级存放，一次地址转换需要经过多次内存访问，效率不高，尤其是类似的操作非常频繁，由此带来的性能损耗不小。
+有了TLB之后，内存数据访问前只需要先从TLB中查找相应的匹配项，找到后即可跳转页表查找的操作，由于TLB是硬件cache，相对于内存访问来说，效率要高许多，所以通过TLB能较大程度改善地址转换效率。
+TLB中保存着线性地址(前20位)和物理页框号(pfn)的对映关系，在TLB中查找时，通过匹配线性地址的前20位，如果匹配即可获取pfn，通过pfn与虚拟地址后12位的偏移组合即可得到最终的物理地址。
+如果在TLB中没有找到匹配的entry，即出现TLB miss，此时仍需通过查找页表来进行线性地址到物理地址的转换，此时硬件会自动将相应的映射关系缓存到TLB中。
+不同的硬件环境中TLB中的entry数量不一，x86中相对较多。
+
+二、TLB刷新
+软件(OS)对于TLB的控制只有一种方式：TLB刷新(flush)，即使TLB失效。失效后，需要重新通过页表进行地址转换，同时会生成相应的新的TLB entry。TLB刷新会带来一定的性能损失，但当页表被修改时，或发生进程切换时，由于原有TLB中缓存的内容已经失效，此时必须通过软件触发TLB刷新操作。
+</span><span style="color:#800080;">1</span><span style="color:#000000;">、TLB刷新的方式
+Intel x86架构CPU硬件提供的TLB刷新的方式有多种，软件(OS)可以根据实际场景选择使用。
+</span><span style="color:#800080;">1</span><span style="color:#000000;">）INVLPG
+flush参数指定的线性地址对应的单个TLB entry，如果相应的TLB entry有global标记(表示该entry可能由多个进程共享)，也会被flush。同时，还会invalidates所有paging</span>-<span style="color:#000000;">structure caches(PML4 cache、PDPTE cache和PDE cache)中的所有与当前PCID相关的entry，而不管其是否与参数指定的线性地址对应。
+</span><span style="color:#800080;">2</span><span style="color:#000000;">）mov to CR3(Linux中task switch时使用)
+flush当前CPU上除带global标记外的所有TLB entry，同时还会invalidates所有paging</span>-<span style="color:#000000;">structure caches中的所有与当前PCID相关的entry。具体逻辑还取决于CR4.PCIDE的设置，详见Intel的SDM手册，这里不详述。
+</span><span style="color:#800080;">3</span><span style="color:#000000;">）mov to CR4
+当修改CR4.PGE位时，flush当前CPU上所有TLB entry，同时还会invalidates所有paging</span>-structure caches(<span style="color:#0000ff;">for</span><span style="color:#000000;"> all PCIDs)。在Linux中，效果跟mov to CR3效果差不多，主要差别在于其会flush掉带global标记的TLB entry，实际逻辑还跟具体操作相关，详见Intel的SDM手册，这里不详述。
+mov to CR0：当将原有的CR0.PG的值从1改为0时(关闭分页支持</span>?)，会flush掉当前CPU所有的TLB entry(包括带global标记的TLB entry)和paging-<span style="color:#000000;">structure caches。
+</span><span style="color:#800080;">4</span><span style="color:#000000;">）INVPCID 
+Linux中通常不使用，这里不详述。
+</span><span style="color:#800080;">5</span><span style="color:#000000;">）VMX transitions
+虚拟化相关，详见Intel的SDM手册，这里不详述。
+另外，根据SDM描述，硬件flush TLB和paging</span>-<span style="color:#000000;">structure caches是比较free的，不一定会严格遵循上述规则，比如mov to CR3，也是有可能会flush掉global TLB entry的。所以，最好不好做肯定的假设。
+
+</span><span style="color:#800080;">2</span><span style="color:#000000;">）内核实现
+Linux </span><span style="color:#800080;">3</span><span style="color:#000000;">.10内核代码中对于TLB刷新，定义了如下接口：
+
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">flush mm相关的TLB项，即flush指定进程相关的TLB项</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> flush_tlb_mm(<span style="color:#0000ff;">struct</span> mm_struct *<span style="color:#000000;">mm)
+{
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">要求被flush的mm必须是当前的active mm，因为只有active mm对应的映射才存在于硬件TLB中</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">if</span> (mm == current-&gt;<span style="color:#000000;">active_mm)
+__flush_tlb();
+}
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">flush指定vma中的虚拟地址对应的TLB项</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> flush_tlb_page(<span style="color:#0000ff;">struct</span> vm_area_struct *<span style="color:#000000;">vma,
+ unsigned </span><span style="color:#0000ff;">long</span><span style="color:#000000;"> addr)
+{
+</span><span style="color:#0000ff;">if</span> (vma-&gt;vm_mm == current-&gt;<span style="color:#000000;">active_mm)
+__flush_tlb_one(addr);
+}
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">
+  * flush指定虚拟地址范围对应的TLB项，目前未实现，等价于__flush_tlb，最终通过load cr3将所有
+  * 的TLB(不包括global项)flush
+  </span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> flush_tlb_range(<span style="color:#0000ff;">struct</span> vm_area_struct *<span style="color:#000000;">vma,
+  unsigned </span><span style="color:#0000ff;">long</span> start, unsigned <span style="color:#0000ff;">long</span><span style="color:#000000;"> end)
+{
+</span><span style="color:#0000ff;">if</span> (vma-&gt;vm_mm == current-&gt;<span style="color:#000000;">active_mm)
+__flush_tlb();
+}
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">flush 指定进程虚拟地址空间中start-end之间的线性地址对应的TLB项</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> flush_tlb_mm_range(<span style="color:#0000ff;">struct</span> mm_struct *<span style="color:#000000;">mm,
+  unsigned </span><span style="color:#0000ff;">long</span> start, unsigned <span style="color:#0000ff;">long</span> end, unsigned <span style="color:#0000ff;">long</span><span style="color:#000000;"> vmflag)
+{
+</span><span style="color:#0000ff;">if</span> (mm == current-&gt;<span style="color:#000000;">active_mm)
+__flush_tlb();
+}
+</span><span style="color:#008000;">/*</span><span style="color:#008000;"> 通过向其它CPU发送IPI(核间中断)来使其它CPU flush 指定地址范围内的TLB</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">void</span> native_flush_tlb_others(<span style="color:#0000ff;">const</span> <span style="color:#0000ff;">struct</span> cpumask *<span style="color:#000000;">cpumask,
+</span><span style="color:#0000ff;">struct</span> mm_struct *mm, unsigned <span style="color:#0000ff;">long</span><span style="color:#000000;"> start,
+unsigned </span><span style="color:#0000ff;">long</span><span style="color:#000000;"> end)
+{
+...
+}
+
+最终都是通过如下几个接口实现最终的flush操作。
+</span><span style="color:#800080;">1</span><span style="color:#000000;">）flush除global外的所有TLB entry，通过mov to cr3方法实现。
+
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;"> 等价于__flush_tlb，最终通过load cr3将当前CPU对应的所有的TLB(不包括global项)flush</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> __native_flush_tlb(<span style="color:#0000ff;">void</span><span style="color:#000000;">)
+{
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">通过重新加载cr3实现，flush除global项之外的所有TLB</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+native_write_cr3(native_read_cr3());
+}
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">将val的值写入CR3寄存器</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> native_write_cr3(unsigned <span style="color:#0000ff;">long</span><span style="color:#000000;"> val)
+{
+asm </span><span style="color:#0000ff;">volatile</span>(<span style="color:#800000;">"</span><span style="color:#800000;">mov %0,%%cr3</span><span style="color:#800000;">"</span>: : <span style="color:#800000;">"</span><span style="color:#800000;">r</span><span style="color:#800000;">"</span> (val), <span style="color:#800000;">"</span><span style="color:#800000;">m</span><span style="color:#800000;">"</span><span style="color:#000000;"> (__force_order));
+}
+
+</span><span style="color:#800080;">2</span><span style="color:#000000;">）flush包括global项的所有TLB entry，通过mov to cr4方法实现。
+
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">通过Read-modify-write to CR4来flush TLB，包括global项</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> __native_flush_tlb_global(<span style="color:#0000ff;">void</span><span style="color:#000000;">)
+{
+unsigned </span><span style="color:#0000ff;">long</span><span style="color:#000000;"> flags;
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">
+* Read-modify-write to CR4 - protect it from preemption and
+* from interrupts. (Use the raw variant because this code can
+* be called from deep inside debugging code.)
+</span><span style="color:#008000;">*/</span>
+<span style="color:#008000;">/*</span><span style="color:#008000;">关中断，防止竞争</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+raw_local_irq_save(flags);
+__native_flush_tlb_global_irq_disabled();
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">开中断</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+raw_local_irq_restore(flags);
+}
+</span><span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> __native_flush_tlb_global_irq_disabled(<span style="color:#0000ff;">void</span><span style="color:#000000;">)
+{
+unsigned </span><span style="color:#0000ff;">long</span><span style="color:#000000;"> cr4;
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">读取CR4</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+cr4 </span>=<span style="color:#000000;"> native_read_cr4();
+</span><span style="color:#008000;">/*</span><span style="color:#008000;"> clear PGE </span><span style="color:#008000;">*/</span>
+<span style="color:#008000;">/*</span><span style="color:#008000;">
+ * 清除掉X86_CR4_PGE位后，重新将其写入CR4，清除X86_CR4_PGE位的目的是intel x86架构CPU中，当使用mov to cr4的方式flush TLB时，
+ * 只有当CR4.PGE位有修改时，才会触发TLB flush。详见Intel sdm 4.10节。
+ </span><span style="color:#008000;">*/</span><span style="color:#000000;">
+native_write_cr4(cr4 </span>&amp; ~<span style="color:#000000;">X86_CR4_PGE);
+</span><span style="color:#008000;">/*</span><span style="color:#008000;"> write old PGE again and flush TLBs </span><span style="color:#008000;">*/</span>
+<span style="color:#008000;">/*</span><span style="color:#008000;">
+ * 重新将原CR4内容写入CR4，因为上一行代码将CR4.PGE位清除掉了，需要恢复重新写入，才能恢复正常状态，此处其实
+ * 再次发生了TLB flush，也就是说Linux中通过mov to cr4的方法实现的TLB flush实际进行了两次flush操作。
+ * Fixme:是否能优化下?
+ </span><span style="color:#008000;">*/</span><span style="color:#000000;">
+native_write_cr4(cr4);
+}
+
+</span><span style="color:#800080;">3</span><span style="color:#000000;">）flush单个TLB entry
+
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">flush单个TLB项，由入参addr指定具体的TLB项</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> inline <span style="color:#0000ff;">void</span> __native_flush_tlb_single(unsigned <span style="color:#0000ff;">long</span><span style="color:#000000;"> addr)
+{
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">invlpg指令flush指定的TLB项，不考虑该TLB是否有Global标记</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+asm </span><span style="color:#0000ff;">volatile</span>(<span style="color:#800000;">"</span><span style="color:#800000;">invlpg (%0)</span><span style="color:#800000;">"</span> ::<span style="color:#800000;">"</span><span style="color:#800000;">r</span><span style="color:#800000;">"</span> (addr) : <span style="color:#800000;">"</span><span style="color:#800000;">memory</span><span style="color:#800000;">"</span><span style="color:#000000;">);
+}
+
+三、TLB lazy模式
+</span><span style="color:#800080;">1</span><span style="color:#000000;">、原理
+由于TLB刷新会带来一定的性能损失，所以，需要尽量减少使用。
+当内核中进行进程上下文切换时，有如下两种情况，实际上是不需要立刻进行TLB刷新的，可以避免应TLB刷新代理店额性能损失，Linux充分考虑了这些情况，可谓将
+相关性能进行了充分发挥：
+</span><span style="color:#800080;">1</span><span style="color:#000000;">）当从普通进程切换到内核线程时。由于Linux中，所有进程共享内核地址空间，内核线程并不使用用户态部分的地址空间，只使用内核部分，所以，当从普通进程切换到内核线程时，内核线程继续沿用prev进程的用户态地址空间，但是并不访问，其只访问内核部分。因此，这种情况下，实际不不需要立刻flush TLB。
+</span><span style="color:#800080;">2</span><span style="color:#000000;">）当新切换的next进程和prev进程使用相同的页表时，比如同一进程中的线程，共享地址空间。此时也不需要进行TLB刷新。
+对于上述的第2中情况，由于不会重新加载CR3，不会切换页表，自然也不会触发TLB刷新。
+对于上述的第1中情况，如果不进行特殊处理，实际是会在重新加载CR3时触发TLB刷新的，从而导致性能损失。TLB lazy刷新模式即针对这种情况设计。其基本原理为：
+当发生内核调度，从普通进程切换到内核线程时，则当前CPU进入TLB lazy模式，当切换到普通进程时退出lazy模式。进入TLB lazy模式后，如果其它CPU通过IPI(核间中断)通知当前CPU进行TLB flush时，在IPI的中断处理函数中，将本CPU对应的active_mm的mask中的相应位清除，因此，当其它CPU再次对该mm进行TLB flush操作时，将不会再向本CPU发送IPI，此后至本CPU退出TLB lazy模式前，本CPU将不再收到来自其它CPU的TLB flush请求，由此实现lazy，提升效率。
+值得注意的是，在进入TLB lazy模式后，当第一次收到TLB flush的IPI时，本CPU重新新加载主内核页目录swapper_pg_dir到CR3中，从而将本CPU的TLB刷新一次(不包括Global项)。如此操作的目的注意是因为担心X86架构CPU的超长指令预取，预取的指令可能会访问到需要刷新的TLB entry对应的物理内存，此时如果不flush TLB，可能会出现一致性问题。Linux内核中采用这种相对比较暴力的方式避免了这种情况，虽然看似有点暴力，实则是没有更好的其他做法的无奈之举。
+所以，在TLB lazy模式下，如果收到TLB flush请求，实际上还是会刷新一次，看起来好像不怎么lazy，但由于清除了active_mm中相应的cpu mask位，可以避免后续的TLB flush，实际还是有点效果的。
+
+</span><span style="color:#800080;">2</span><span style="color:#000000;">、代码实现
+内核中定义了相应的数据结构用于表示CPU的模式：
+
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">表示CPU的TLB模式的结构体</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">struct</span><span style="color:#000000;"> tlb_state {
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">当前CPU上的active mm，通常通过读取相应的per CPU变量获取</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">struct</span> mm_struct *<span style="color:#000000;">active_mm;
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">模式，可选状态为TLBSTATE_OK或TLBSTATE_LAZY(lazy模式)</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">int</span><span style="color:#000000;"> state;
+};
+
+可选的模式有：
+
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">TLB 非lazy模式，即正常模式</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">#define</span> TLBSTATE_OK    1
+<span style="color:#008000;">/*</span><span style="color:#008000;">TLB lazy刷新模式</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">#define</span> TLBSTATE_LAZY    2<span style="color:#000000;">
+
+同时，定义相应的per</span>-<span style="color:#000000;">CPU变量，用于存放当前CPU的TLB模式信息
+
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">定义per CPU变量，用于存放当前CPU的TLB模式信息</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+DECLARE_PER_CPU_SHARED_ALIGNED(</span><span style="color:#0000ff;">struct</span><span style="color:#000000;"> tlb_state, cpu_tlbstate);
+
+多核间通过IPI进行TLB flush的相关代码流程如下：
+flush_tlb_mm</span>-&gt;<span style="color:#000000;">
+    flush_tlb_mm_range</span>-&gt;<span style="color:#000000;">
+        flush_tlb_others</span>-&gt;<span style="color:#000000;">
+            native_flush_tlb_others</span>-&gt;<span style="color:#000000;">
+                smp_call_function_many</span>-&gt;<span style="color:#000000;">
+                    smp_call_function_single</span>-&gt;<span style="color:#000000;">
+                        generic_exec_single</span>-&gt;<span style="color:#000000;">
+                            arch_send_call_function_single_ipi</span>-&gt;<span style="color:#000000;">
+                                send_call_func_single_ipi</span>-&gt;<span style="color:#000000;">
+                                    native_send_call_func_single_ipi</span>-&gt;<span style="color:#000000;">
+最终的IPI发送通过apic的send_IPI_mask接口
+
+
+点击(此处)折叠或打开
+
+</span><span style="color:#0000ff;">void</span> native_send_call_func_single_ipi(<span style="color:#0000ff;">int</span><span style="color:#000000;"> cpu)
+{
+apic</span>-&gt;<span style="color:#000000;">send_IPI_mask(cpumask_of(cpu), CALL_FUNCTION_SINGLE_VECTOR);
+}
+
+flush_tlb_mm</span>-&gt;flush_tlb_mm_range-&gt;flush_tlb_others-&gt;<span style="color:#000000;">native_flush_tlb_others():
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;"> 通过向其它CPU发送IPI(核间中断)来使其它CPU flush 指定地址范围内的TLB</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">void</span> native_flush_tlb_others(<span style="color:#0000ff;">const</span> <span style="color:#0000ff;">struct</span> cpumask *<span style="color:#000000;">cpumask,
+</span><span style="color:#0000ff;">struct</span> mm_struct *mm, unsigned <span style="color:#0000ff;">long</span><span style="color:#000000;"> start,
+unsigned </span><span style="color:#0000ff;">long</span><span style="color:#000000;"> end)
+{
+</span><span style="color:#0000ff;">struct</span><span style="color:#000000;"> flush_tlb_info info;
+info.flush_mm </span>=<span style="color:#000000;"> mm;
+info.flush_start </span>=<span style="color:#000000;"> start;
+info.flush_end </span>=<span style="color:#000000;"> end;
+</span><span style="color:#0000ff;">if</span><span style="color:#000000;"> (is_uv_system()) {
+unsigned </span><span style="color:#0000ff;">int</span><span style="color:#000000;"> cpu;
+cpu </span>=<span style="color:#000000;"> smp_processor_id();
+cpumask </span>=<span style="color:#000000;"> uv_flush_tlb_others(cpumask, mm, start, end, cpu);
+</span><span style="color:#0000ff;">if</span><span style="color:#000000;"> (cpumask)
+smp_call_function_many(cpumask, flush_tlb_func,
+</span>&amp;info, <span style="color:#800080;">1</span><span style="color:#000000;">);
+</span><span style="color:#0000ff;">return</span><span style="color:#000000;">;
+}
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">
+ * 通过smp_call_function_many机制，向其它核发送ipi，使其执行指定的函数(flush_tlb_func)，
+ * 最后一个入参表示是否wait，此处传入1，表示需要阻塞等待
+ * 所有核都执行完成后才继续后面的流程。
+ </span><span style="color:#008000;">*/</span><span style="color:#000000;">
+smp_call_function_many(cpumask, flush_tlb_func, </span>&amp;info, <span style="color:#800080;">1</span><span style="color:#000000;">);
+}
+
+其它CPU收到IPI后执行的函数为flush_tlb_func
+flush_tlb_mm</span>-&gt;flush_tlb_mm_range-&gt;flush_tlb_others-&gt;native_flush_tlb_others-&gt;smp_call_function_many-&gt;<span style="color:#000000;">flush_tlb_func():
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">
+ * TLB flush funcation:
+ * 1) Flush the tlb entries if the cpu uses the mm that's being flushed.
+ * 2) Leave the mm if we are in the lazy tlb mode.
+ </span><span style="color:#008000;">*/</span>
+<span style="color:#008000;">/*</span><span style="color:#008000;">刷新当前CPU的TLB，如果当前处于lazy模式，则调用leave_mm</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">static</span> <span style="color:#0000ff;">void</span> flush_tlb_func(<span style="color:#0000ff;">void</span> *<span style="color:#000000;">info)
+{
+</span><span style="color:#0000ff;">struct</span> flush_tlb_info *f =<span style="color:#000000;"> info;
+inc_irq_stat(irq_tlb_count);
+</span><span style="color:#0000ff;">if</span> (f-&gt;flush_mm !=<span style="color:#000000;"> this_cpu_read(cpu_tlbstate.active_mm))
+</span><span style="color:#0000ff;">return</span><span style="color:#000000;">;
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">判断当前CPU是否处于TLB lazy模式</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">if</span> (this_cpu_read(cpu_tlbstate.state) ==<span style="color:#000000;"> TLBSTATE_OK) {
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">flush当前CPU的所有TLB项(不包括global项)</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">if</span> (f-&gt;flush_end ==<span style="color:#000000;"> TLB_FLUSH_ALL)
+local_flush_tlb();
+</span><span style="color:#0000ff;">else</span> <span style="color:#0000ff;">if</span> (!f-&gt;<span style="color:#000000;">flush_end)
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">当没有指定flush_end时，flush flush_start对应的单个TLB entry</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+__flush_tlb_single(f</span>-&gt;<span style="color:#000000;">flush_start);
+</span><span style="color:#0000ff;">else</span><span style="color:#000000;"> {
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">当指定了flush_end时，循环flush 从flush_start到flush_end的地址范围对应的所有TLB entry</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+unsigned </span><span style="color:#0000ff;">long</span><span style="color:#000000;"> addr;
+addr </span>= f-&gt;<span style="color:#000000;">flush_start;
+</span><span style="color:#0000ff;">while</span> (addr &lt; f-&gt;<span style="color:#000000;">flush_end) {
+__flush_tlb_single(addr);
+addr </span>+=<span style="color:#000000;"> PAGE_SIZE;
+}
+}
+} </span><span style="color:#0000ff;">else</span>
+<span style="color:#008000;">/*</span><span style="color:#008000;">TLB lazy模式，重新加载CR3，并清除掉当前mm中相应的cpu mask位，防止其它CPU再次向本CPU发送TLB flush的IPI</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+leave_mm(smp_processor_id());
+}
+
+flush_tlb_mm</span>-&gt;flush_tlb_mm_range-&gt;flush_tlb_others-&gt;native_flush_tlb_others-&gt;smp_call_function_many-&gt;flush_tlb_func-&gt;<span style="color:#000000;">leave_mm():
+
+点击(此处)折叠或打开
+
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">
+ * We cannot call mmdrop() because we are in interrupt context,
+ * instead update mm-&gt;cpu_vm_mask.
+ </span><span style="color:#008000;">*/</span>
+<span style="color:#008000;">/*</span><span style="color:#008000;">重新加载CR3 刷新当前CPU TLB(不包括global项)，并清除掉当前mm中相应的cpu mask位，防止其它CPU再次向本CPU发送TLB flush的IPI</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">void</span> leave_mm(<span style="color:#0000ff;">int</span><span style="color:#000000;"> cpu)
+{
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">获取当前的active_mm</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">struct</span> mm_struct *active_mm =<span style="color:#000000;"> this_cpu_read(cpu_tlbstate.active_mm);
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">Fixme:一定是lazy模式使用?</span><span style="color:#008000;">*/</span>
+<span style="color:#0000ff;">if</span> (this_cpu_read(cpu_tlbstate.state) ==<span style="color:#000000;"> TLBSTATE_OK)
+BUG();
+</span><span style="color:#0000ff;">if</span><span style="color:#000000;"> (cpumask_test_cpu(cpu, mm_cpumask(active_mm))) {
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">
+ *去除当前CPU对该当前active_mm的引用，这样的话，当其它CPU再次通过IPI请求flush TLB时，本CPU就不会收到相应的IPI，也就不会再刷新TLB了，因为这里
+ *已经刷过了，这也是lazy TLB模式的核心所在
+ </span><span style="color:#008000;">*/</span><span style="color:#000000;">
+cpumask_clear_cpu(cpu, mm_cpumask(active_mm));
+</span><span style="color:#008000;">/*</span><span style="color:#008000;">并通过重新加载cr3(主内核页目录)刷新TLB(不包括Global的TLB项)</span><span style="color:#008000;">*/</span><span style="color:#000000;">
+load_cr3(swapper_pg_dir);
+}
+}</span></pre> 
+   </div> 
+   <p>&nbsp;</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

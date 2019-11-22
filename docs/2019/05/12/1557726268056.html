@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>骚操作系列(一) « NotBeCN</title>
+  <meta name="description" content="         1.每当看到一些好的操作总会记录下来。这次看看hbase源码中的骚操作吧：   &nbsp; &nbsp;一、创建对象：   &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;如何灵活增加删除接口的实现类呢？保证使用的时候只加载一次呢？看看hbase源码如何做的 ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/1557726268056.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">骚操作系列(一)</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>1.每当看到一些好的操作总会记录下来。这次看看hbase源码中的骚操作吧：</p> 
+  <p>&nbsp; &nbsp;一、创建对象：</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;如何灵活增加删除接口的实现类呢？保证使用的时候只加载一次呢？看看hbase源码如何做的</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;1.1</p> 
+  <pre class="has">
+<code class="language-html">@InterfaceAudience.Private
+public class CompatibilitySingletonFactory extends CompatibilityFactory {
+//枚举单例实现。为啥用枚举单例不用懒加载还有什么二阶段锁之类的？
+  public static enum SingletonStorage {
+    INSTANCE;
+    private final Object lock = new Object();
+    private final Map&lt;Class, Object&gt; instances = new HashMap&lt;&gt;();
+  }
+  private static final Logger LOG = LoggerFactory.getLogger(CompatibilitySingletonFactory.class);
+
+  /**
+   * This is a static only class don't let anyone create an instance.
+   */
+  protected CompatibilitySingletonFactory() {  }
+
+  /**
+   * Get the singleton instance of Any classes defined by compatibiliy jar's
+   *
+   * @return the singleton
+   */
+  @SuppressWarnings("unchecked")
+  public static &lt;T&gt; T getInstance(Class&lt;T&gt; klass) {
+    synchronized (SingletonStorage.INSTANCE.lock) {
+      T instance = (T) SingletonStorage.INSTANCE.instances.get(klass);
+      if (instance == null) {
+        try {
+//这是啥？
+          ServiceLoader&lt;T&gt; loader = ServiceLoader.load(klass);
+          Iterator&lt;T&gt; it = loader.iterator();
+          instance = it.next();
+          if (it.hasNext()) {
+            StringBuilder msg = new StringBuilder();
+            msg.append("ServiceLoader provided more than one implementation for class: ")
+                .append(klass)
+                .append(", using implementation: ").append(instance.getClass())
+                .append(", other implementations: {");
+            while (it.hasNext()) {
+              msg.append(it.next()).append(" ");
+            }
+            msg.append("}");
+            LOG.warn(msg.toString());
+          }
+        } catch (Exception e) {
+          throw new RuntimeException(createExceptionString(klass), e);
+        } catch (Error e) {
+          throw new RuntimeException(createExceptionString(klass), e);
+        }
+
+        // If there was nothing returned and no exception then throw an exception.
+        if (instance == null) {
+          throw new RuntimeException(createExceptionString(klass));
+        }
+        SingletonStorage.INSTANCE.instances.put(klass, instance);
+      }
+      return instance;
+    }
+
+  }
+}</code></pre> 
+  <p>&nbsp;</p> 
+  <p>1.饿汉式：单例实例在类装载时就构建，急切初始化。（预先加载法）</p> 
+  <p>class Test {<br><br> &nbsp; &nbsp; &nbsp; &nbsp; public static Test instance = new Singleton2();<br> &nbsp; &nbsp; &nbsp; &nbsp; public static Test getInstance() {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;return instance;<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp;}</p> 
+  <p>优点&nbsp;<br> &nbsp;&nbsp;&nbsp; 1.线程安全&nbsp;<br> &nbsp;&nbsp;&nbsp; 2.在类加载的同时已经创建好一个静态对象，调用时反应速度快&nbsp;<br> 缺点&nbsp;<br> &nbsp;&nbsp;&nbsp; <strong>资源效率不高，可能getInstance()永远不会执行到，但执行该类的其他静态方法或者加载了该类（class.forName)</strong>，那么这个实例仍然初始化 。</p> 
+  <p>懒汉式：单例实例在第一次被使用时构建，延迟初始化。</p> 
+  <p>class Test {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;private Test() {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;}<br> &nbsp; &nbsp; &nbsp; &nbsp; public static Test instance = null;<br> &nbsp; &nbsp; &nbsp; &nbsp; public static Test getInstance() {</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;//这个地方可能同时进来多个调用方<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (instance == null) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; instance = new Singleton2();<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;return instance;<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp;}</p> 
+  <p>3.1演进一下：</p> 
+  <p>class Test {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;private Test() {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;}<br> &nbsp; &nbsp; &nbsp; &nbsp; public static Test instance = null;<br> &nbsp; &nbsp; &nbsp; &nbsp; public static Test getInstance() {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;synchronized (Test.class) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;if (instance == null) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;instance = new Test();<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;}<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;return instance;<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp;}</p> 
+  <p>太慢了，每个都要判断一下进来都有判断一下</p> 
+  <p>3.2再演进一下：</p> 
+  <p>class Test {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;private Test() {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;}<br> &nbsp; &nbsp; &nbsp; &nbsp; public static Test instance = null;<br> &nbsp; &nbsp; &nbsp; &nbsp; public static Test getInstance() {<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp; &nbsp;if (instance == null) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;synchronized (Test.class) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;if (instance == null) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;instance = new Test();<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;}<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;}<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;return instance;<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp;}</p> 
+  <p>很完美了吗？有没有坑呢？当然有，，，我们看看synchronized这个关键字，这个关键字一出来里面就可以看成是一个单线程。单线程我们要考虑<strong>as-if-serial这种东西</strong>。 就是指令的重排。这个时候不知道有没有小伙伴拿什么happenbefore的出来，有的话说明没有理解全。顺便讲一下happenbefore,讲的是线程间的可见性。happenbefore不保证无依赖的两个谁先谁后，讲的是如果A线程结果对B线程可见，A就在B的前面，没有就随便重排。B线程在哪里看呢？内存中，这又引出了java内存模型。扯远了。</p> 
+  <p>instance 可以加关键字volatile来增加内存可见性。</p> 
+  <p>4.那枚举的有什么优点，第一个安全性方面：不能通过反射来破坏了。第二个就是可以序列化。</p> 
+  <p><code class="language-html">ServiceLoader这一个类可以加载 META-INF.</code>services 文件夹下面的东西。这个文件夹下面文件可以配置接口的实现类。满满套路，使得实现类变得更加灵活。</p> 
+  <p><a href="https://blog.csdn.net/shi2huang/article/details/80308531" rel="nofollow">https://blog.csdn.net/shi2huang/article/details/80308531</a></p> 
+  <p>学会了么？</p> 
+  <p>二、Mapreduce模型，相信大家看Hadoop代码的时候总会被绕的出不来，那说明你没有去思考。来思考一下，如果你去设计你会怎么设计？</p> 
+  <p>&nbsp;&nbsp;&nbsp; 1.任何事物都是有规则或是可以描述的，不然程序开发不了。有规则就有限定，有限定就有作用域。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp; 先看输入，对于输入来说我们知道输入类型，但是我们不知道输出类型。怎么办？泛型来解决。那么就有了：</p> 
+  <pre>
+public class Mapper&lt;KEYIN, VALUEIN, KEYOUT, VALUEOUT&gt;</pre> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp; 这是一个最高层的抽象。输入输出都是抽象的，唯有一个map阶段。</p> 
+  <p>&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+  <pre>
+protected void map(KEYIN key, VALUEIN value, 
+                   Context context) throws IOException, InterruptedException {
+  context.write((KEYOUT) key, (VALUEOUT) value);
+}</pre> 
+  <p>抽象出第一个动作，传入处理，然后输出。输出环境抽象。</p> 
+  <p>来看一下</p> 
+  <pre>
+public class CellCounter extends Configured implements Tool</pre> 
+  <pre>
+先看这个：
+</pre> 
+  <pre>
+public class Configured implements Configurable {
+    private Configuration conf;
+
+    public Configured() {
+        this((Configuration)null);
+    }
+
+    public Configured(Configuration conf) {
+        this.setConf(conf);
+    }
+
+    public void setConf(Configuration conf) {
+        this.conf = conf;
+    }
+
+    public Configuration getConf() {
+        return this.conf;
+    }
+}</pre> 
+  <pre>
+@Public
+@Stable
+public interface Tool extends Configurable {
+    int run(String[] var1) throws Exception;
+}</pre> 
+  <p>为啥不把这两个接口直接合并呢？为啥要多此一举呢？</p> 
+  <p>为了将配置信息合跑的动作分开。</p> 
+  <p>既然分开为啥要继承一个配置类呢？</p> 
+  <pre>
+public static int run(Configuration conf, Tool tool, String[] args) throws Exception {
+    if (conf == null) {
+        conf = new Configuration();
+    }
+
+    GenericOptionsParser parser = new GenericOptionsParser(conf, args);
+//看过来，这里就是将这个在哪里，我需要在每个实现类里面这么写么？
+    tool.setConf(conf);
+    String[] toolArgs = parser.getRemainingArgs();
+    return tool.run(toolArgs);
+}</pre> 
+  <p>看过来同学们：</p> 
+  <p>&nbsp;Configured 有一个setConf方法，在子类继承了父类的方法。将子类传入，附带了父类的属性。</p> 
+  <p>Context类如下：</p> 
+  <pre>
+public abstract class Context
+  implements MapContext&lt;KEYIN,VALUEIN,KEYOUT,VALUEOUT&gt; {
+}</pre> 
+  <p>首先看一下MRJobConfig这个类：</p> 
+  <pre>
+/ Put all of the attribute names in here so that Job and JobContext are
+// consistent.
+public static final String INPUT_FORMAT_CLASS_ATTR = "mapreduce.job.inputformat.class";
+
+public static final String MAP_CLASS_ATTR = "mapreduce.job.map.class";
+
+public static final String MAP_OUTPUT_COLLECTOR_CLASS_ATTR
+                                = "mapreduce.job.map.output.collector.class";
+
+public static final String COMBINE_CLASS_ATTR = "mapreduce.job.combine.class";
+
+public static final String REDUCE_CLASS_ATTR = "mapreduce.job.reduce.class";
+
+public static final String OUTPUT_FORMAT_CLASS_ATTR = "mapreduce.job.outputformat.class";</pre> 
+  <p>&nbsp; 这个类定义了一些包的路径。</p> 
+  <pre>
+public interface JobContext extends MRJobConfig {
+  这个类主要定位是跑作业的操作，
+</pre> 
+  <p>&nbsp; public Configuration getConfiguration();</p> 
+  <p><br> &nbsp; public Credentials getCredentials();</p> 
+  <p><br> &nbsp; public JobID getJobID();<br> &nbsp;</p> 
+  <p>&nbsp; public int getNumReduceTasks();<br> &nbsp;</p> 
+  <p>&nbsp; public Path getWorkingDirectory() throws IOException;</p> 
+  <p><br> &nbsp; public Class&lt;?&gt; getOutputKeyClass();<br> &nbsp;</p> 
+  <p>&nbsp; public Class&lt;?&gt; getOutputValueClass();</p> 
+  <p><br> &nbsp; public Class&lt;?&gt; getMapOutputKeyClass();</p> 
+  <p><br> &nbsp; public Class&lt;?&gt; getMapOutputValueClass();</p> 
+  <p><br> &nbsp; public String getJobName();</p> 
+  <p><br> &nbsp; public Class&lt;? extends InputFormat&lt;?,?&gt;&gt; getInputFormatClass()<br> &nbsp;&nbsp;&nbsp;&nbsp; throws ClassNotFoundException;</p> 
+  <p><br> &nbsp; public Class&lt;? extends Mapper&lt;?,?,?,?&gt;&gt; getMapperClass()<br> &nbsp;&nbsp;&nbsp;&nbsp; throws ClassNotFoundException;</p> 
+  <p><br> &nbsp; public Class&lt;? extends Reducer&lt;?,?,?,?&gt;&gt; getCombinerClass()<br> &nbsp;&nbsp;&nbsp;&nbsp; throws ClassNotFoundException;</p> 
+  <p><br> &nbsp; public Class&lt;? extends Reducer&lt;?,?,?,?&gt;&gt; getReducerClass()<br> &nbsp;&nbsp;&nbsp;&nbsp; throws ClassNotFoundException;</p> 
+  <p><br> &nbsp; public Class&lt;? extends OutputFormat&lt;?,?&gt;&gt; getOutputFormatClass()<br> &nbsp;&nbsp;&nbsp;&nbsp; throws ClassNotFoundException;</p> 
+  <p>&nbsp;<br> &nbsp; public Class&lt;? extends Partitioner&lt;?,?&gt;&gt; getPartitionerClass()<br> &nbsp;&nbsp;&nbsp;&nbsp; throws ClassNotFoundException;</p> 
+  <p><br> &nbsp; public RawComparator&lt;?&gt; getSortComparator();</p> 
+  <p>&nbsp;<br> &nbsp; public String getJar();</p> 
+  <p><br> &nbsp; public RawComparator&lt;?&gt; getCombinerKeyGroupingComparator();</p> 
+  <p><br> &nbsp; public RawComparator&lt;?&gt; getGroupingComparator();<br> &nbsp;</p> 
+  <p>&nbsp; public boolean getJobSetupCleanupNeeded();<br> &nbsp;</p> 
+  <p>&nbsp; public boolean getTaskCleanupNeeded();</p> 
+  <p><br> &nbsp; public boolean getProfileEnabled();</p> 
+  <p><br> &nbsp; public String getProfileParams();</p> 
+  <p><br> &nbsp; public IntegerRanges getProfileTaskRange(boolean isMap);</p> 
+  <p><br> &nbsp; public String getUser();<br> &nbsp;</p> 
+  <p>&nbsp; public boolean getSymlink();<br> &nbsp;</p> 
+  <p>&nbsp; public Path[] getArchiveClassPaths();</p> 
+  <p>&nbsp; public URI[] getCacheArchives() throws IOException;</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp; public URI[] getCacheFiles() throws IOException;</p> 
+  <p><br> &nbsp; public Path[] getLocalCacheArchives() throws IOException;</p> 
+  <p><br> &nbsp; public Path[] getLocalCacheFiles() throws IOException;</p> 
+  <p><br> &nbsp; public Path[] getFileClassPaths();<br> &nbsp;</p> 
+  <p>&nbsp; public String[] getArchiveTimestamps();</p> 
+  <p><br> &nbsp; public String[] getFileTimestamps();</p> 
+  <p><br> &nbsp; public int getMaxMapAttempts();</p> 
+  <p>&nbsp; public int getMaxReduceAttempts();</p> 
+  <p>这些都是跑作业需要的操作。</p> 
+  <pre>
+public interface TaskAttemptContext extends JobContext, Progressable {
+</pre> 
+  <p>下一层就是task的配置信息</p> 
+  <p>配置输入输出值：</p> 
+  <pre>
+public interface TaskInputOutputContext&lt;KEYIN,VALUEIN,KEYOUT,VALUEOUT&gt; 
+       extends TaskAttemptContext {</pre> 
+  <p>&nbsp; public boolean nextKeyValue() throws IOException, InterruptedException;<br> &nbsp;<br> &nbsp; public KEYIN getCurrentKey() throws IOException, InterruptedException;</p> 
+  <p>&nbsp; public VALUEIN getCurrentValue() throws IOException, InterruptedException;</p> 
+  <p><br> &nbsp; public void write(KEYOUT key, VALUEOUT value)<br> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; throws IOException, InterruptedException;</p> 
+  <p>&nbsp; public OutputCommitter getOutputCommitter();</p> 
+  <p>&nbsp; 配置输入值：</p> 
+  <pre>
+public interface MapContext&lt;KEYIN,VALUEIN,KEYOUT,VALUEOUT&gt; 
+  extends TaskInputOutputContext&lt;KEYIN,VALUEIN,KEYOUT,VALUEOUT&gt; {
+  public InputSplit getInputSplit();
+  
+}</pre> 
+  <p>到了这里：</p> 
+  <pre>
+public abstract class Context
+  implements MapContext&lt;KEYIN,VALUEIN,KEYOUT,VALUEOUT&gt; {
+}</pre> 
+  <p>Context的继承类</p> 
+  <pre>
+WrappedMapper&lt;KEYIN, VALUEIN, KEYOUT, VALUEOUT&gt; </pre> 
+  <p>用了一个装饰者模式：</p> 
+  <pre>
+public Mapper&lt;KEYIN, VALUEIN, KEYOUT, VALUEOUT&gt;.Context
+getMapContext(MapContext&lt;KEYIN, VALUEIN, KEYOUT, VALUEOUT&gt; mapContext) {
+  return new Context(mapContext);
+}</pre> 
+  <p>传入一个map你就来实现。</p> 
+  <p>说明实现这个类那么我们就实现了上面接口的所有方法。这个类如何传入呢？</p> 
+  <pre>
+MapRunner(Context context) throws IOException, InterruptedException {
+//正常情况通过context获取
+  mapper = ReflectionUtils.newInstance(mapClass,
+      context.getConfiguration());
+  try {
+    Constructor c = context.getClass().getConstructor(
+      Mapper.class,
+      Configuration.class,
+      TaskAttemptID.class,
+      RecordReader.class,
+      RecordWriter.class,
+      OutputCommitter.class,
+      StatusReporter.class,
+      InputSplit.class);
+    c.setAccessible(true);
+    subcontext = (Context) c.newInstance(
+      mapper,
+      outer.getConfiguration(),
+      outer.getTaskAttemptID(),
+      new SubMapRecordReader(),
+      new SubMapRecordWriter(),
+      context.getOutputCommitter(),
+      new SubMapStatusReporter(),
+      outer.getInputSplit());
+  } catch (Exception e) {
+    try {
+//写一个模板，因为组合很多
+      Constructor c = Class.forName("org.apache.hadoop.mapreduce.task.MapContextImpl").getConstructor(
+        Configuration.class,
+        TaskAttemptID.class,
+        RecordReader.class,
+        RecordWriter.class,
+        OutputCommitter.class,
+        StatusReporter.class,
+        InputSplit.class);
+      c.setAccessible(true);
+//将输入塞入模板中
+      MapContext mc = (MapContext) c.newInstance(
+        outer.getConfiguration(),
+        outer.getTaskAttemptID(),
+        new SubMapRecordReader(),
+        new SubMapRecordWriter(),
+        context.getOutputCommitter(),
+        new SubMapStatusReporter(),
+        outer.getInputSplit());
+      Class&lt;?&gt; wrappedMapperClass = Class.forName("org.apache.hadoop.mapreduce.lib.map.WrappedMapper");
+      Method getMapContext = wrappedMapperClass.getMethod("getMapContext", MapContext.class);
+      subcontext = (Context) getMapContext.invoke(
+          wrappedMapperClass.getDeclaredConstructor().newInstance(), mc);
+    } catch (Exception ee) { // FindBugs: REC_CATCH_EXCEPTION
+      // rethrow as IOE
+      throw new IOException(e);
+    }
+  }
+}</pre> 
+  <p>那contex到底t从哪里来啊？一会是装饰一下，一会类来构建一下。</p> 
+  <pre>
+public void run(Context context) throws IOException, InterruptedException {
+  outer = context;
+  int numberOfThreads = getNumberOfThreads(context);
+  mapClass = getMapperClass(context);
+  if (LOG.isDebugEnabled()) {
+    LOG.debug("Configuring multithread runner to use " + numberOfThreads +
+        " threads");
+  }
+  executor = Executors.newFixedThreadPool(numberOfThreads);
+  for(int i=0; i &lt; numberOfThreads; ++i) {
+    MapRunner thread = new MapRunner(context);
+    executor.execute(thread);
+  }
+  executor.shutdown();
+  while (!executor.isTerminated()) {
+    // wait till all the threads are done
+    Thread.sleep(1000);
+  }
+}</pre> 
+  <p>看上层设计：Context类的</p> 
+  <pre>
+public void run(Context context) throws IOException, InterruptedException {
+  setup(context);
+  try {
+    while (context.nextKeyValue()) {
+      map(context.getCurrentKey(), context.getCurrentValue(), context);
+    }
+  } finally {
+    cleanup(context);
+  }
+}</pre> 
+  <p>如果调用了run方法那么就有了Context的实例。到底在哪里实例的？明天揭晓</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+  <p>&nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

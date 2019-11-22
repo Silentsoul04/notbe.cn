@@ -1,0 +1,2097 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核跟踪之syscall tracer 【转】 « NotBeCN</title>
+  <meta name="description" content="                       转自：http://blog.chinaunix.net/uid-20543183-id-1930847.html              ------------------------------------------              本文系本站原创...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/12/23/weixin_33817333_90131549.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核跟踪之syscall tracer 【转】</h1>
+    <p class="post-meta">Dec 23, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">转自：<a href="http://blog.chinaunix.net/uid-20543183-id-1930847.html" rel="nofollow">http://blog.chinaunix.net/uid-20543183-id-1930847.html</a></span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">------------------------------------------</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">本文系本站原创,欢迎转载!</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">转载请注明出处:http://ericxiao.cublog.cn/</span>
+    </div> 
+    <div>
+     <span style="font-family:'楷体';font-size:small;">------------------------------------------</span>
+    </div> 
+   </div> 
+   <div>
+    一: 前言
+   </div> 
+   <div>
+    Syscall tracer是用来跟踪系统调用的,它会检测所有系统调用的入口和出口,再将相关的信息保存到ring buffer.以下是syscall tracer的输出的一个例子:
+   </div> 
+   <div>
+    # echo syscall &gt; current_tracer
+   </div> 
+   <div>
+    # cat trace | tail
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;...&gt;-13607 [000] 29097.902910: sys_close(fd: 3)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;...&gt;-13607 [000] 29097.902912: sys_close -&gt; 0x0
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;...&gt;-13607 [000] 29097.902962: sys_fstat64(fd: 1, statbuf: bfaac95c)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;...&gt;-13607 [000] 29097.902963: sys_fstat64 -&gt; 0x0
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;...&gt;-13607 [000] 29097.902965: sys_open(filename: bfaad8f4, flags: 8000, mode: 0)
+   </div> 
+   <div>
+    从上面的信息号可以看出,有一个sys_close的系统调用,关闭的文件描述符是3(sys_close(fd: 3)
+   </div> 
+   <div>
+    ), 这个系统调用返回的是0(sys_close -&gt; 0x0).
+   </div> 
+   <div>
+    下面就从linux kernel源代码的角度来分析syscall 的相关操作. 本文分析的源代码版本基于v2.6.31-rc1,代码基本上位于kernel/trace/trace_syscalls.c中.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    二: syscall的初始化
+   </div> 
+   <div>
+    Syscall的初始化入口为:
+   </div> 
+   <div>
+    device_initcall(register_ftrace_syscalls);
+   </div> 
+   <div>
+    它的初始化函数为register_ftrace_syscalls(),代码如下:
+   </div> 
+   <div>
+    __init int register_ftrace_syscalls(void)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ret = register_ftrace_event(&amp;syscall_enter_event);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!ret) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_WARNING "event %d failed to register\n",
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; syscall_enter_event.type);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON_ONCE(1);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ret = register_ftrace_event(&amp;syscall_exit_event);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!ret) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_WARNING "event %d failed to register\n",
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; syscall_exit_event.type);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON_ONCE(1);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; return register_tracer(&amp;syscall_tracer);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    从刚开始的例子可以看出,syscall entry和syscall exit的显示方式是不相同的,这也是这个初始化函数中注册两个trace_event的原因.
+   </div> 
+   <div>
+    Trace_event的相关操作在之前分析trace框架的时候已经分析过了,这里不再赘述.具体这两个trace_event是如何显示信息的,在之后联合syscall数据的保存再做分析.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    此外,我们在初始化函数中还注册了syscall tracer,它就是今天分析的重点.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    三: syscall tracer
+   </div> 
+   <div>
+    Syscall tracer定义如下:
+   </div> 
+   <div>
+    static struct tracer syscall_tracer __read_mostly = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .name&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; = "syscall",
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .init&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = init_syscall_tracer,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .reset&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = reset_syscall_tracer,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .flags&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = &amp;syscalls_flags,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    结合trace框架的分析,在register_tracer()的时候,会进行self test,但syscall 中并没有selftest接口,说明syscall tracer在注册的时候不会有self test操作. 这是因为syscall是依赖于用户空间的系统调用,在系统初始化的时候不可能发生用户空间系统调用事件,因此,syscall在系统初始化时间是没有实际操作的.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    如果我们在用户空间当syscall设置成当前的tracer:
+   </div> 
+   <div>
+    # echo syscall &gt; current_tracer
+   </div> 
+   <div>
+    就会触发tracing_set_tracer(),结合之前的分析,在”安装”tracer的时候会调用:
+   </div> 
+   <div>
+    tracer-&gt;init().并且会创建option文件.
+   </div> 
+   <div>
+    在移除tracer的时候会调用tracer-&gt;reset().
+   </div> 
+   <div>
+    从上面的结构中可以看出,syscall没有自己的set_flag()操作,也即采用默认操作,在默认操作下,不管在任何情况下,设置或者清除任何标志都是允许的(直接返回0).
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Syscall的相关flags定义如下:
+   </div> 
+   <div>
+    static struct tracer_opt syscalls_opts[] = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; { TRACER_OPT(syscall_arg_type, TRACE_SYSCALLS_OPT_TYPES) },
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; { }
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    static struct tracer_flags syscalls_flags = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .val = 0, /* By default: no parameters types */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .opts = syscalls_opts
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    TRACER_OPT定义如下:
+   </div> 
+   <div>
+    #define TRACER_OPT(s, b)&nbsp;&nbsp;&nbsp; .name = #s, .bit = b
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    由此可见它的flags默认为0,只有一个标志,名称为”syscall_arg_type”,它的标志为:
+   </div> 
+   <div>
+    enum {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; TRACE_SYSCALLS_OPT_TYPES = 0x1,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    即占用第一位.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    在用户空间验证一下:
+   </div> 
+   <div>
+    # echo syscall &gt; current_tracer
+   </div> 
+   <div>
+    # ls options/syscall_arg_type
+   </div> 
+   <div>
+    options/syscall_arg_type
+   </div> 
+   <div>
+    # cat options/syscall_arg_type
+   </div> 
+   <div>
+    0
+   </div> 
+   <div>
+    说明已经创建了一个名为”syscall_arg_type”的文件,且初始值为0.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Syscall的reset()接口为reset_syscall_tracer(),代码如下:
+   </div> 
+   <div>
+    static void reset_syscall_tracer(struct trace_array *tr)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; stop_ftrace_syscalls();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; tracing_reset_online_cpus(tr);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    先是调用stop_ftrace_syscalls()来停止syscall的跟踪,因为这时syscall tracer已经被别的tracer替换了. 然后再是调用traing_reset_online_cpus()来清空ring buffer.以免在别的tracer没有init接口污染ring buffer(在tracing_set_tracer()中,只有tracer-&gt;init有定义的时候才会清空ring buffer).
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Stop_ftrace_syscalls()是用来停止syscall的跟踪操作,它的代码如下:
+   </div> 
+   <div>
+    void stop_ftrace_syscalls(void)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; unsigned long flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct task_struct *g, *t;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; mutex_lock(&amp;syscall_trace_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /* There are perhaps still some users */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (--refcount)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto unlock;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; read_lock_irqsave(&amp;tasklist_lock, flags);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; do_each_thread(g, t) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; clear_tsk_thread_flag(t, TIF_SYSCALL_FTRACE);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; } while_each_thread(g, t);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; read_unlock_irqrestore(&amp;tasklist_lock, flags);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    unlock:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; mutex_unlock(&amp;syscall_trace_lock);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    syscall_trace_lock锁用来保护设置进程flag,以及操作计数,以保证其串行化.
+   </div> 
+   <div>
+    在这里设置refcount是为了避免多次重复的操作,比如说,syscall已经是stop状态了,但又有一个stop操作过来了,这时就没必须再次stop syscall.
+   </div> 
+   <div>
+    然后持有进程的保护读写自旋锁,清除掉所有进程的TIF_SYSCALL_FTRACE标志.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Syscall的init接口为init_syscall_tracer(),代码如下:
+   </div> 
+   <div>
+    static int init_syscall_tracer(struct trace_array *tr)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; start_ftrace_syscalls();
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; return 0;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    Start_ftrace_syscalls代码如下:
+   </div> 
+   <div>
+    void start_ftrace_syscalls(void)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; unsigned long flags;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct task_struct *g, *t;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; mutex_lock(&amp;syscall_trace_lock);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /* Don't enable the flag on the tasks twice */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (++refcount != 1)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto unlock;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; arch_init_ftrace_syscalls();
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; read_lock_irqsave(&amp;tasklist_lock, flags);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; do_each_thread(g, t) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; set_tsk_thread_flag(t, TIF_SYSCALL_FTRACE);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; } while_each_thread(g, t);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; read_unlock_irqrestore(&amp;tasklist_lock, flags);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    unlock:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; mutex_unlock(&amp;syscall_trace_lock);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    代码很简单,start_ftrace_syscalls()和stop_ftrace_syscall()做的是相反的事情,即为每个进程设置TIF_SYSCALL_FTRACE标志.
+   </div> 
+   <div>
+    注意到,这里还有一个新的操作,即arch_init_ftrace_syscalls(),这个函数用来初始化平台的的syscalls,在x86平台,该函数如下:
+   </div> 
+   <div>
+    void arch_init_ftrace_syscalls(void)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int i;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_metadata *meta;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; unsigned long **psys_syscall_table = &amp;sys_call_table;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; static atomic_t refs;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (atomic_inc_return(&amp;refs) != 1)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto end;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; syscalls_metadata = kzalloc(sizeof(*syscalls_metadata) *
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; FTRACE_SYSCALL_MAX, GFP_KERNEL);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!syscalls_metadata) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WARN_ON(1);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; for (i = 0; i &lt; FTRACE_SYSCALL_MAX; i++) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; meta = find_syscall_meta(psys_syscall_table[i]);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; syscalls_metadata[i] = meta;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /* Paranoid: avoid overflow */
+   </div> 
+   <div>
+    end:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; atomic_dec(&amp;refs);
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    首先,refs是局部静态变量,用来防止过多的初始化,从上面的代码可以看出,进入函数的时候,该计数+1,如果失败,才会减计数.
+   </div> 
+   <div>
+    那是否在有些情况下,该函数会初始化失败? 所以需要多次调用,直到它成功为止?
+   </div> 
+   <div>
+    先来看struct syscall_metadata的定义,它保存的是系统调用的元数据,如下:
+   </div> 
+   <div>
+    struct syscall_metadata {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; const char&nbsp; *name;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp; nb_args;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; const char&nbsp; **types;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; const char&nbsp; **args;
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    这些保存的元数包括: 系统调用的名字(name),参数个数(nb_args),系统调用的参数类型(types),以及系统调用的参数名字(args).
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    从上面的代码可以看到,syscall tracer所能支持的最大系统调用数是FTRACE_SYSCALL_MAX.
+   </div> 
+   <div>
+    首先为syscalls_metadata分配空间,然后调用find_syscall_meta()找到该系统调用对应的元数据.
+   </div> 
+   <div>
+    find_syscall_meta()接受的参数是系统调用表中对应的处理函数,代码如下:
+   </div> 
+   <div>
+    static struct syscall_metadata *find_syscall_meta(unsigned long *syscall)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_metadata *start;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_metadata *stop;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; char str[KSYM_SYMBOL_LEN];
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; start = (struct syscall_metadata *)__start_syscalls_metadata;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; stop = (struct syscall_metadata *)__stop_syscalls_metadata;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; kallsyms_lookup((unsigned long) syscall, NULL, NULL, NULL, str);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; for ( ; start &lt; stop; start++) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (start-&gt;name &amp;&amp; !strcmp(start-&gt;name, str))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return start;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; return NULL;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    从此可见,所有系统调用的元数据都会保存在从__start_syscalls_metadata到__stop_syscalls_metadata的区域.这个区域到底是怎么形成的呢?
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    从vmlinux.lds.h中可以看到,有它的相关信息:
+   </div> 
+   <div>
+    #define TRACE_SYSCALLS() VMLINUX_SYMBOL(__start_syscalls_metadata) = .; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;*(__syscalls_metadata)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;VMLINUX_SYMBOL(__stop_syscalls_metadata) = .;
+   </div> 
+   <div>
+    那就是说,他们表示的是__syscalls_metadata链接段的部份,所以只需要找到链接到这段的数据即可.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    我们还是从系统调用的定义开始,有两种情况,(下面的分析都是假设已经配置了syscall tracer的编译宏:
+    <span style="font-size:medium;">&nbsp;</span>CONFIG_FTRACE_SYSCALLS):
+   </div> 
+   <div>
+    1: 系统调用不带参数
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; 这种情况下,是以SYSCALL_DEFINE0()定义的,这类系统调用有getpid()之类,它的定义如下:
+   </div> 
+   <div>
+    #define SYSCALL_DEFINE0(sname)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; static const struct syscall_metadata __used&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp; __attribute__((__aligned__(4)))&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp; __attribute__((section("__syscalls_metadata")))&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp; __syscall_meta_##sname = {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .name &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = "sys_"#sname,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .nb_args &nbsp;&nbsp; = 0,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; };&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; asmlinkage long sys_##sname(void)
+   </div> 
+   <div>
+    从上面可以看出,这类系统调用的syscall_metadata数据中只有系统调用的名称和参数个数(0).例如,如果是getpid系统调用,上面的数据为:
+   </div> 
+   <div>
+    __syscall_meta_get_pid = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .name = “sys_getpid”,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .nb_args = 0,
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    2: 如果系统调用带有参数
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; 这种情况下,通常是由SYSCALL_DEFINE1, SYSCALL_DEFINE2,……所定义,但归根到底,它们都是由SYSCALL_DEFINEx扩展来的,如下示:
+   </div> 
+   <div>
+    #define SYSCALL_DEFINE1(name, ...) SYSCALL_DEFINEx(1, _##name, __VA_ARGS__)
+   </div> 
+   <div>
+    #define SYSCALL_DEFINE2(name, ...) SYSCALL_DEFINEx(2, _##name, __VA_ARGS__)
+   </div> 
+   <div>
+    ……
+   </div> 
+   <div>
+    ……
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    来看一下SYSCALL_DEFINEx的定义:
+   </div> 
+   <div>
+    #define SYSCALL_DEFINEx(x, sname, ...)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; static const char *types_##sname[] = {&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __SC_STR_TDECL##x(__VA_ARGS__)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; };&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; static const char *args_##sname[] = {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __SC_STR_ADECL##x(__VA_ARGS__)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; };&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; SYSCALL_METADATA(sname, x);&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; __SYSCALL_DEFINEx(x, sname, __VA_ARGS__)
+   </div> 
+   <div>
+    上面的type_###sname就是类型数组,args###sname是参数名称数组,这些都是在struct syscall_metadata的相关部份.
+   </div> 
+   <div>
+    SYSCALL_METADATA()定义如下:
+   </div> 
+   <div>
+    #define SYSCALL_METADATA(sname, nb)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; static const struct syscall_metadata __used&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp; __attribute__((__aligned__(4)))&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp; __attribute__((section("__syscalls_metadata")))&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp; __syscall_meta_##sname = {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .name &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = "sys"#sname,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .nb_args &nbsp;&nbsp; = nb,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .types&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = types_##sname,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .args&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = args_##sname,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    这个赋值了它的调用名称,参数个数,它的参数类型和参数名称分别指向了types_###sname, args###sname.
+   </div> 
+   <div>
+    这两个数组中的数据是怎么样形成的呢? 问题就回到了__SC_STR_TDECL##x(__VA_ARGS__)和__SC_STR_ADECL##x(__VA_ARGS__)是怎么样实现的.
+   </div> 
+   <div>
+    对于__SC_STR_TDECL##x(__VA_ARGS__),如下示:
+   </div> 
+   <div>
+    #define __SC_STR_TDECL1(t, a)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; #t
+   </div> 
+   <div>
+    #define __SC_STR_TDECL2(t, a, ...)&nbsp; #t, __SC_STR_TDECL1(__VA_ARGS__)
+   </div> 
+   <div>
+    #define __SC_STR_TDECL3(t, a, ...)&nbsp; #t, __SC_STR_TDECL2(__VA_ARGS__)
+   </div> 
+   <div>
+    #define __SC_STR_TDECL4(t, a, ...)&nbsp; #t, __SC_STR_TDECL3(__VA_ARGS__)
+   </div> 
+   <div>
+    #define __SC_STR_TDECL5(t, a, ...)&nbsp; #t, __SC_STR_TDECL4(__VA_ARGS__)
+   </div> 
+   <div>
+    #define __SC_STR_TDECL6(t, a, ...)&nbsp; #t, __SC_STR_TDECL5(__VA_ARGS__)
+   </div> 
+   <div>
+    该宏定义是一个递归定义,也就是说,它是取参数列表的第一个参数,然后跳过一个参数,再取......
+   </div> 
+   <div>
+    我们以sendto系统调用为例进行分析:
+   </div> 
+   <div>
+    它的定义为:
+   </div> 
+   <div>
+    SYSCALL_DEFINE6(sendto, int, fd, void __user *, buff, size_t, len,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; unsigned, flags, struct sockaddr __user *, addr,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; int, addr_len)
+   </div> 
+   <div>
+    因为__SC_STR_TDECL##x()是先取第一个参数,然后隔一个参数再取一个参数,因此,上面的例子就成了:
+   </div> 
+   <div>
+    __SC_STR_TDECL6 = int, void __user*, size_t, unsigned, struct sockaddr, int
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    __SC_STR_ADECL##x的定义如下:
+   </div> 
+   <div>
+    #define __SC_STR_ADECL1(t, a)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; #a
+   </div> 
+   <div>
+    #define __SC_STR_ADECL2(t, a, ...)&nbsp; #a, __SC_STR_ADECL1(__VA_ARGS__)
+   </div> 
+   <div>
+    #define __SC_STR_ADECL3(t, a, ...)&nbsp; #a, __SC_STR_ADECL2(__VA_ARGS__)
+   </div> 
+   <div>
+    #define __SC_STR_ADECL4(t, a, ...)&nbsp; #a, __SC_STR_ADECL3(__VA_ARGS__)
+   </div> 
+   <div>
+    #define __SC_STR_ADECL5(t, a, ...)&nbsp; #a, __SC_STR_ADECL4(__VA_ARGS__)
+   </div> 
+   <div>
+    #define __SC_STR_ADECL6(t, a, ...)&nbsp; #a, __SC_STR_ADECL5(__VA_ARGS__)
+   </div> 
+   <div>
+    它跟__SC_STR_TDECL##x相反,它是先取第二个参数,然后隔一参数再取.对于sendto来说,就是这样子的:
+   </div> 
+   <div>
+    __SC_STR_ ADECL6 = fd, buff, size_t, len, flags, addr, addr_len
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    到这里,终于水落石出了,我们对struct syscall_metadata的数据组织应该很清楚了.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    Syscall的相关操作接口,到这就分析完了,下面我们来分析一下,syscall到底是怎样去跟踪的.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    四: syscall的tracer原理
+   </div> 
+   <div>
+    接下来看一下syscall的相关执行流,在arch/x86/kernel/entry_32.S中:
+   </div> 
+   <div>
+    ENTRY(system_call)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; RING0_INT_FRAME&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; # can't unwind into user space anyway
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*将系统调用号入栈*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; pushl %eax&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; # save orig_eax
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; CFI_ADJUST_CFA_OFFSET 4
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*保存寄存器环境*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; SAVE_ALL
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*取得当前进程的thread_info并将其存放到ebp中*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; GET_THREAD_INFO(%ebp)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; # system call tracing in operation / emulation
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*检查thread_info标志中是否包含_TIF_WORK_SYSCALL_ENTRY
+   </div> 
+   <div>
+    *中的标志,如有包含,此跳转到syscall_trace_entry
+   </div> 
+   <div>
+    */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; testl $_TIF_WORK_SYSCALL_ENTRY,TI_flags(%ebp)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; jnz syscall_trace_entry
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*如果系统调用号比最大的允许调用号还要大,非法情况,跳转到syscall_badsys*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; cmpl $(nr_syscalls), %eax
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; jae syscall_badsys
+   </div> 
+   <div>
+    syscall_call:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*调用对应的系统调用函数*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; call *sys_call_table(,%eax,4)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*将返回值存放到eax*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; movl %eax,PT_EAX(%esp)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; # store the return value
+   </div> 
+   <div>
+    syscall_exit:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; LOCKDEP_SYS_EXIT
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; DISABLE_INTERRUPTS(CLBR_ANY)&nbsp;&nbsp;&nbsp; # make sure we don't miss an interrupt
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; # setting need_resched or sigpending
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; # between sampling and the iret
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; TRACE_IRQS_OFF
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*将thread_info的标志位存放到ecx*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; movl TI_flags(%ebp), %ecx
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*判断标志位中是否含有_TIF_ALLWORK_MASK中的标志,如果有,
+   </div> 
+   <div>
+    *跳转到syscall_exit_work
+   </div> 
+   <div>
+    */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; testl $_TIF_ALLWORK_MASK, %ecx&nbsp; # current-&gt;work
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; jne syscall_exit_work
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ......
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．.．．．．
+   </div> 
+   <div>
+    _TIF_WORK_SYSCALL_ENTRY 的定义如下:
+   </div> 
+   <div>
+    #define _TIF_WORK_SYSCALL_ENTRY \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; (_TIF_SYSCALL_TRACE | _TIF_SYSCALL_EMU | _TIF_SYSCALL_FTRACE |&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp;_TIF_SYSCALL_AUDIT | _TIF_SECCOMP | _TIF_SINGLESTEP)
+   </div> 
+   <div>
+    应该会注意到,里面的标志中就有我们在前面分析中涉及到的
+   </div> 
+   <div>
+    TIF_SYSCALL_FTRACE(_TIF_SYSCALL_FTRACE&nbsp; (1 &lt;&lt; TIF_SYSCALL_FTRACE))
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    _TIF_ALLWORK_MASK定义如下:
+   </div> 
+   <div>
+    #define _TIF_ALLWORK_MASK ((0x0000FFFF &amp; ~_TIF_SECCOMP) | _TIF_SYSCALL_FTRACE)
+   </div> 
+   <div>
+    如果也有_TIF_SYSCALL_FTRACE标志.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    那也就是说,syscall tracer如果被启动,在进入到syscall的时候,会跳转至syscall_trace_entry().在退出syscall的时候会跳转到syscall_exit_work().
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    先来看syscall_trace_entry,如下:
+   </div> 
+   <div>
+    syscall_trace_entry:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*默认将返回值置为-ENOSYS */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; movl $-ENOSYS,PT_EAX(%esp)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*将esp copy到eax.这是因为syscall_trace_entry是前三个参数用寄存器传递的
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp;*它的第一个参数放置在eax中,也就是当前的esp
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp;*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; movl %esp, %eax
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*调用sycall_trace_enter*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; call syscall_trace_enter
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /* What it returned is what we'll actually use.&nbsp; */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /* syscall_trace_enter()会返回实际所用的系统调用号,出错返回负值*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; cmpl $(nr_syscalls), %eax
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; jnae syscall_call
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; jmp syscall_exit
+   </div> 
+   <div>
+    END(syscall_trace_entry)
+   </div> 
+   <div>
+    也就是说,在进行实际的系统调用前,流程会先转入到syscall_trace_enter()进行判断.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    syscall_exit_work定义如下:
+   </div> 
+   <div>
+    syscall_exit_work:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*如果不包含_TIF_WORK_SYSCALL_EXIT 中的标志,会跳转到work_pending*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; testl $_TIF_WORK_SYSCALL_EXIT, %ecx
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; jz work_pending
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; TRACE_IRQS_ON
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ENABLE_INTERRUPTS(CLBR_ANY) # could let syscall_trace_leave() call
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; # schedule() instead
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*将第一个参数放入到eax中,再调用syscall_trace_leave()*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; movl %esp, %eax
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; call syscall_trace_leave
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; jmp resume_userspace
+   </div> 
+   <div>
+    END(syscall_exit_work)
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    又看到了一个标志集: _TIF_WORK_SYSCALL_EXIT, 定义如下:
+   </div> 
+   <div>
+    #define _TIF_WORK_SYSCALL_EXIT&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; (_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | _TIF_SINGLESTEP |&nbsp;&nbsp;&nbsp; \
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp;_TIF_SYSCALL_FTRACE)
+   </div> 
+   <div>
+    注意到了,里面也会包含_TIF_SYSCALL_FTRACE, 也就是说,在退出系统调用前,如果syscall tracer被打开,会先转入到syscall_trace_leave()中.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    下面分两个部份来分析,一个部份是syscall entry操作,一个是syscall exit操作.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    4.1: syscall entry分析:
+   </div> 
+   <div>
+    从上面的分析可得到,在启用syscall tracer的时候,进行实际的系统调用之前,会先调用syscall_trace_enter(), 代码片段如下:
+   </div> 
+   <div>
+    asmregparm long syscall_trace_enter(struct pt_regs *regs)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．．．．．
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．．．．．
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (unlikely(test_thread_flag(TIF_SYSCALL_FTRACE)))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ftrace_syscall_enter(regs);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．．．．．
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．．．．．
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    也就是说,流程会转入到ftrace_syscall_enter(),该函数代码如下:
+   </div> 
+   <div>
+    void ftrace_syscall_enter(struct pt_regs *regs)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_trace_enter *entry;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_metadata *sys_data;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int size;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int syscall_nr;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; syscall_nr = syscall_get_nr(current, regs);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; sys_data = syscall_nr_to_meta(syscall_nr);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!sys_data)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; size = sizeof(*entry) + sizeof(unsigned long) * sys_data-&gt;nb_args;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; event = trace_current_buffer_lock_reserve(TRACE_SYSCALL_ENTER, size,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 0, 0);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!event)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; entry = ring_buffer_event_data(event);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; entry-&gt;nr = syscall_nr;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; syscall_get_arguments(current, regs, 0, sys_data-&gt;nb_args, entry-&gt;args);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; trace_current_buffer_unlock_commit(event, 0, 0);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; trace_wake_up();
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    该函数就是把系统调用的相关信息保存下来罢了.
+   </div> 
+   <div>
+    首先,调有syscall_get_nr()取得系统调用号,其实它就是取regs-&gt;orig_ax.因为在用户空间进行系统调用的时候,系统调用号是保存在eax寄存器中的.
+   </div> 
+   <div>
+    然后调用syscall_nr_to_meta()取得从该系统调用号对应的syscall_metadata, 综合我们在上面的分析,其实它就是在syscalls_metadata[]数组中的对应项.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    我们先来看一下syscall tracer entry的数据组织,它的数据是存放在struct syscall_trace_enter中的,该结构中下示:
+   </div> 
+   <div>
+    struct syscall_trace_enter {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct trace_entry&nbsp; ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; nr;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; args[];
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    Nr就是系统调用号,&nbsp;argsargs就是参数值数组.
+   </div> 
+   <div>
+    综合上面的分析,可得知,nr系统调用对应的参数个数是sys_data-&gt;
+    <span style="font-family:'Times New Roman';font-size:medium;">&nbsp;</span>nb_args,因此它需要分配的长度是:
+   </div> 
+   <div>
+    Sizeof(struct syscall_trace_enter) + sys_data-&gt;nb_args*sizeof(unsigned long)
+   </div> 
+   <div>
+    然后就是一个具体取参数的过程,它是调用syscall_get_arguments()来完成的,在x86 32位平台上,代码如下:
+   </div> 
+   <div>
+    static inline void syscall_get_arguments(struct task_struct *task,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;struct pt_regs *regs,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;unsigned int i, unsigned int n,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;unsigned long *args)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; BUG_ON(i + n &gt; 6);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; memcpy(args, ®s-&gt;bx + i, n * sizeof(args[0]));
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    参数的含义为:
+   </div> 
+   <div>
+    Task: 当前进程
+   </div> 
+   <div>
+    Regs: 寄存器列表
+   </div> 
+   <div>
+    i,n: 从第i个系统调用参数开始,连续取n项
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    上面的函数很好理解,因为系统调用时,参数是放在ebx, ecx,edx ……等寄存器中,在SAVE_ALL的时候把这些寄存器安排在了一次,也就是在regs-&gt;bx开始的部份.
+   </div> 
+   <div>
+    然后再提交数据,并调用trace_wake_up()来唤醒pipe_read操作.
+   </div> 
+   <div>
+    疑问,在trace_current_buffer_unlock_commit()也会有一次唤醒,这里的trace_wake_up()是否可以去掉?
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    此外,从上面的代码中可以看出:
+   </div> 
+   <div>
+    1: syscall tracer entry没有去跟踪CPU flags和preempt_count等信息.
+   </div> 
+   <div>
+    2: syscall tracer entry写入的消息type为TRACE_SYSCALL_ENTER
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    4.2: syscall exit分析
+   </div> 
+   <div>
+    在上面的分析中,提到过,在系统调用退出之前会调用syscall_trace_leave(),该函数代码段如下:
+   </div> 
+   <div>
+    asmregparm void syscall_trace_leave(struct pt_regs *regs)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．．．．．
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．．．．．
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (unlikely(test_thread_flag(TIF_SYSCALL_FTRACE)))
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ftrace_syscall_exit(regs);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．．．．．
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ．．．．．．
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    由此可见,流程会转入到ftrace_syscall_exit(),代码如下:
+   </div> 
+   <div>
+    void ftrace_syscall_exit(struct pt_regs *regs)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_trace_exit *entry;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_metadata *sys_data;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct ring_buffer_event *event;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int syscall_nr;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; syscall_nr = syscall_get_nr(current, regs);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; sys_data = syscall_nr_to_meta(syscall_nr);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!sys_data)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; event = trace_current_buffer_lock_reserve(TRACE_SYSCALL_EXIT,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; sizeof(*entry), 0, 0);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!event)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; entry = ring_buffer_event_data(event);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; entry-&gt;nr = syscall_nr;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; entry-&gt;ret = syscall_get_return_value(current, regs);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; trace_current_buffer_unlock_commit(event, 0, 0);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; trace_wake_up();
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这个过程跟syscall tracer entry大部份都一样,不同的是,这里的数据组织是不一样的,这种情况下,数织组织是放在struct syscall_trace_exit中的:
+   </div> 
+   <div>
+    struct syscall_trace_exit {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct trace_entry&nbsp; ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; nr;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret;
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    Nr是系统调用号,ret是系统调用的返回值.
+   </div> 
+   <div>
+    系统调用的返回值很好取,它就是存放在reg-&gt;ax中.
+   </div> 
+   <div>
+    另外,它的数据type为TRACE_SYSCALL_EXIT.
+   </div> 
+   <div>
+    此外,其它操作都跟ftrace_syscall_enter()中是一样的,这里就不做重复分析.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    五: syscall tracer的数据显示
+   </div> 
+   <div>
+    在实始化的时候,我们看到它注册了两种trace_event,现在是到分析它们的时候了.他们的定义如下:
+   </div> 
+   <div>
+    static struct trace_event syscall_enter_event = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .type&nbsp;&nbsp; &nbsp;&nbsp; = TRACE_SYSCALL_ENTER,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .trace&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = print_syscall_enter,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    static struct trace_event syscall_exit_event = {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .type&nbsp;&nbsp; &nbsp;&nbsp; = TRACE_SYSCALL_EXIT,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; .trace&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = print_syscall_exit,
+   </div> 
+   <div>
+    };
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    一个是用来输出syscall entry信息的,另一个是用来输出syscall exit 信息的.
+   </div> 
+   <div>
+    先来看syscall entry信息的输出.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    5.1: sycall entry信息的输出
+   </div> 
+   <div>
+    它的输了操作是在print_syscall_enter()中完成的,代码如下:
+   </div> 
+   <div>
+    enum print_line_t
+   </div> 
+   <div>
+    print_syscall_enter(struct trace_iterator *iter, int flags)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct trace_seq *s = &amp;iter-&gt;seq;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct trace_entry *ent = iter-&gt;ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_trace_enter *trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_metadata *entry;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int i, ret, syscall;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*将ent转换成 struct trace_entry*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; trace_assign_type(trace, ent);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*取得系统调用号*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; syscall = trace-&gt;nr;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*取得该系统调用号对应的syscall_metadata*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; entry = syscall_nr_to_meta(syscall);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!entry)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; goto end;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*显示”系统调用名称(“*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ret = trace_seq_printf(s, "%s(", entry-&gt;name);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*循环输出每个参数的信息*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; for (i = 0; i &lt; entry-&gt;nb_args; i++) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* parameter types */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*如果设置了TRACE_SYSCALLS_OPT_TYPES 标志,就需要输出系统
+   </div> 
+   <div>
+    *调用参数的类型,这些信息都是保存在syscall_metadata 中的
+   </div> 
+   <div>
+    */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (syscalls_flags.val &amp; TRACE_SYSCALLS_OPT_TYPES) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = trace_seq_printf(s, "%s ", entry-&gt;types[i]);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* parameter values */
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; /*输出参数的名称和参数的值,如果是最后一个参数,附加”)”,否则
+   </div> 
+   <div>
+    *附加”,”*/
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ret = trace_seq_printf(s, "%s: %lx%s ", entry-&gt;args[i],
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace-&gt;args[i],
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; i == entry-&gt;nb_args - 1 ? ")" : ",");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; /*末尾输出”/n”*/
+   </div> 
+   <div>
+    end:
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; trace_seq_printf(s, "\n");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; return TRACE_TYPE_HANDLED;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这个函数比较简单,对照代码中的注释应该很容易看懂,这里就不加详细分析了.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    5.2: syscall exit信息的输出
+   </div> 
+   <div>
+    对应的接口为print_syscall_exit().代码如下:
+   </div> 
+   <div>
+    enum print_line_t
+   </div> 
+   <div>
+    print_syscall_exit(struct trace_iterator *iter, int flags)
+   </div> 
+   <div>
+    {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct trace_seq *s = &amp;iter-&gt;seq;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct trace_entry *ent = iter-&gt;ent;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_trace_exit *trace;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int syscall;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; struct syscall_metadata *entry;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; int ret;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; trace_assign_type(trace, ent);
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; syscall = trace-&gt;nr;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; entry = syscall_nr_to_meta(syscall);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!entry) {
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace_seq_printf(s, "\n");
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_HANDLED;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; }
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; ret = trace_seq_printf(s, "%s -&gt; 0x%lx\n", entry-&gt;name,
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; trace-&gt;ret);
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; if (!ret)
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return TRACE_TYPE_PARTIAL_LINE;
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    &nbsp;&nbsp;&nbsp; return TRACE_TYPE_HANDLED;
+   </div> 
+   <div>
+    }
+   </div> 
+   <div>
+    这个函数也很简单,它就是输出”系统调用名称 -&gt; 返回值”.
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    六: 小结
+   </div> 
+   <div>
+    总的来说,syscall tracer代码比较清晰, 是一个极容易理解的tracer, 以它为起点分析tracer, 对于理顺前面的框架分析是很有帮助的.
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

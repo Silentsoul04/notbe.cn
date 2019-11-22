@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Netty系列3-BIO、AIO、NIO « NotBeCN</title>
+  <meta name="description" content="                   客户端和服务端通信本质上就是服务端监听端口，客户端发起连接请求，通过三次握手连接，如果连接成功建立，双方就可以通过套接字socket进行通信。 根据通信实现方式的不同又分为BIO、AIO、NIO三种。   1.BIO   BIO是同步阻塞模型。通常由一个Acceptor线程监...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/11/huanshirenjian_90116331.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Netty系列3-BIO、AIO、NIO</h1>
+    <p class="post-meta">May 11, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <p>客户端和服务端通信本质上就是服务端监听端口，客户端发起连接请求，通过三次握手连接，如果连接成功建立，双方就可以通过套接字socket进行通信。<br> 根据通信实现方式的不同又分为BIO、AIO、NIO三种。</p> 
+  <h2><a id="1BIO_2"></a>1.BIO</h2> 
+  <p>BIO是同步阻塞模型。通常由一个Acceptor线程监听客户端的连接，接收到连接请求后为每个客户端都创建一个新线程进行处理，最后将响应通过输出流返回给客户端，线程销毁。<br> BIO最大的缺点是并发访问量增加后，服务端的线程个数和客户端并发访问数呈1:1的关系，随着线程数量快速膨胀，系统性能将急剧下降，当线程达到一定数量，系统宕机。<br> 为了改进这个问题，提出了对线程使用线程池进行管理，这种通常被称为伪异步I/O模型，并没有解决问题。当大量高并发的时候，尤其是大量长连接或者读取数据较慢的时候，线程数量还是急剧增加。使用固定数量线程池，可以解决线程增加的问题，但会导致大量用户线程等待，系统有瓶颈，不友好。<br> <strong>服务端核心代</strong>：</p> 
+  <pre><code> 		  server = new ServerSocket(8080);
+            while(true){
+                Socket socket= server.accept();
+                //当有新的客户端接入时，投入线程池
+                executorService.execute(new BioServerHandler(socket));
+            }
+</code></pre> 
+  <pre><code>public class BioServerHandler implements Runnable{
+    private Socket socket;
+    public BioServerHandler(Socket socket) {
+        this.socket = socket;
+    }
+    public void run() {
+        try(
+            BufferedReader in = new BufferedReader(
+                new InputStreamReader(socket.getInputStream()));
+            PrintWriter out = new PrintWriter(socket.getOutputStream(),
+                    true)){
+            String message;
+            String result;
+            while((message = in.readLine())!=null){
+                result = response(message);
+                out.println(result);
+            }
+        }catch(Exception e){
+            e.printStackTrace();
+        }finally{
+            if(socket != null){
+                try {
+                    socket.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                socket = null;
+            }
+        }
+    }
+
+}
+</code></pre> 
+  <p><strong>客户端核心代码</strong>：</p> 
+  <pre><code>	 Socket socket =  new Socket(DEFAULT_SERVER_IP,DEFAULT_PORT);
+    pw = new PrintWriter(socket.getOutputStream());
+  	 pw.println(“hello”);
+      pw.flush();
+</code></pre> 
+  <h2><a id="2AIO_59"></a>2.AIO</h2> 
+  <p>AIO是异步非阻塞通信模型，是java在1.7后提供的。本质上就是通过回调函数，直接上代码。<br> <strong>服务端核心代码</strong>：</p> 
+  <pre><code>public class AioServerHandler implements Runnable {
+
+    /*异步通信通道*/
+    public AsynchronousServerSocketChannel channel;
+
+    public AioServerHandler(int port) {
+        try {
+            //创建服务端通道
+            channel = AsynchronousServerSocketChannel.open();
+            //绑定端口
+            channel.bind(new InetSocketAddress(8080));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+    @Override
+    public void run() {
+    	//accept函数有两个参数，第一个是传递给回调函数的附件，第二个就是回调函数，回调函数需要实现 				      	     //CompletionHandler&lt;AsynchronousSocketChannel, ? super AioServerHandler&gt;
+        //CompletionHandler内部有两个方法，completed函数在连接成功后调用，failed在失败时候调用，两个方法的参数			   //都有两个，第一个代表IO操作完成后返回的结果，第二个参数就是我们的附件
+        channel.accept(this,new AioAcceptHandler());
+        try {
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+}
+</code></pre> 
+  <pre><code>public class AioAcceptHandler
+        implements CompletionHandler&lt;AsynchronousSocketChannel,
+        AioServerHandler&gt; {
+    @Override
+    //第一个参数是代码连接成功后返回的结果，第二个就是我们传递的附件
+    public void completed(AsynchronousSocketChannel channel,
+                          AioServerHandler serverHandler) {
+        //重新注册监听，让别的客户端也可以连接
+        serverHandler.channel.accept(serverHandler,this);
+        ByteBuffer readBuffer = ByteBuffer.allocate(1024);
+        //这个是读事件发生的时候，又有另外一个回调，读事件的回调函数不贴了
+        channel.read(readBuffer,readBuffer,
+                new AioReadHandler(channel));
+
+    }
+
+    @Override
+    //第一个参数是连接失败返回的结果，这里是个异常
+    //第二个参数是我们传递的附件
+    public void failed(Throwable exc, AioServerHandler serverHandler) {
+        exc.printStackTrace();
+        serverHandler.latch.countDown();
+    }
+</code></pre> 
+  <p>客户端核心代码：</p> 
+  <pre><code>public class AioClientHandler
+        implements CompletionHandler&lt;Void,AioClientHandler&gt;,Runnable {
+
+    private AsynchronousSocketChannel clientChannel;
+    private String host;
+    private int port;
+
+    public AioClientHandler(String host, int port) {
+        this.host = host;
+        this.port = port;
+        try {
+            //创建客户端通道
+            clientChannel = AsynchronousSocketChannel.open();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+
+    @Override
+    public void run() {
+      //这里的连接成功后回调函数就是自己
+        clientChannel.connect(new InetSocketAddress(host,port),
+                        null,this);
+        try {
+            clientChannel.close();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    //连接成功回调方法
+    @Override
+    public void completed(Void result, AioClientHandler attachment) {
+    }
+
+    //连接失败回调方法
+    @Override
+    public void failed(Throwable exc, AioClientHandler attachment) {
+   
+    }
+
+    }
+
+</code></pre> 
+  <h2><a id="3NIO_168"></a>3.NIO</h2> 
+  <h2><a id="31_Reactor_169"></a>3.1 Reactor模式</h2> 
+  <p>说起NIO不得不先说下Reactor模式。<br> （1）Reactor模式定义<br> Reactor模式是事件驱动模型，有一个或多个并发输入源，一个Service Handler和多个Request Handlers，Service Handler同步的将输入的请求（Event）以多路复用的方式，并且根据Event类型分发给相应的Request Handler。<br> （2）Reactor模式元素</p> 
+  <ul> 
+   <li>EventHandler：事件处理器</li> 
+   <li>Handle：操作系统中的句柄，是对资源在操作系统层面上的一种抽象，它可以是打开的文件、一个连接等。在网络编程中一般指Socket Handle，即一个网络连接（在Java NIO中的Channel）。这个Channel注册到Synchronous Event Demultiplexer中，以监听Handle中发生的事件，可以是CONNECT、READ、WRITE、CLOSE等事件</li> 
+   <li>InitiationDispatcher：事件处理调度器，用来管理EventHandler，将接收到网络请求分发给相应的处理器去异步处理</li> 
+   <li>Demultiplexer：阻塞等待一系列的Handle中的事件到来，在Java NIO中用Selector来封装。<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511201238531.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2h1YW5zaGlyZW5qaWFu,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br> （3）Reactor模式请求处理流程</li> 
+   <li>初始化InitiationDispatcher，并初始化一个Map，用来放Handle和EventHandler的映射。</li> 
+   <li>注册EventHandler到InitiationDispatcher中，把EventHandler和对应Handle放入到map中</li> 
+   <li>调用InitiationDispatcher的handle_events()方法以启动Event Loop。在Event Loop中，调用Synchronous Event Demultiplexer的select()方法阻塞等待Event发生。</li> 
+   <li>当Event发生后，select()方法返回，InitiationDispatcher根据返回的Handle找到对应的EventHandler，并回调该EventHandler的handle_events()方法，在handle_events()方法中还可以向InitiationDispatcher中注册新的Eventhandler</li> 
+  </ul> 
+  <h2><a id="32_Reactorjava_184"></a>3.2 Reactor模式的java实现</h2> 
+  <p>（1）单线程Reactor模式<br> 这里的单线程指的是服务端的Reactor是单线程</p> 
+  <ul> 
+   <li>服务器端的Reactor使用Selector来实现多路复用，并且启动事件循环。服务端会注册一个Acceptor事件处理器到Reactor中，这样Reactor会监听客户端向服务器端发起的连接请求事件(ACCEPT事件)。</li> 
+   <li>客户端向服务器发起一个连接请求，Reactor监听到了该ACCEPT事件并将该事件派发给对应的Acceptor处理器。Acceptor处理器通过accept()方法得到连接(SocketChannel)，然后将该连接所关注的READ事件以及对应的事件处理器注册到Reactor中，这样Reactor就会监听该连接的READ事件。</li> 
+   <li>当Reactor监听到有读或者写事件发生时，将相关的事件派发给对应的处理器进行处理。</li> 
+   <li>处理完所有就绪的感兴趣的I/O事件后，Reactor线程会再次执行select()阻塞等待新的事件就绪并将其分派给对应处理器进行处理。<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511214400373.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2h1YW5zaGlyZW5qaWFu,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br> Reactor的单线程主要是针对于I/O操作而言，也就是accept()、read()、write()以及connect()操作都在一个线程上完成。<br> 但这里单线程Reactor模式中，不仅I/O操作在该Reactor线程上，连非I/O的业务操作也在该线程上，这会大大延迟I/O请求的响应。<br> 所以出现了第二种模式单线程Reactor，工作者线程池。<br> （2）单线程Reactor，工作者线程池<br> 与单线程Reactor模式不同的是，添加了一个工作者线程池，并将非I/O操作从Reactor线程中移出转交给工作者线程池。这样可以提高Reactor线程的I/O响应，不至于因为一些耗时的业务逻辑而延迟对后面I/O请求的处理。<br> 线程池的优势：</li> 
+   <li>重用现线程，减少线程创建和销毁过程的开销。</li> 
+   <li>当请求到达时，不会由于等待创建线程，提高了响应性。</li> 
+   <li>合理调整线程池的大小，可以创建足够多的线程使处理器保持忙碌状态，还可防止过多线程耗尽内存。<br> 缺点：<br> I/O操作还是一个Reactor来完成，对于高负载、大并发或大数据量的应用场景有性能瓶颈：</li> 
+   <li>一个NIO线程同时处理成百上千的链路，性能上无法支撑</li> 
+   <li>当NIO线程负载过重时处理速度将变慢，这会导致大量客户端连接超时，超时之后往往会进行重发，这更加重了NIO线程的负载，最终会导致大量消息积压和处理超时<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511214411376.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2h1YW5zaGlyZW5qaWFu,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br> 这就出现了第三种模式：多Reactor线程模式<br> （3）多Reactor线程模式<br> 多Reactor线程模式中有一个mainReactor，多个subReactor。Reactor线程池中的每一Reactor线程都会有自己的Selector、线程和分发的事件循环逻辑。mainReactor线程主要负责接收客户端的连接请求，然后将接收到的SocketChannel传递给subReactor，由subReactor来完成和客户端的通信。<br> 流程：</li> 
+   <li>注册一个Acceptor事件处理器到mainReactor中，启动mainReactor的事件循环。</li> 
+   <li>客户端向服务器端发起一个连接请求，mainReactor监听到了该ACCEPT事件并将该事件派发给Acceptor处理器</li> 
+   <li>Acceptor处理器通过accept()方法得到与这个客户端对应的连接(SocketChannel)，然后将这个SocketChannel传递给subReactor线程池</li> 
+   <li>subReactor线程池分配一个subReactor线程给这个SocketChannel，将SocketChannel关注的READ事件或者以及对应的事件处理器注册到subReactor线程</li> 
+   <li>当有I/O事件就绪时，相关的subReactor就将事件派发给响应的处理器。这里subReactor线程只负责完成I/O的read()操作，在读取到数据后将业务逻辑的处理放入到线程池中完成，若完成业务逻辑后需要返回数据给客户端，则相关的I/O的write操作还是会被提交回subReactor线程<br> 多Reactor线程模式将接受客户端的连接请求和与该客户端的通信分在了两个Reactor线程来完成。mainReactor完成接收客户端连接请求的操作，将建立好的连接转交给subReactor线程，subReactor线程完成与客户端的通信。这里所有的I/O操作(accept()、read()、write()、connect())还是在Reactor线程(mainReactor线程 或 subReactor线程)中完成的。Thread Pool(线程池)仅用来处理非I/O操作的逻辑。<br> 优点：<br> 多Reactor线程模式在大量并发请求的情况下，将大量连接分发给多个subReactor线程，在多核的操作系统中这能大大提升应用的负载和吞吐量。<br> 同时不会因为read()数据耗时而导致后面的客户端连接请求得不到即时处理。<br> Netty服务端使用了多Reactor线程模式<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190511224402104.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2h1YW5zaGlyZW5qaWFu,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"><br> 上述分析完后你会发现reactor模式与观察者模式有点像。不过，观察者模式与单个事件源关联，而反应器模式则与多个事件源关联 。当一个主体发生改变时，所有依属体都得到通知。</li> 
+  </ul> 
+  <h2><a id="33_SelectorChannelsSelectionKey_222"></a>3.3 Selector、Channels、SelectionKey</h2> 
+  <p>（1）Selector<br> Selector也就是NIO中的选择器，用做事件订阅和Channel管理。<br> 应用程序向Selector注册需要它关注的Channel，以及具每一个Channel感兴趣的IO事件。<br> （2）Channels<br> 通道，应用程序和操作系统通信的渠道。应用程序可以通过通道读写数据。所有在Selector注册的通道必须继承SelectableChannel类</p> 
+  <ul> 
+   <li>ServerSocketChannel：服务器程序的监听通道，只能通过这个通道向操作系统注册支持多路复用IO的端口监听。可以支持UDP和TCP</li> 
+   <li>ScoketChannel：TCPSocket套接字的监听通道，一个Socket套接字对应了一个客户端</li> 
+   <li>DatagramChannel：UDP数据报文的监听通道。<br> （3）SelectionKey<br> SelectionKey是NIO中的操作类型。一共四种操作类型：OP_READ(读)、OP_WRITE(写)、OP_CONNECT(请求连接)、OP_ACCEPT(接受连接)。</li> 
+   <li>ServerSocketChannel：可以注册OP_ACCEPT</li> 
+   <li>服务器SocketChannel：OP_READ、OP_WRITE</li> 
+   <li>客户端SocketChannel：OP_READ、OP_WRITE、OP_CONNECT</li> 
+  </ul> 
+  <p>每个操作类型就绪条件：</p> 
+  <ul> 
+   <li>OP_READ： 当操作系统读缓冲区有数据可读时就绪。</li> 
+   <li>OP_WRITE：当操作系统写缓冲区有空闲空间时就绪。一般情况下写缓冲区都有空闲空间，小块数据无需注册，直接写入即可，否则该条件不断就绪浪费CPU。但如果是写密集型的任务，有可能写满缓存，这时需要注册，并且写完后取消注册。</li> 
+   <li>OP_CONNECT： 请求连接成功后就绪。</li> 
+   <li>OP_ACCEPT 当收到客户端连接请求时就绪。</li> 
+  </ul> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

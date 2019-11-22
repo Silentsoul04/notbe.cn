@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>ARM linux的启动部分源代码简略分析【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://www.cnblogs.com/armlinux/archive/2011/11/07/2396784.html    ARM linux的启动部分源代码简略分析&nbsp;以友善之臂的mini2440开发板为平台，以较新的内核linux-2.6.32.7版本为例，仅...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/04/07/weixin_34377065_90129043.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">ARM linux的启动部分源代码简略分析【转】</h1>
+    <p class="post-meta">Apr 7, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p><strong>转自：<a href="http://www.cnblogs.com/armlinux/archive/2011/11/07/2396784.html" rel="nofollow">http://www.cnblogs.com/armlinux/archive/2011/11/07/2396784.html</a></strong></p> 
+   <p><strong>ARM linux的启动部分源代码简略分析&nbsp;<br></strong>以友善之臂的mini2440开发板为平台，以较新的内核linux-2.6.32.7版本为例，仅作说明之用。</p> 
+   <p>&nbsp;</p> 
+   <p>当内核映像被加载到RAM之后，Bootloader的控制权被释放。内核映像并不是可直接运行的目标代码，而是一个压缩过的zImage（小内核）。但是，也并非是zImage映像中的一切均被压缩了，映像中包含未被压缩的部分，这部分中包含解压缩程序，解压缩程序会解压缩映像中被压缩的部分。zImage使用gzip压缩的，它不仅仅是一个压缩文件，而且在这个文件的开头部分内嵌有gzip解压缩代码。当zImage被调用时它从arch/arm/boot/compressed/head.S的start汇编例程开始执行。这个例程进行一些基本的硬件设置，并调用arch/arm/boot/compressed/misc.c中的decompress_kernel()解压缩内核。</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>arch/arm/kernel/head.S文件是内核真正的启动入口点，一般是由解压缩内核的程序来调用的。首先先看下对于运行这个文件的要求：</p> 
+   <p><strong>MMU = off； D-cache = off； I-cache = 无所谓，开也可以，关也可以； r0 = 0；r1 = 机器号；r2 = atags 指针。</strong></p> 
+   <p>这段代码是位置无关的，所以，如果以地址0xC0008000来链接内核，那么就可以直接用__pa(0xc0008000)地址来调用这里的代码。</p> 
+   <p>&nbsp;</p> 
+   <p>其实，在这个（Linux内核中总共有多达几十个的以head.S命名的文件）head.S文件中的一项重要工作就是设置内核的临时页表，不然mmu开起来也玩不转，但是内核怎么知道如何映射内存呢？linux的内核将映射到虚地址0xCxxx&nbsp;xxxx处，但他怎么知道在4GB的地址空间中有哪一片ram是可用的，从而可以映射过去呢？&nbsp;<br><br>因为不同的系统有不通的内存映像，所以，LINUX约定，要调用内核代码，一定要满足上面的调用要求，以为最初的内核代码提供一些最重要的关于机器的信息。内核代码开始的时候，R1存放的是系统目标平台的代号，对于一些常见的，标准的平台，内核已经提供了支持，只要在编译的时候选中就行了，例如对X86平台，内核是从物理地址1M开始映射的。</p> 
+   <p>好了好了，看下面的代码。</p> 
+   <p>&nbsp;</p> 
+   <p>ENTRY(stext)是这个文件的入口点。最初的几行是这样的：</p> 
+   <p><strong>&nbsp;&nbsp; setmode&nbsp; PSR_F_BIT | PSR_I_BIT | SVC_MODE, r9</strong></p> 
+   <p><strong>@ ensure svc mode</strong></p> 
+   <p><strong>@ and irqs disabled</strong></p> 
+   <p>// 设置为SVC模式，关闭中断和快速中断&nbsp;<br>// 此处设定系统的工作状态为SVC，arm有7种状态每种状态</p> 
+   <p>// 都有自己的堆栈,SVC为管理模式，具有完全的权限，可以执行任意指令</p> 
+   <p>// 访问任意地址的内存</p> 
+   <p>//&nbsp;<strong>setmode</strong>是一个宏，其定义为：</p> 
+   <p>//&nbsp;<strong>.macro setmode, mode, reg</strong></p> 
+   <p>//&nbsp;<strong>msr&nbsp;&nbsp; cpsr_c, #\mode</strong></p> 
+   <p>//&nbsp;<strong>.endm</strong><br><br></p> 
+   <p><strong>&nbsp;&nbsp; mrc&nbsp;&nbsp; p15, 0, r9, c0, c0&nbsp;&nbsp;&nbsp; @ get processor id</strong></p> 
+   <p><strong>&nbsp;&nbsp; bl __lookup_processor_type&nbsp;&nbsp;&nbsp;&nbsp; @ r5=procinfo r9=cpuid</strong></p> 
+   <p><strong>&nbsp;&nbsp; movs&nbsp; r10, r5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ invalid processor (r5=0)?</strong></p> 
+   <p><strong>&nbsp;&nbsp; beq&nbsp;&nbsp; __error_p&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ yes, error 'p'</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p>这几行是查询处理器的类型的，我们知道arm系列有很多型号，arm7、arm9、arm11、Cortex核等等类型，这么多型号要如何区分呢？其实，在arm的15号协处理器(其实ARM暂时也就这么一个协处理器)中有一个只读寄存器，存放与处理器相关信息。</p> 
+   <p>&nbsp;</p> 
+   <p>__lookup_processor_type是arch/arm/kernel/head-common.S文件中定义的一个例程，这个head-common.S用include命令被包含在head.S文件中。其定义为：</p> 
+   <p><strong>__lookup_processor_type:</strong></p> 
+   <p><strong>&nbsp;&nbsp; adr&nbsp;&nbsp; r3, 3f</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldmia r3, {r5 - r7}</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r3, r3, #8</strong></p> 
+   <p><strong>&nbsp;&nbsp; sub&nbsp;&nbsp; r3, r3, r7&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ get offset between virt&amp;phys</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r5, r5, r3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ convert virt addresses to</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r6, r6, r3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ physical address space</strong></p> 
+   <p><strong>1: ldmia r5, {r3, r4}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ value, mask</strong></p> 
+   <p><strong>&nbsp;&nbsp; and&nbsp;&nbsp; r4, r4, r9&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ mask wanted bits</strong></p> 
+   <p><strong>&nbsp;&nbsp; teq&nbsp;&nbsp; r3, r4</strong></p> 
+   <p><strong>&nbsp;&nbsp; beq&nbsp;&nbsp; 2f</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r5, r5, #PROC_INFO_SZ&nbsp;&nbsp;&nbsp; @ sizeof(proc_info_list)</strong></p> 
+   <p><strong>&nbsp;&nbsp; cmp&nbsp;&nbsp; r5, r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; blo&nbsp;&nbsp; 1b</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r5, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ unknown processor</strong></p> 
+   <p><strong>2: mov&nbsp;&nbsp; pc, lr</strong></p> 
+   <p><strong>ENDPROC(__lookup_processor_type)</strong></p> 
+   <p>&nbsp;</p> 
+   <p>这个例程接受处理器ID（保存在寄存器r9中）为参数，查找链接器建立的支持的处理器表。此时此刻还不能使用<strong>__proc_info</strong>表的绝对地址，因为这时候MMU还没有开启，所以此时运行的程序没有在正确的地址空间中。所以不得不计算偏移量。若没有找到processor ID对应的处理器，则在r5寄存器中返回返回0，否则返回一个proc_info_list结构体的指针（在物理地址空间）。proc_info_list结构体在&lt;asm/procinfo.h&gt;文件中定义：</p> 
+   <p><strong>struct proc_info_list {</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; cpu_val;</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; cpu_mask;</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __cpu_mm_mmu_flags;&nbsp;&nbsp; /* used by head.S */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __cpu_io_mmu_flags;&nbsp;&nbsp; /* used by head.S */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __cpu_flush;&nbsp;&nbsp;&nbsp; /* used by head.S */</strong></p> 
+   <p><strong>&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *arch_name;</strong></p> 
+   <p><strong>&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *elf_name;</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; elf_hwcap;</strong></p> 
+   <p><strong>&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *cpu_name;</strong></p> 
+   <p><strong>&nbsp;&nbsp; struct processor&nbsp;&nbsp; *proc;</strong></p> 
+   <p><strong>&nbsp;&nbsp; struct cpu_tlb_fns *tlb;</strong></p> 
+   <p><strong>&nbsp;&nbsp; struct cpu_user_fns&nbsp;&nbsp; *user;</strong></p> 
+   <p><strong>&nbsp;&nbsp; struct cpu_cache_fns&nbsp; *cache;</strong></p> 
+   <p><strong>};</strong><br>第一项是CPU&nbsp;id，将与协处理器中读出的id作比较，其余的字段也都是与处理器相关的信息，到下面初始化的过程中自然会用到。</p> 
+   <p>&nbsp;</p> 
+   <p>另外，这个例程加载符地址的代码也是挺值得我辈学习的：</p> 
+   <p><strong>&nbsp;&nbsp; adr&nbsp;&nbsp; r3, 3f</strong><br>加载一个符号的地址，这个符号在加载语句前面（下面）定义，forward嘛，这个符号为3，离这条语句最近的那个。在那个符号为3的位置我们看到这样的代码：</p> 
+   <p><strong>&nbsp;&nbsp; .align 2</strong></p> 
+   <p><strong>3: .long __proc_info_begin</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __proc_info_end</strong></p> 
+   <p><strong>4: .long .</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __arch_info_begin</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __arch_info_end</strong></p> 
+   <p>搜索这两个符号的值，在文件arch/arm/kernel/vmlinux.lds.S中：</p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __proc_info_begin = .;</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *(.proc.info.init)</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __proc_info_end = .;</strong></p> 
+   <p>这两个符号分别是一种初始化的段的结束开始地址和结束地址。为了了解由struct proc_info_list结构体组成的段的实际构成，我们还是得要了解一下在系统中到底都有哪些变量是声明了要被放到这个段的。用关键字<strong>.proc.info.init</strong>来搜，全部都是<strong>arch/arm/mm/proc-*.S</strong>文件，这些都是特定于处理器的汇编语言文件，对于我们的mini2440, 自然是要看proc-arm920.S文件的，在其中可以看到这些内容：</p> 
+   <p><strong>&nbsp;&nbsp; .section ".proc.info.init", #alloc, #execinstr</strong></p> 
+   <p><strong>&nbsp;&nbsp; .type __arm920_proc_info,#object</strong></p> 
+   <p><strong>__arm920_proc_info:</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long 0x41009200</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long 0xff00fff0</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long&nbsp;&nbsp; PMD_TYPE_SECT | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PMD_SECT_BUFFERABLE | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PMD_SECT_CACHEABLE | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PMD_BIT4 | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PMD_SECT_AP_WRITE | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PMD_SECT_AP_READ</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long&nbsp;&nbsp; PMD_TYPE_SECT | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PMD_BIT4 | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PMD_SECT_AP_WRITE | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; PMD_SECT_AP_READ</strong></p> 
+   <p><strong>&nbsp;&nbsp; b&nbsp; __arm920_setup</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long cpu_arch_name</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long cpu_elf_name</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long cpu_arm920_name</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long arm920_processor_functions</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long v4wbi_tlb_fns</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long v4wb_user_fns</strong></p> 
+   <p><strong>#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long arm920_cache_fns</strong></p> 
+   <p><strong>#else</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long v4wt_cache_fns</strong></p> 
+   <p><strong>#endif</strong></p> 
+   <p><strong>&nbsp;&nbsp; .size __arm920_proc_info, . - __arm920_proc_info</strong></p> 
+   <p>&nbsp;</p> 
+   <p>看到这儿我们再回国头去看<strong>__lookup_processor_type</strong>的代码：</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;<strong>ldmia r3, {r5 - r7}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r3, r3, #8</strong></p> 
+   <p><strong>&nbsp;&nbsp; sub&nbsp;&nbsp; r3, r3, r7</strong></p> 
+   <p>尽管符号3处只有两个有效值，但它加载了三个数，而第三个数，我们看到是这样定义的：</p> 
+   <p><strong>.long .</strong></p> 
+   <p>&nbsp;</p> 
+   <p><strong>__lookup_processor_type</strong>中，给r3加上8，也就是让r3指向“.”的地址，然后用r3减r7来获取虚拟地址与物理地址的差，这样看来，“.”就应该是虚拟空间（编译地址）里那个数据的地址。</p> 
+   <p>&nbsp;</p> 
+   <p>之后的代码获得<strong>__proc_info_begin</strong>和<strong>__arch_info_end</strong>这两个符号在物理空间中的地址：</p> 
+   <p>&nbsp;&nbsp;&nbsp; add r5, r5, r3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ convert virt addresses to</p> 
+   <p>&nbsp;&nbsp;&nbsp; add r6, r6, r3</p> 
+   <p>&nbsp;</p> 
+   <p>然后便是在那个段中逐个的检查struct proc_info_list结构体，以找到与我们的CPU相匹配的：</p> 
+   <p><strong>1: ldmia r5, {r3, r4}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ value, mask</strong></p> 
+   <p><strong>&nbsp;&nbsp; and&nbsp;&nbsp; r4, r4, r9&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ mask wanted bits</strong></p> 
+   <p><strong>&nbsp;&nbsp; teq&nbsp;&nbsp; r3, r4</strong></p> 
+   <p><strong>&nbsp;&nbsp; beq&nbsp;&nbsp; 2f</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r5, r5, #PROC_INFO_SZ&nbsp;&nbsp;&nbsp; @ sizeof(proc_info_list)</strong></p> 
+   <p><strong>&nbsp;&nbsp; cmp&nbsp;&nbsp; r5, r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; blo&nbsp;&nbsp; 1b</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r5, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ unknown processor</strong></p> 
+   <p><strong>2: mov&nbsp;&nbsp; pc, lr</strong></p> 
+   <p>&nbsp;</p> 
+   <p>__lookup_processor_type例程会返回在文件<strong>arch/arm/mm/proc-arm920.S</strong>中定义的一个保存有与我们的处理器相关的信息的struct proc_info_list结构体的地址。</p> 
+   <p>&nbsp;</p> 
+   <p>接下来我们继续看stext的代码：<strong><br>&nbsp;&nbsp; bl __lookup_machine_type&nbsp;&nbsp;&nbsp; @ r5=machinfo</strong></p> 
+   <p><strong>&nbsp;&nbsp; movs&nbsp; r8, r5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ invalid machine (r5=0)?</strong></p> 
+   <p><strong>&nbsp;&nbsp; beq&nbsp;&nbsp; __error_a&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ yes, error 'a'</strong></p> 
+   <p>在获得了处理器信息之后，则调用__lookup_machine_type来查找机器信息。这个例程同样也在arch/arm/kernel/head-common.S文件中定义。这个例程的定义如下：</p> 
+   <p><strong>__lookup_machine_type:</strong></p> 
+   <p><strong>&nbsp;&nbsp; adr&nbsp;&nbsp; r3, 4b</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldmia r3, {r4, r5, r6}</strong></p> 
+   <p><strong>&nbsp;&nbsp; sub&nbsp;&nbsp; r3, r3, r4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ get offset between virt&amp;phys</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r5, r5, r3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ convert virt addresses to</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r6, r6, r3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ physical address space</strong></p> 
+   <p><strong>1: ldr&nbsp;&nbsp; r3, [r5, #MACHINFO_TYPE] @ get machine type</strong></p> 
+   <p><strong>&nbsp;&nbsp; teq&nbsp;&nbsp; r3, r1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ matches loader number?</strong></p> 
+   <p><strong>&nbsp;&nbsp; beq&nbsp;&nbsp; 2f&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ found</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r5, r5, #SIZEOF_MACHINE_DESC&nbsp;&nbsp; @ next machine_desc</strong></p> 
+   <p><strong>&nbsp;&nbsp; cmp&nbsp;&nbsp; r5, r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; blo&nbsp;&nbsp; 1b</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r5, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ unknown machine</strong></p> 
+   <p><strong>2: mov&nbsp;&nbsp; pc, lr</strong></p> 
+   <p><strong>ENDPROC(__lookup_machine_type)</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p>处理的过程和上面的__lookup_processor_type还是挺相似的。这个例程接收r1中传进来的机器号作为参数，然后，在一个由struct machine_desc结构体组成的段中查找和我们的机器号匹配的struct machine_desc结构体，这个结构体在arch/arm/include/asm/mach/arch.h文件中定义，用于保存机器的信息：</p> 
+   <p><strong>struct machine_desc {</strong></p> 
+   <p><strong>&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>&nbsp;&nbsp; &nbsp;* Note! The first four elements are used</strong></p> 
+   <p><strong>&nbsp;&nbsp; &nbsp;* by assembler code in head.S, head-common.S</strong></p> 
+   <p><strong>&nbsp;&nbsp; &nbsp;*/</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; nr;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /* architecture number&nbsp;&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; phys_io; /* start of physical io&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; io_pg_offst; /* byte offset for io</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;* page tabe entry */</strong></p> 
+   <p><strong>&nbsp;&nbsp; const char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *name;&nbsp;&nbsp; /* architecture name&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned long&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; boot_params; /* tagged list&nbsp;&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; video_start; /* start of video RAM */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; video_end;&nbsp; /* end of video RAM&nbsp;&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; reserve_lp0 :1; /* never has lp0&nbsp;&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; reserve_lp1 :1; /* never has lp1&nbsp;&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; reserve_lp2 :1; /* never has lp2&nbsp;&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; unsigned int&nbsp;&nbsp;&nbsp; soft_reboot :1; /* soft reboot&nbsp;&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; void&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*fixup)(struct machine_desc *,</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;struct tag *, char **,</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;struct meminfo *);</strong></p> 
+   <p><strong>&nbsp;&nbsp; void&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*map_io)(void);/* IO mapping function&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; void&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*init_irq)(void);</strong></p> 
+   <p><strong>&nbsp;&nbsp; struct sys_timer&nbsp;&nbsp; *timer;&nbsp;&nbsp;&nbsp;&nbsp; /* system tick timer&nbsp; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; void&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (*init_machine)(void);</strong></p> 
+   <p><strong>};</strong></p> 
+   <p>&nbsp;</p> 
+   <p>同样这个例程也用到了同上面很相似的方式来获得符号的地址：</p> 
+   <p><strong>&nbsp;&nbsp; adr&nbsp;&nbsp; r3, 4b</strong><br>b代表back，即向后，这个符号为4，紧接着我们前面看到的那个为3的标号：</p> 
+   <p><strong>4: .long .</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __arch_info_begin</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __arch_info_end</strong></p> 
+   <p>在文件arch/arm/kernel/vmlinux.lds.S中我们可以看到段的定义：</p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __arch_info_begin = .;</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; *(.arch.info.init)</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __arch_info_end = .;</strong></p> 
+   <p>这两个符号也是分别表示某种初始化的段的开始地址和结束地址。为了找到段的填充内容，还是得要了解一下到底都有哪些struct machine_desc结构体类型变量声明了要被放到这个段的。用关键字<strong>.arch.info.init&nbsp;</strong>来搜索所有的内核源文件。在arch/arm/include/asm/mach/arch.h文件中我们看到：</p> 
+   <p><strong>#define MACHINE_START(_type,_name)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</strong></p> 
+   <p><strong>static const struct machine_desc __mach_desc_##_type \</strong></p> 
+   <p><strong>&nbsp;__used&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</strong></p> 
+   <p><strong>&nbsp;__attribute__((__section__(".arch.info.init"))) = { \</strong></p> 
+   <p><strong>&nbsp;&nbsp; .nr&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = MACH_TYPE_##_type,&nbsp;&nbsp;&nbsp;&nbsp; \</strong></p> 
+   <p><strong>&nbsp;&nbsp; .name&nbsp;&nbsp;&nbsp; = _name,</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>#define MACHINE_END&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; \</strong></p> 
+   <p><strong>};</strong></p> 
+   <p>定义机器结构体，也就是<strong>.arch.info.init</strong>段中的内容，都是要通过两个宏<strong>MACHINE_START</strong>和<strong>MACHINE_END</strong>来完成的啊，<strong>MACHINE_START</strong>宏定义一个<strong>truct machine_desc</strong>结构体，并初始化它的机器号字段和机器名字段，可以在arch/arm/tools/mach-types文件中看到各种平台的机器号的定义。那接着我们来搜MACHINE_START吧，这是一个用于定义机器结构体的宏，所以可以看到这个符号好像都是在arch/arm/mach-*/mach-*.c这样的文件中出现的，我们感兴趣的应该是arch/arm/mach-s3c2440/ mach-mini2440.c文件中的这个符号：</p> 
+   <p><strong>MACHINE_START(MINI2440, "MINI2440")</strong></p> 
+   <p><strong>&nbsp;&nbsp; /* Maintainer: Michel Pollet &lt;buserror@gmail.com&gt; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; .phys_io = S3C2410_PA_UART,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .io_pg_offst = (((u32)S3C24XX_VA_UART) &gt;&gt; 18) &amp; 0xfffc,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .boot_params = S3C2410_SDRAM_PA + 0x100,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .map_io&nbsp;&nbsp;&nbsp;&nbsp; = mini2440_map_io,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .init_machine&nbsp;&nbsp; = mini2440_init,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .init_irq = s3c24xx_init_irq,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .timer&nbsp;&nbsp; = &amp;s3c24xx_timer,</strong></p> 
+   <p><strong>MACHINE_END</strong></p> 
+   <p>OK，&nbsp;<strong>__lookup_machine_type</strong>这个例程的我们也搞明白了。回忆一下，启动代码现在已经完成的工作，<strong>R10寄存器</strong>中为指向<strong>proc_info_list</strong>结构体的指针（物理地址空间），这个结构体包含有关于我们的处理器的一些重要信息。<strong>R8寄存器</strong>中为指向一个与我们的平台相匹配的<strong>machine_desc</strong>结构体的指针，这个结构体中保存有一些关于我们的平台的重要信息。</p> 
+   <p>&nbsp;</p> 
+   <p>回来接着看arch/arm/kernel/head.S文件中的stext：</p> 
+   <p><strong>&nbsp;&nbsp; bl __vet_atags</strong></p> 
+   <p>这个例程同样同样也是在arch/arm/kernel/head-common.S文件中定义：</p> 
+   <p><strong>__vet_atags:</strong></p> 
+   <p><strong>&nbsp;&nbsp; tst&nbsp;&nbsp; r2, #0x3&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ aligned?</strong></p> 
+   <p><strong>&nbsp;&nbsp; bne&nbsp;&nbsp; 1f</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldr&nbsp;&nbsp; r5, [r2, #0]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ is first tag ATAG_CORE?</strong></p> 
+   <p><strong>&nbsp;&nbsp; cmp&nbsp;&nbsp; r5, #ATAG_CORE_SIZE</strong></p> 
+   <p><strong>&nbsp;&nbsp; cmpne r5, #ATAG_CORE_SIZE_EMPTY</strong></p> 
+   <p><strong>&nbsp;&nbsp; bne&nbsp;&nbsp; 1f</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldr&nbsp;&nbsp; r5, [r2, #4]</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldr&nbsp;&nbsp; r6, =ATAG_CORE</strong></p> 
+   <p><strong>&nbsp;&nbsp; cmp&nbsp;&nbsp; r5, r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; bne&nbsp;&nbsp; 1f</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; pc, lr&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ atag pointer is ok</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>1: mov&nbsp;&nbsp; r2, #0</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; pc, lr</strong></p> 
+   <p><strong>ENDPROC(__vet_atags)</strong></p> 
+   <p>这个例程接收机器信息(R8寄存器)为参数，并检测r2中传入的ATAGS 指针的合法性。内核使用tag来作为bootloader传递内核参数的方式。系统要求r2中传进来的ATAGS指针式4字节对齐的，同时要求ATAGS列表的第一个tag是一个ATAG_CORE类型的。</p> 
+   <p>&nbsp;</p> 
+   <p>此时R10寄存器中保存有指向CPU信息结构体的指针，R8寄存器中保存有指向机器结构体的指针，R2寄存器中保存有指向tag表的指针，R9中还保存有CPU ID信息。</p> 
+   <p>&nbsp;</p> 
+   <p>回到arch/arm/kernel/head.S文件中的stext，之后就要进入初始化过程中比较关键的一步了，开始设置mmu，但首先要填充一个临时的内核页表，映射4m的内存，这在初始化过程中是足够了：</p> 
+   <p><strong>bl&nbsp; __create_page_tables</strong></p> 
+   <p>&nbsp;</p> 
+   <p>这个例程设置初始页表，这里只设置最起码的数量，只要能使内核运行即可，<strong>r8&nbsp; = machinfo，r9&nbsp; = cpuid，r10 = procinfo，</strong>在r4寄存器中返回物理页表地址。</p> 
+   <p>__create_page_tables例程在文件arch/arm/kernel/head.S中定义：</p> 
+   <p>__create_page_tables:</p> 
+   <p><strong>&nbsp;&nbsp; pgtbl r4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ page table address</strong></p> 
+   <p>// pgtbl是一个宏，本文件的前面部分有定义：</p> 
+   <p>//<strong>&nbsp;.macro pgtbl, rd</strong></p> 
+   <p>//<strong>&nbsp;ldr&nbsp;&nbsp; \rd, =(KERNEL_RAM_PADDR - 0x4000)</strong></p> 
+   <p>//<strong>&nbsp;.endm</strong></p> 
+   <p>// KERNEL_RAM_PADDR在本文件的前面有定义，为(PHYS_OFFSET + TEXT_OFFSET)</p> 
+   <p>// PHYS_OFFSET在arch/arm/mach-s3c2410/include/mach/memory.h定义，</p> 
+   <p>// 为UL(0x30000000)</p> 
+   <p>// 而TEXT_OFFSET在arch/arm/Makefile中定义，为内核镜像在内存中到内存</p> 
+   <p>// 开始位置的偏移（字节），为$(textofs-y)</p> 
+   <p>// textofs-y也在文件arch/arm/Makefile中定义，</p> 
+   <p>// 为textofs-y&nbsp;&nbsp; := 0x00008000</p> 
+   <p>// r4 = 30004000为临时页表的起始地址</p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p>// 首先即是初始化16K的页表，高12位虚拟地址为页表索引，所以为</p> 
+   <p>// 4K*4 = 16K，大页表，每一个页表项，映射1MB虚拟地址。</p> 
+   <p>// 这个地方还来了个循环展开，以优化性能。</p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r0, r4</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r3, #0</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r6, r0, #0x4000</strong></p> 
+   <p><strong>1: str&nbsp;&nbsp; r3, [r0], #4</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r3, [r0], #4</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r3, [r0], #4</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r3, [r0], #4</strong></p> 
+   <p><strong>&nbsp;&nbsp; teq&nbsp;&nbsp; r0, r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; bne&nbsp;&nbsp; 1b</strong></p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp; ldr r7, [r10, #PROCINFO_MM_MMUFLAGS] @ mm_mmuflags</p> 
+   <p>// PROCINFO_MM_MMUFLAGS在arch/arm/kernel/asm-offsets.c文件中定义，</p> 
+   <p>// 为DEFINE(PROCINFO_MM_MMUFLAGS,&nbsp;</p> 
+   <p>// offsetof(struct proc_info_list, __cpu_mm_mmu_flags));</p> 
+   <p>// R10寄存器保存的指针指向是我们前面找到的proc_info_list结构嘛。</p> 
+   <p>&nbsp;</p> 
+   <p>// 为内核的第一个MB创建一致的映射，以为打开MMU做准备，这个映射将会被</p> 
+   <p>// paging_init()移除，这里使用程序计数器来获得相应的段的基地址。</p> 
+   <p>// 这个地方是直接映射。</p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r6, pc</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r6, r6, lsr #20&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ start of kernel section</strong></p> 
+   <p><strong>&nbsp;&nbsp; orr&nbsp;&nbsp; r3, r7, r6, lsl #20&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ flags + kernel base</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r3, [r4, r6, lsl #2]&nbsp;&nbsp;&nbsp;&nbsp; @ identity mapping</strong></p> 
+   <p>&nbsp;</p> 
+   <p>// 接下来为内核的直接映射区设置页表。KERNEL_START在文件的前面定义，</p> 
+   <p>// 为KERNEL_RAM_VADDR，即内核的虚拟地址。</p> 
+   <p>// 而KERNEL_RAM_VADDR在文件的前面定义，则为(PAGE_OFFSET + TEXT_OFFSET)</p> 
+   <p>// 映射完整的内核代码段，初始化数据段。</p> 
+   <p>// PAGE_OFFSET为内核镜像开始的虚拟地址，在</p> 
+   <p>// arch/arm/include/asm/memory.h中定义。在配置内核时选定具体值，默认</p> 
+   <p>// 为0xC0000000。</p> 
+   <p>// 因为最高12位的值是页表中的偏移地址，而第三高的四位必然为0，</p> 
+   <p>// 每个页表项为4字节，右移20位之后，还得再左移两位回来，所以，这里只// 是左移18位。</p> 
+   <p>// R3寄存器在经过了上面的操作之后，实际上是变成了指向内核镜像代码段</p> 
+   <p>// 的指针（物理地址），在这个地方，再一次为内核镜像的第一个MB做了映射。</p> 
+   <p>// R6随后指向了内核镜像的尾部。R0为页表项指针。</p> 
+   <p>// 这里以1MB为单位来映射内核镜像。</p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r0, r4,&nbsp; #(KERNEL_START &amp; 0xff000000) &gt;&gt; 18</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r3, [r0, #(KERNEL_START &amp; 0x00f00000) &gt;&gt; 18]!</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldr&nbsp;&nbsp; r6, =(KERNEL_END - 1)</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r0, r0, #4</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r6, r4, r6, lsr #18&nbsp;&nbsp;</strong>//得到页表的结束物理地址</p> 
+   <p><strong>1: cmp&nbsp;&nbsp; r0, r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r3, r3, #1 &lt;&lt; 20</strong></p> 
+   <p><strong>&nbsp;&nbsp; strls r3, [r0], #4</strong></p> 
+   <p><strong>&nbsp;&nbsp; bls&nbsp;&nbsp; 1b</strong></p> 
+   <p>&nbsp;</p> 
+   <p>// 为了使用启动参数，将物理内存的第一MB映射到内核虚拟地址空间的</p> 
+   <p>// 第一个MB，r4存放的是页表的地址。这里的PAGE_OFFSET的虚拟地址</p> 
+   <p>// 比上面的KERNEL_START要小0x8000</p> 
+   <p><strong>&nbsp;&nbsp; add&nbsp;&nbsp; r0, r4, #PAGE_OFFSET &gt;&gt; 18</strong></p> 
+   <p><strong>&nbsp;&nbsp; orr&nbsp;&nbsp; r6, r7, #(PHYS_OFFSET &amp; 0xff000000)</strong></p> 
+   <p><strong>&nbsp;&nbsp; .if&nbsp;&nbsp; (PHYS_OFFSET &amp; 0x00f00000)</strong></p> 
+   <p><strong>&nbsp;&nbsp; orr&nbsp;&nbsp; r6, r6, #(PHYS_OFFSET &amp; 0x00f00000)</strong></p> 
+   <p><strong>&nbsp;&nbsp; .endif</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r6, [r0]</strong></p> 
+   <p>// 上面的这个步骤显得似乎有些多余。</p> 
+   <p>&nbsp;</p> 
+   <p>// 总结一下，这个建立临时页表的过程：</p> 
+   <p>// 1、为内核镜像的第一个MB建立直接映射</p> 
+   <p>// 2、为内核镜像完整的建立从虚拟地址到物理地址的映射</p> 
+   <p>// 3、为物理内存的第一个MB建立到内核的虚拟地址空间的第一个MB的映射。</p> 
+   <p>&nbsp;</p> 
+   <p>// OK，内核的临时页表建立完毕。整个初始化临时页表的过程都没有修改R8，</p> 
+   <p>// R9和R10。</p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; pc, lr</strong></p> 
+   <p><strong>ENDPROC(__create_page_tables)</strong></p> 
+   <p>&nbsp;</p> 
+   <p>回到stext：</p> 
+   <p><strong>&nbsp;&nbsp; ldr&nbsp;&nbsp; r13, __switch_data&nbsp;&nbsp;&nbsp; @ address to jump to after</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp; @ mmu has been enabled</strong></p> 
+   <p>这个地方实际上是在r13中保存了另一个例程的地址。后面的分析中，遇到执行到这个例程的情况时会有详细说明。</p> 
+   <p>&nbsp;</p> 
+   <p>接着看stext：</p> 
+   <p><strong>&nbsp;&nbsp; adr&nbsp;&nbsp; lr, BSYM(__enable_mmu)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ return (PIC) address</strong></p> 
+   <p>BSYM（）是一个宏，在文件arch/arm/include/asm/unified.h中定义，为：</p> 
+   <p>#define BSYM(sym) sym</p> 
+   <p>也就是说这个语句也仅仅是把__enable_mmu例程的地址加载进lr寄存器中。为了方便之后调用的函数返回时，直接执行__enable_mmu例程。</p> 
+   <p>&nbsp;</p> 
+   <p>接着看stext下一句：</p> 
+   <p><strong>&nbsp;ARM( add&nbsp;&nbsp; pc, r10, #PROCINFO_INITFUNC )</strong></p> 
+   <p>ARM（）也是一个宏，同样在文件arch/arm/include/asm/unified.h中定义，当配置内核为生成ARM镜像，则为：#define ARM(x...)&nbsp; x</p> 
+   <p>&nbsp;</p> 
+   <p>所以这一条语句也就是在调用一个例程。R10中保存的是procinfo结构的地址。PROCINFO_INITFUNC符号在arch/arm/kernel/asm-offsets.c文件中定义，为：</p> 
+   <p><strong>DEFINE(PROCINFO_INITFUNC, offsetof(struct proc_info_list, __cpu_flush));</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p>也就是调用结构体proc_info_list的__cpu_flush成员函数。回去查看<strong>arch/arm/mm/proc-arm920.S</strong>文件中<strong>struct proc_info_list</strong>结构体的变量的定义，可以看到这个成员为：</p> 
+   <p><strong>&nbsp;&nbsp; b&nbsp; __arm920_setup</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p>也就是说，在设置好内核临时页表之后调用了例程<strong>__arm920_setup，</strong>这个例程同样在arch/arm/mm/proc-arm920.S中：</p> 
+   <p><strong>__arm920_setup:</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r0, #0</strong></p> 
+   <p><strong>&nbsp;&nbsp; mcr&nbsp;&nbsp; p15, 0, r0, c7, c7&nbsp;&nbsp;&nbsp; @ invalidate I,D caches on v4</strong></p> 
+   <p><strong>&nbsp;&nbsp; mcr&nbsp;&nbsp; p15, 0, r0, c7, c10, 4&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ drain write buffer on v4</strong></p> 
+   <p><strong>#ifdef CONFIG_MMU</strong></p> 
+   <p><strong>&nbsp;&nbsp; mcr&nbsp;&nbsp; p15, 0, r0, c8, c7&nbsp;&nbsp;&nbsp; @ invalidate I,D TLBs on v4</strong></p> 
+   <p><strong>#endif</strong></p> 
+   <p><strong>&nbsp;&nbsp; adr&nbsp;&nbsp; r5, arm920_crval</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldmia r5, {r5, r6}</strong></p> 
+   <p><strong>&nbsp;&nbsp; mrc&nbsp;&nbsp; p15, 0, r0, c1, c0&nbsp;&nbsp;&nbsp; @ get control register v4</strong></p> 
+   <p><strong>&nbsp;&nbsp; bic&nbsp;&nbsp; r0, r0, r5</strong></p> 
+   <p><strong>&nbsp;&nbsp; orr&nbsp;&nbsp; r0, r0, r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; pc, lr</strong></p> 
+   <p>这一段首先使i,d&nbsp;caches内容无效,然后清除write&nbsp;buffer，接着使TLB内容无效。接下来加载变量<strong>arm920_crval</strong>的地址<strong>，</strong>我们看到arm920_crval变量的内容为：</p> 
+   <p><strong>rm920_crval:</strong></p> 
+   <p><strong>&nbsp;&nbsp; crval clear=0x00003f3f, mmuset=0x00003135, ucset=0x00001130</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p>crval为一个宏，在arch/arm/mm/proc-macros.S中定义：</p> 
+   <p><strong>&nbsp;&nbsp; .macro crval, clear, mmuset, ucset</strong></p> 
+   <p><strong>#ifdef CONFIG_MMU</strong></p> 
+   <p><strong>&nbsp;&nbsp; .word \clear</strong></p> 
+   <p><strong>&nbsp;&nbsp; .word \mmuset</strong></p> 
+   <p><strong>#else</strong></p> 
+   <p><strong>&nbsp;&nbsp; .word \clear</strong></p> 
+   <p><strong>&nbsp;&nbsp; .word \ucset</strong></p> 
+   <p><strong>#endif</strong></p> 
+   <p><strong>&nbsp;&nbsp; .endm</strong></p> 
+   <p>其实也就是定义两个变量而已。之后，在r0中，得到了我们想要往协处理器相应寄存器中写入的内容。</p> 
+   <p>&nbsp;</p> 
+   <p>之后的<strong>&nbsp;__arm920_setup</strong>返回<strong>，mov&nbsp; pc, lr，</strong>即是调用例程__enable_mmu，这个例程在文件arch/arm/kernel/head.S中：</p> 
+   <p><strong>__enable_mmu:</strong></p> 
+   <p><strong>#ifdef CONFIG_ALIGNMENT_TRAP</strong></p> 
+   <p><strong>&nbsp;&nbsp; orr&nbsp;&nbsp; r0, r0, #CR_A</strong></p> 
+   <p><strong>#else</strong></p> 
+   <p><strong>&nbsp;&nbsp; bic&nbsp;&nbsp; r0, r0, #CR_A</strong></p> 
+   <p><strong>#endif</strong></p> 
+   <p><strong>#ifdef CONFIG_CPU_DCACHE_DISABLE</strong></p> 
+   <p><strong>&nbsp;&nbsp; bic&nbsp;&nbsp; r0, r0, #CR_C</strong></p> 
+   <p><strong>#endif</strong></p> 
+   <p><strong>#ifdef CONFIG_CPU_BPREDICT_DISABLE</strong></p> 
+   <p><strong>&nbsp;&nbsp; bic&nbsp;&nbsp; r0, r0, #CR_Z</strong></p> 
+   <p><strong>#endif</strong></p> 
+   <p><strong>#ifdef CONFIG_CPU_ICACHE_DISABLE</strong></p> 
+   <p><strong>&nbsp;&nbsp; bic&nbsp;&nbsp; r0, r0, #CR_I</strong></p> 
+   <p><strong>#endif</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r5, #(domain_val(DOMAIN_USER, DOMAIN_MANAGER) | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; domain_val(DOMAIN_KERNEL, DOMAIN_MANAGER) | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; domain_val(DOMAIN_TABLE, DOMAIN_MANAGER) | \</strong></p> 
+   <p><strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; domain_val(DOMAIN_IO, DOMAIN_CLIENT))</strong></p> 
+   <p><strong>&nbsp;&nbsp; mcr&nbsp;&nbsp; p15, 0, r5, c3, c0, 0&nbsp;&nbsp;&nbsp; @ load domain access register</strong></p> 
+   <p><strong>&nbsp;&nbsp; mcr&nbsp;&nbsp; p15, 0, r4, c2, c0, 0&nbsp;&nbsp;&nbsp; @ load page table pointer</strong></p> 
+   <p><strong>&nbsp;&nbsp; b&nbsp; __turn_mmu_on</strong></p> 
+   <p>在这儿<strong>设置了页目录地址</strong>（r4寄存器中保存），<strong>然后设置domain的保护</strong>，在前面建立页表的例程中，注意到，页表项的控制信息，是从struct proc_info_list结构体的某字段中取的，其页目录项的 domain都是0，domain寄存器中的domain&nbsp;0对应的是0b11，表示访问模式为manager,不受限制。在这里同时也完成r0的某些位的进一步设置。</p> 
+   <p>&nbsp;</p> 
+   <p>然后，__enable_mmu例程又调用了__turn_mmu_on，在同一个文件中定义：</p> 
+   <p><strong>__turn_mmu_on:</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r0, r0</strong></p> 
+   <p><strong>&nbsp;&nbsp; mcr&nbsp;&nbsp; p15, 0, r0, c1, c0, 0&nbsp;&nbsp;&nbsp; @ write control reg</strong></p> 
+   <p><strong>&nbsp;&nbsp; mrc&nbsp;&nbsp; p15, 0, r3, c0, c0, 0&nbsp;&nbsp;&nbsp; @ read id reg</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r3, r3</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; r3, r13</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; pc, r3</strong></p> 
+   <p><strong>ENDPROC(__turn_mmu_on)</strong></p> 
+   <p><br>接下来写控制寄存器：</p> 
+   <p><strong>mcr&nbsp;p15,&nbsp;0,&nbsp;r0,&nbsp;c1,&nbsp;c0&nbsp;,0</strong></p> 
+   <p>一切设置就此生效，到此算是完成了打开d,icache和mmu的工作。</p> 
+   <p>注意：arm的d&nbsp;cache必须和mmu一起打开，而i&nbsp;cache可以单独打开。其实，cache和mmu的关系实在是紧密，每一个页表项都有标志标示是否是cacheable的，可以说本来就是设计一起使用的</p> 
+   <p><br>前面有提到过，r13中存放的其实是另外一个例程的地址，其值是变量__switch_data的第一个字段，即一个函数指针的值，__switch_data变量是在arch/arm/kernel/head-common.S中定义的：</p> 
+   <p><strong>__switch_data:</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __mmap_switched</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __data_loc&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ r4</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long _data&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ r5</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __bss_start&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long _end&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ r7</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long processor_id&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ r4</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __machine_arch_type&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ r5</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long __atags_pointer&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long cr_alignment&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ r7</strong></p> 
+   <p><strong>&nbsp;&nbsp; .long init_thread_union + THREAD_START_SP @ sp</strong></p> 
+   <p>前面的<strong>ldr r13 __switch_data</strong>，实际上也就是加载符号__mmap_switched的地址，实际上__mmap_switched是一个arch/arm/kernel/head-common.S中定义的例程。接着来看这个例程的定义，在arch/arm/kernel/head-common.S文件中：</p> 
+   <p><strong>__mmap_switched:</strong></p> 
+   <p><strong>&nbsp;&nbsp; adr&nbsp;&nbsp; r3, __switch_data + 4</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldmia r3!, {r4, r5, r6, r7}</strong></p> 
+   <p><strong>&nbsp;&nbsp; cmp&nbsp;&nbsp; r4, r5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ Copy data segment if needed</strong></p> 
+   <p><strong>1: cmpne r5, r6</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldrne fp, [r4], #4</strong></p> 
+   <p><strong>&nbsp;&nbsp; strne fp, [r5], #4</strong></p> 
+   <p><strong>&nbsp;&nbsp; bne&nbsp;&nbsp; 1b</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>&nbsp;&nbsp; mov&nbsp;&nbsp; fp, #0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ Clear BSS (and zero fp)</strong></p> 
+   <p><strong>1: cmp&nbsp;&nbsp; r6, r7</strong></p> 
+   <p><strong>&nbsp;&nbsp; strcc fp, [r6],#4</strong></p> 
+   <p><strong>&nbsp;&nbsp; bcc&nbsp;&nbsp; 1b</strong></p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p><strong>&nbsp;&nbsp; ldmia r3, {r4, r5, r6, r7, sp}</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r9, [r4]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ Save processor ID</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r1, [r5]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ Save machine type</strong></p> 
+   <p><strong>&nbsp;&nbsp; str&nbsp;&nbsp; r2, [r6]&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ Save atags pointer</strong></p> 
+   <p><strong>&nbsp;&nbsp; bic&nbsp;&nbsp; r4, r0, #CR_A&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ Clear 'A' bit</strong></p> 
+   <p><strong>&nbsp;&nbsp; stmia r7, {r0, r4}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; @ Save control register values</strong></p> 
+   <p><strong>&nbsp;&nbsp; b&nbsp; start_kernel</strong></p> 
+   <p><strong>ENDPROC(__mmap_switched)</strong><br><br></p> 
+   <p>这个例程完成如下工作：</p> 
+   <p>1、使<strong>r3</strong>指向<strong>__switch_data</strong>变量的第二个字段（从1开始计数）。</p> 
+   <p>2、执行了一条加载指令，也就是在<strong>r4, r5, r6, r7寄存器</strong>中分别加载4个符号<strong>__data_loc，_data， __bss_start ，_end</strong>的地址，这四个符号都是在链接脚本arch/arm/kernel/vmlinux.lds.S中出现的，标识了镜像各个段的地址，我们应该不难猜出他们所代表的段。</p> 
+   <p>3、如果需要的话则复制数据段（数据段和BSS段是紧邻的）。</p> 
+   <p>4、初始化BSS段，全部清零，BSS是未初始化的全局变量区域。<br>5、又看到一条加载指令，同样在一组寄存器中加载借个符号的地址，r4中为processor_id，r5中为__machine_arch_type， r6中为__atags_pointer， r7中为cr_alignment ，sp中为init_thread_union + THREAD_START_SP。</p> 
+   <p>6、接着我们看到下面的几条语句，则是用前面获取的信息来初始化那些全局变量r9，机器号被保存到processor_id处；r1寄存器的值，机器号,被保存到变量__machine_arch_type中，其他的也一样。</p> 
+   <p>7、重新设置堆栈指针，指向init_task的堆栈。init_task是系统的第一个任务，init_task的堆栈在task&nbsp;structure的后8K,我们后面会看到。&nbsp;<br>8、最后就要跳到C代码的 start_kernel。&nbsp;<br><strong>&nbsp;&nbsp; b&nbsp; start_kernel</strong><br>到此为止，汇编部分的初始化代码就结束了</p> 
+   <p>&nbsp;</p> 
+   <p>O，My God.初始化代码的汇编部分终于结束。从而进入了与体系结构无关的Linux内核部分。start_kernel()会调用一系列初始化函数来设置中断，执行进一步的内存配置。</p> 
+   <p>&nbsp;</p> 
+   <p>现在让我们来回忆一下目前的系统状态：&nbsp;<br><strong>临时页表</strong>已经建立，在0X30004000处，映射了映像文件大小空间，虚地址0XC000000被映射到0X30000000。CACHE,MMU 都已经打开。堆栈用的是任务init_task的堆栈。&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>如果以为到了c代码可以松一口气的话，就大错特措了，linux的c也不比汇编好懂多少，相反倒掩盖了汇编的一些和机器相关的部分，有时候更难懂。其实作 为编写操作系统的c代码，只不过是汇编的另一种写法，和机器代码的联系是很紧密的。另外，这些<strong>start_kernel()</strong>中调用的C函数，每一个都具有举足轻重的地位，它们中的许多都肩负着初始化内核中的某个子系统的重要使命，而Linux内核中每一个子系统都错综复杂，牵涉到各种软件、硬件的复杂算法，所以理解起来倒真的是挺困难的。&nbsp;</p> 
+   <p><strong>&nbsp;</strong></p> 
+   <p>start_kernel函数在&nbsp;init/main.c中定义：</p> 
+   <p><strong>528 asmlinkage void __init start_kernel(void)</strong></p> 
+   <p><strong>529 {</strong></p> 
+   <p><strong>530&nbsp;&nbsp; char * command_line;</strong></p> 
+   <p><strong>531&nbsp;&nbsp; extern struct kernel_param __start___param[], __stop___param[];</strong></p> 
+   <p><strong>532</strong></p> 
+   <p><strong>533&nbsp;&nbsp; smp_setup_processor_id();</strong></p> 
+   <p><strong>534</strong></p> 
+   <p><strong>535&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>536&nbsp;&nbsp;&nbsp; * Need to run as early as possible, to initialize the</strong></p> 
+   <p><strong>537&nbsp;&nbsp;&nbsp; * lockdep hash:</strong></p> 
+   <p><strong>538&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>539&nbsp;&nbsp; lockdep_init();</strong></p> 
+   <p><strong>540&nbsp;&nbsp; debug_objects_early_init();</strong></p> 
+   <p><strong>541</strong></p> 
+   <p><strong>542&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>543&nbsp;&nbsp;&nbsp; * Set up the the initial canary ASAP:</strong></p> 
+   <p><strong>544&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>545&nbsp;&nbsp; boot_init_stack_canary();</strong></p> 
+   <p><strong>546</strong></p> 
+   <p><strong>547&nbsp;&nbsp; cgroup_init_early();</strong></p> 
+   <p><strong>548</strong></p> 
+   <p><strong>549&nbsp;&nbsp; local_irq_disable();</strong></p> 
+   <p><strong>550&nbsp;&nbsp; early_boot_irqs_off();</strong></p> 
+   <p><strong>551&nbsp;&nbsp; early_init_irq_lock_class();</strong></p> 
+   <p><strong>552</strong></p> 
+   <p><strong>553 /*</strong></p> 
+   <p><strong>554&nbsp; * Interrupts are still disabled. Do necessary setups, then</strong></p> 
+   <p><strong>555&nbsp; * enable them</strong></p> 
+   <p><strong>556&nbsp; */</strong></p> 
+   <p><strong>557&nbsp;&nbsp; lock_kernel();</strong></p> 
+   <p><strong>558&nbsp;&nbsp; tick_init();</strong></p> 
+   <p><strong>559&nbsp;&nbsp; boot_cpu_init();</strong></p> 
+   <p><strong>560&nbsp;&nbsp; page_address_init();</strong></p> 
+   <p><strong>561&nbsp;&nbsp; printk(KERN_NOTICE "%s", linux_banner);</strong></p> 
+   <p><strong>562&nbsp;&nbsp; setup_arch(&amp;command_line);</strong></p> 
+   <p><strong>563&nbsp;&nbsp; mm_init_owner(&amp;init_mm, &amp;init_task);</strong></p> 
+   <p><strong>564&nbsp;&nbsp; setup_command_line(command_line);</strong></p> 
+   <p><strong>565&nbsp;&nbsp; setup_nr_cpu_ids();</strong></p> 
+   <p><strong>566&nbsp;&nbsp; setup_per_cpu_areas();</strong></p> 
+   <p><strong>567&nbsp;&nbsp; smp_prepare_boot_cpu(); /* arch-specific boot-cpu hooks */</strong></p> 
+   <p><strong>568</strong></p> 
+   <p><strong>569&nbsp;&nbsp; build_all_zonelists();</strong></p> 
+   <p><strong>570&nbsp;&nbsp; page_alloc_init();</strong></p> 
+   <p><strong>571</strong></p> 
+   <p><strong>572 printk(KERN_NOTICE "Kernel command line: %s\n", boot_command_line);</strong></p> 
+   <p><strong>573&nbsp;&nbsp; parse_early_param();</strong></p> 
+   <p><strong>574 &nbsp;&nbsp;parse_args("Booting kernel", static_command_line,</strong></p> 
+   <p><strong>575&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; __start___param, __stop___param - __start___param,</strong></p> 
+   <p><strong>576&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &amp;unknown_bootoption);</strong></p> 
+   <p><strong>577&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>578&nbsp;&nbsp;&nbsp; * These use large bootmem allocations and must precede</strong></p> 
+   <p><strong>579&nbsp;&nbsp;&nbsp; * kmem_cache_init()</strong></p> 
+   <p><strong>580&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>581&nbsp;&nbsp; pidhash_init();</strong></p> 
+   <p><strong>582&nbsp;&nbsp; vfs_caches_init_early();</strong></p> 
+   <p><strong>583&nbsp;&nbsp; sort_main_extable();</strong></p> 
+   <p><strong>584&nbsp;&nbsp; trap_init();</strong></p> 
+   <p><strong>585&nbsp;&nbsp; mm_init();</strong></p> 
+   <p><strong>586&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>587&nbsp;&nbsp;&nbsp; * Set up the scheduler prior starting any interrupts (such as the</strong></p> 
+   <p><strong>588&nbsp;&nbsp;&nbsp; * timer interrupt). Full topology setup happens at smp_init()</strong></p> 
+   <p><strong>589&nbsp;&nbsp;&nbsp; * time - but meanwhile we still have a functioning scheduler.</strong></p> 
+   <p><strong>590&nbsp;&nbsp; */</strong></p> 
+   <p><strong>591&nbsp;&nbsp; sched_init();</strong></p> 
+   <p><strong>592&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>593&nbsp;&nbsp;&nbsp; * Disable preemption - early bootup scheduling is extremely</strong></p> 
+   <p><strong>594&nbsp;&nbsp;&nbsp; * fragile until we cpu_idle() for the first time.</strong></p> 
+   <p><strong>595&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>596&nbsp;&nbsp; preempt_disable();</strong></p> 
+   <p><strong>597&nbsp;&nbsp; if (!irqs_disabled()) {</strong></p> 
+   <p><strong>598&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_WARNING "start_kernel(): bug: interrupts were "</strong></p> 
+   <p><strong>599 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"enabled *very* early, fixing it\n");</strong></p> 
+   <p><strong>600&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; local_irq_disable();</strong></p> 
+   <p><strong>601&nbsp;&nbsp; }</strong></p> 
+   <p><strong>602&nbsp;&nbsp; rcu_init();</strong></p> 
+   <p><strong>603&nbsp;&nbsp; radix_tree_init();</strong></p> 
+   <p><strong>604&nbsp;&nbsp; /* init some links before init_ISA_irqs() */</strong></p> 
+   <p><strong>605&nbsp;&nbsp; early_irq_init();</strong></p> 
+   <p><strong>606&nbsp;&nbsp; init_IRQ();</strong></p> 
+   <p><strong>607&nbsp;&nbsp; prio_tree_init();</strong></p> 
+   <p><strong>608&nbsp;&nbsp; init_timers();</strong></p> 
+   <p><strong>609&nbsp;&nbsp; hrtimers_init();</strong></p> 
+   <p><strong>610&nbsp;&nbsp; softirq_init();</strong></p> 
+   <p><strong>611&nbsp;&nbsp; timekeeping_init();</strong></p> 
+   <p><strong>612&nbsp;&nbsp; time_init();</strong></p> 
+   <p><strong>613&nbsp;&nbsp; profile_init();</strong></p> 
+   <p><strong>614&nbsp;&nbsp; if (!irqs_disabled())</strong></p> 
+   <p><strong>615&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk(KERN_CRIT "start_kernel(): bug: interrupts were "</strong></p> 
+   <p><strong>616&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "enabled early\n");</strong></p> 
+   <p><strong>617&nbsp;&nbsp; early_boot_irqs_on();</strong></p> 
+   <p><strong>618&nbsp;&nbsp; local_irq_enable();</strong></p> 
+   <p><strong>619</strong></p> 
+   <p><strong>620&nbsp;&nbsp; /* Interrupts are enabled now so all GFP allocations are safe. */</strong></p> 
+   <p><strong>621&nbsp;&nbsp; gfp_allowed_mask = __GFP_BITS_MASK;</strong></p> 
+   <p><strong>622</strong></p> 
+   <p><strong>623&nbsp;&nbsp; kmem_cache_init_late();</strong></p> 
+   <p><strong>624</strong></p> 
+   <p><strong>625&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>626&nbsp;&nbsp;&nbsp; * HACK ALERT! This is early. We're enabling the console before</strong></p> 
+   <p><strong>627&nbsp;&nbsp;&nbsp; * we've done PCI setups etc, and console_init() must be aware of</strong></p> 
+   <p><strong>628&nbsp;&nbsp;&nbsp; * this. But we do want output early, in case something goes wrong.</strong></p> 
+   <p><strong>629&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>630&nbsp;&nbsp; console_init();</strong></p> 
+   <p><strong>631&nbsp;&nbsp; if (panic_later)</strong></p> 
+   <p><strong>632&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; panic(panic_later, panic_param);</strong></p> 
+   <p><strong>633</strong></p> 
+   <p><strong>634&nbsp;&nbsp; lockdep_info();</strong></p> 
+   <p><strong>635</strong></p> 
+   <p><strong>636&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>637&nbsp;&nbsp;&nbsp; * Need to run this when irqs are enabled, because it wants</strong></p> 
+   <p><strong>638&nbsp;&nbsp;&nbsp; * to self-test [hard/soft]-irqs on/off lock inversion bugs</strong></p> 
+   <p><strong>639&nbsp;&nbsp;&nbsp; * too:</strong></p> 
+   <p><strong>640&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>641&nbsp;&nbsp; locking_selftest();</strong></p> 
+   <p><strong>642</strong></p> 
+   <p><strong>643 #ifdef CONFIG_BLK_DEV_INITRD</strong></p> 
+   <p><strong>644&nbsp;&nbsp; if (initrd_start &amp;&amp; !initrd_below_start_ok &amp;&amp;</strong></p> 
+   <p><strong>645&nbsp;&nbsp; page_to_pfn(virt_to_page((void *)initrd_start)) &lt; min_low_pfn) {</strong></p> 
+   <p><strong>646&nbsp;&nbsp; printk(KERN_CRIT "initrd overwritten (0x%08lx &lt; 0x%08lx) - "</strong></p> 
+   <p><strong>647&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; "disabling it.\n",</strong></p> 
+   <p><strong>648&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; page_to_pfn(virt_to_page((void *)initrd_start)),</strong></p> 
+   <p><strong>649&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; min_low_pfn);</strong></p> 
+   <p><strong>650&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; initrd_start = 0;</strong></p> 
+   <p><strong>651&nbsp;&nbsp; }</strong></p> 
+   <p><strong>652 #endif</strong></p> 
+   <p><strong>653&nbsp;&nbsp; page_cgroup_init();</strong></p> 
+   <p><strong>654&nbsp;&nbsp; enable_debug_pagealloc();</strong></p> 
+   <p><strong>655&nbsp;&nbsp; kmemtrace_init();</strong></p> 
+   <p><strong>656&nbsp;&nbsp; kmemleak_init();</strong></p> 
+   <p><strong>657&nbsp;&nbsp; debug_objects_mem_init();</strong></p> 
+   <p><strong>658&nbsp;&nbsp; idr_init_cache();</strong></p> 
+   <p><strong>659&nbsp;&nbsp; setup_per_cpu_pageset();</strong></p> 
+   <p><strong>660&nbsp;&nbsp; numa_policy_init();</strong></p> 
+   <p><strong>661&nbsp;&nbsp; if (late_time_init)</strong></p> 
+   <p><strong>662&nbsp;&nbsp; late_time_init();</strong></p> 
+   <p><strong>663&nbsp;&nbsp; sched_clock_init();</strong></p> 
+   <p><strong>664&nbsp;&nbsp; calibrate_delay();</strong></p> 
+   <p><strong>665&nbsp;&nbsp; pidmap_init();</strong></p> 
+   <p><strong>666&nbsp;&nbsp; anon_vma_init();</strong></p> 
+   <p><strong>667 #ifdef CONFIG_X86</strong></p> 
+   <p><strong>668&nbsp;&nbsp; if (efi_enabled)</strong></p> 
+   <p><strong>669&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; efi_enter_virtual_mode();</strong></p> 
+   <p><strong>670 #endif</strong></p> 
+   <p><strong>671&nbsp;&nbsp; thread_info_cache_init();</strong></p> 
+   <p><strong>672&nbsp;&nbsp; cred_init();</strong></p> 
+   <p><strong>673&nbsp;&nbsp; fork_init(totalram_pages);</strong></p> 
+   <p><strong>674&nbsp;&nbsp; proc_caches_init();</strong></p> 
+   <p><strong>675&nbsp;&nbsp; buffer_init();</strong></p> 
+   <p><strong>676&nbsp;&nbsp; key_init();</strong></p> 
+   <p><strong>677&nbsp;&nbsp; security_init();</strong></p> 
+   <p><strong>678&nbsp;&nbsp; vfs_caches_init(totalram_pages);</strong></p> 
+   <p><strong>679&nbsp;&nbsp; signals_init();</strong></p> 
+   <p><strong>680&nbsp;&nbsp; /* rootfs populating might need page-writeback */</strong></p> 
+   <p><strong>681&nbsp;&nbsp; page_writeback_init();</strong></p> 
+   <p><strong>682 #ifdef CONFIG_PROC_FS</strong></p> 
+   <p><strong>683&nbsp;&nbsp; proc_root_init();</strong></p> 
+   <p><strong>684 #endif</strong></p> 
+   <p><strong>685&nbsp;&nbsp; cgroup_init();</strong></p> 
+   <p><strong>686&nbsp;&nbsp; cpuset_init();</strong></p> 
+   <p><strong>687&nbsp;&nbsp; taskstats_init_early();</strong></p> 
+   <p><strong>688&nbsp;&nbsp; delayacct_init();</strong></p> 
+   <p><strong>689</strong></p> 
+   <p><strong>690&nbsp;&nbsp; check_bugs();</strong></p> 
+   <p><strong>691</strong></p> 
+   <p><strong>692&nbsp;&nbsp; acpi_early_init(); /* before LAPIC and SMP init */</strong></p> 
+   <p><strong>693&nbsp;&nbsp; sfi_init_late();</strong></p> 
+   <p><strong>694</strong></p> 
+   <p><strong>695&nbsp;&nbsp; ftrace_init();</strong></p> 
+   <p><strong>696</strong></p> 
+   <p><strong>697&nbsp;&nbsp; /* Do the rest non-__init'ed, we're now alive */</strong></p> 
+   <p><strong>698&nbsp;&nbsp; rest_init();</strong></p> 
+   <p><strong>699 }</strong></p> 
+   <p>&nbsp;</p> 
+   <p>接着我们来近距离的观察一下start_kernel函数中调用的这些重量级的函数。</p> 
+   <p>&nbsp;</p> 
+   <p>首先来看setup_arch(&amp;command_line)函数，这个函数（对于我们的mini2440平台来说）在arch/arm/kernel/setup.c中定义：</p> 
+   <p><strong>664 void __init setup_arch(char **cmdline_p)</strong></p> 
+   <p><strong>665 {</strong></p> 
+   <p><strong>666&nbsp;&nbsp; struct tag *tags = (struct tag *)&amp;init_tags;</strong></p> 
+   <p><strong>667&nbsp;&nbsp; struct machine_desc *mdesc;</strong></p> 
+   <p><strong>668&nbsp;&nbsp; char *from = default_command_line;</strong></p> 
+   <p><strong>669</strong></p> 
+   <p><strong>670&nbsp;&nbsp; unwind_init();</strong></p> 
+   <p><strong>671</strong></p> 
+   <p><strong>672&nbsp;&nbsp; setup_processor();</strong></p> 
+   <p><strong>673&nbsp;&nbsp; mdesc = setup_machine(machine_arch_type);</strong></p> 
+   <p><strong>674&nbsp;&nbsp; machine_name = mdesc-&gt;name;</strong></p> 
+   <p><strong>675</strong></p> 
+   <p><strong>676&nbsp;&nbsp; if (mdesc-&gt;soft_reboot)</strong></p> 
+   <p><strong>677&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; reboot_setup("s");</strong></p> 
+   <p><strong>678</strong></p> 
+   <p><strong>679&nbsp;&nbsp; if (__atags_pointer)</strong></p> 
+   <p><strong>680&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tags = phys_to_virt(__atags_pointer);</strong></p> 
+   <p><strong>681&nbsp;&nbsp; else if (mdesc-&gt;boot_params)</strong></p> 
+   <p><strong>682&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tags = phys_to_virt(mdesc-&gt;boot_params);</strong></p> 
+   <p><strong>683</strong></p> 
+   <p><strong>684&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>685&nbsp;&nbsp;&nbsp; * If we have the old style parameters, convert them to</strong></p> 
+   <p><strong>686&nbsp;&nbsp;&nbsp; * a tag list.</strong></p> 
+   <p><strong>687&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>688&nbsp;&nbsp; if (tags-&gt;hdr.tag != ATAG_CORE)</strong></p> 
+   <p><strong>689&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; convert_to_tag_list(tags);</strong></p> 
+   <p><strong>690&nbsp;&nbsp; if (tags-&gt;hdr.tag != ATAG_CORE)</strong></p> 
+   <p><strong>691&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; tags = (struct tag *)&amp;init_tags;</strong></p> 
+   <p><strong>692</strong></p> 
+   <p><strong>693&nbsp;&nbsp; if (mdesc-&gt;fixup)</strong></p> 
+   <p><strong>694&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mdesc-&gt;fixup(mdesc, tags, &amp;from, &amp;meminfo);</strong></p> 
+   <p><strong>695</strong></p> 
+   <p><strong>696&nbsp;&nbsp; if (tags-&gt;hdr.tag == ATAG_CORE) {</strong></p> 
+   <p><strong>697&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (meminfo.nr_banks != 0)</strong></p> 
+   <p><strong>698&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; squash_mem_tags(tags);</strong></p> 
+   <p><strong>699&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; save_atags(tags);</strong></p> 
+   <p><strong>700&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; parse_tags(tags);</strong></p> 
+   <p><strong>701&nbsp;&nbsp; }</strong></p> 
+   <p><strong>702</strong></p> 
+   <p><strong>703&nbsp;&nbsp; init_mm.start_code = (unsigned long) _text;</strong></p> 
+   <p><strong>704&nbsp;&nbsp; init_mm.end_code&nbsp;&nbsp; = (unsigned long) _etext;</strong></p> 
+   <p><strong>705&nbsp;&nbsp; init_mm.end_data&nbsp;&nbsp; = (unsigned long) _edata;</strong></p> 
+   <p><strong>706&nbsp;&nbsp; init_mm.brk&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = (unsigned long) _end;</strong></p> 
+   <p><strong>707</strong></p> 
+   <p><strong>708&nbsp;&nbsp; /* parse_early_param needs a boot_command_line */</strong></p> 
+   <p><strong>709&nbsp;&nbsp; strlcpy(boot_command_line, from, COMMAND_LINE_SIZE);</strong></p> 
+   <p><strong>710</strong></p> 
+   <p><strong>711&nbsp;&nbsp; /* populate cmd_line too for later use, preserving boot_command_line */</strong></p> 
+   <p><strong>712&nbsp;&nbsp; strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);</strong></p> 
+   <p><strong>713&nbsp;&nbsp; *cmdline_p = cmd_line;</strong></p> 
+   <p><strong>714</strong></p> 
+   <p><strong>715&nbsp;&nbsp; parse_early_param();</strong></p> 
+   <p><strong>716</strong></p> 
+   <p><strong>717&nbsp;&nbsp; paging_init(mdesc);</strong></p> 
+   <p><strong>718&nbsp;&nbsp; request_standard_resources(&amp;meminfo, mdesc);</strong></p> 
+   <p><strong>719</strong></p> 
+   <p><strong>720 #ifdef CONFIG_SMP</strong></p> 
+   <p><strong>721 &nbsp;&nbsp;smp_init_cpus();</strong></p> 
+   <p><strong>722 #endif</strong></p> 
+   <p><strong>723</strong></p> 
+   <p><strong>724&nbsp;&nbsp; cpu_init();</strong></p> 
+   <p><strong>725&nbsp;&nbsp; tcm_init();</strong></p> 
+   <p><strong>726</strong></p> 
+   <p><strong>727&nbsp;&nbsp; /*</strong></p> 
+   <p><strong>728&nbsp;&nbsp;&nbsp; * Set up various architecture-specific pointers</strong></p> 
+   <p><strong>729&nbsp;&nbsp;&nbsp; */</strong></p> 
+   <p><strong>730&nbsp;&nbsp; init_arch_irq = mdesc-&gt;init_irq;</strong></p> 
+   <p><strong>731&nbsp;&nbsp; system_timer = mdesc-&gt;timer;</strong></p> 
+   <p><strong>732&nbsp;&nbsp; init_machine = mdesc-&gt;init_machine;</strong></p> 
+   <p><strong>733</strong></p> 
+   <p><strong>734 #ifdef CONFIG_VT</strong></p> 
+   <p><strong>735 #if defined(CONFIG_VGA_CONSOLE)</strong></p> 
+   <p><strong>736&nbsp;&nbsp; conswitchp = &amp;vga_con;</strong></p> 
+   <p><strong>737 #elif defined(CONFIG_DUMMY_CONSOLE)</strong></p> 
+   <p><strong>738&nbsp;&nbsp; conswitchp = &amp;dummy_con;</strong></p> 
+   <p><strong>739 #endif</strong></p> 
+   <p><strong>740 #endif</strong></p> 
+   <p><strong>741&nbsp;&nbsp; early_trap_init();</strong></p> 
+   <p><strong>742 }</strong></p> 
+   <p>来看一些我们比较感兴趣的地方：</p> 
+   <p>1、666行，struct tag指针类型的局部变量指向了默认的tag列表init_tags，该静态变量在setup_arch()定义同文件的前面有如下定义：</p> 
+   <p><strong>636 /*</strong></p> 
+   <p><strong>637&nbsp; * This holds our defaults.</strong></p> 
+   <p><strong>638&nbsp; */</strong></p> 
+   <p><strong>639 static struct init_tags {</strong></p> 
+   <p><strong>640&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct tag_header hdr1;</strong></p> 
+   <p><strong>641&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct tag_core&nbsp;&nbsp; core;</strong></p> 
+   <p><strong>642&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;struct tag_header hdr2;</strong></p> 
+   <p><strong>643&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct tag_mem32&nbsp; mem;</strong></p> 
+   <p><strong>644&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct tag_header hdr3;</strong></p> 
+   <p><strong>645 } init_tags __initdata = {</strong></p> 
+   <p><strong>646&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { tag_size(tag_core), ATAG_CORE },</strong></p> 
+   <p><strong>647&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { 1, PAGE_SIZE, 0xff },</strong></p> 
+   <p><strong>648&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { tag_size(tag_mem32), ATAG_MEM },</strong></p> 
+   <p><strong>649&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { MEM_SIZE, PHYS_OFFSET },</strong></p> 
+   <p><strong>650&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; { 0, ATAG_NONE }</strong></p> 
+   <p><strong>651 };</strong></p> 
+   <p>第679行检察__atags_pointer指针的有效性，这个指针是在前面，跳转到start_kernel函数的汇编例程最后设置的几个变量之一，用的是R2寄存器的值。如果bootloader通过R2传递了tag列表的话，自然是要使用bootloader穿的进来的tag列表的。</p> 
+   <p>&nbsp;</p> 
+   <p>2、第688行的字符指针类型的局部变量from指向了default_command_line静态变量，这个变量同样在前面有定义：</p> 
+   <p><strong>124 static char default_command_line[COMMAND_LINE_SIZE] __initdata = CONFIG_CMDLINE;</strong></p> 
+   <p>传递给内核的命令行参数，是可以在内核配置的时候设置的。</p> 
+   <p>3、第673行以machine_arch_type为参数调用了setup_machine()函数，而这个函数的定义为：</p> 
+   <p>369 static struct machine_desc * __init setup_machine(unsigned int nr)</p> 
+   <p>370 {</p> 
+   <p>371&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; struct machine_desc *list;</p> 
+   <p>372</p> 
+   <p>373&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; /*</p> 
+   <p>374&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; * locate machine in the list of supported machines.</p> 
+   <p>375&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; */</p> 
+   <p>376&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; list = lookup_machine_type(nr);</p> 
+   <p>377&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!list) {</p> 
+   <p>378&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk("Machine configuration botched (nr %d), "</p> 
+   <p>379&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; " unable to continue.\n", nr);</p> 
+   <p>380&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; while (1);</p> 
+   <p>381&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }</p> 
+   <p>382</p> 
+   <p>383&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; printk("Machine: %s\n", list-&gt;name);</p> 
+   <p>384</p> 
+   <p>385&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return list;</p> 
+   <p>386 }</p> 
+   <p>在arch/arm/kernel/head-common.S文件中，我们看到了一个对于<strong>__lookup_machine_type</strong>例程的封装的可被C语言程序调用的汇编语言编写的函数lookup_machine_type()，接收机器号，查表，然后返回匹配的struct machine_desc结构体的指针。在这里，对于我们的mini2440，返回的自然是arch/arm/mach-s3c2440/ mach-mini2440.c文件中定义的结构体了：</p> 
+   <p><strong>MACHINE_START(MINI2440, "MINI2440")</strong></p> 
+   <p><strong>&nbsp;&nbsp; /* Maintainer: Michel Pollet &lt;buserror@gmail.com&gt; */</strong></p> 
+   <p><strong>&nbsp;&nbsp; .phys_io = S3C2410_PA_UART,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .io_pg_offst = (((u32)S3C24XX_VA_UART) &gt;&gt; 18) &amp; 0xfffc,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .boot_params = S3C2410_SDRAM_PA + 0x100,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .map_io&nbsp;&nbsp;&nbsp;&nbsp; = mini2440_map_io,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .init_machine&nbsp;&nbsp; = mini2440_init,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .init_irq = s3c24xx_init_irq,</strong></p> 
+   <p><strong>&nbsp;&nbsp; .timer&nbsp;&nbsp; = &amp;s3c24xx_timer,</strong></p> 
+   <p><strong>MACHINE_END</strong></p> 
+   <p>然后，machine_desc结构体的name成员的值被赋给全局变量machine_name。</p> 
+   <p>第681行，若bootloader没有传递tag列表给内核，则检测machine_desc结构体的boot_params字段，看看特定的平台是否传递了标记列表。</p> 
+   <p>第730、731、732行分别将machine_desc结构体的init_irq、timer和init_machine成员值赋给了三个全局变量init_arch_irq、system_timer和init_machine，即是设置特定体系结构的指针。初始化的后面阶段自然会用到。</p> 
+   <p> &nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>start_kernel()函数调用同文件下的rest_init(void)函数，rest_init(void)函数调用 kernel_thread()函数以启动第一个核心线程，该线程执行kernel_init()函数，而原执行序列会调用cpu_idle()，等待调度。</p> 
+   <p>作为核心线程的kernel_init()函数继续完成一些设置，并在最后调用同文件下的init_post()函数，而该函数挂在根文件系统，打开/dev/console设备，重定向stdin、stdout和stderr到控制台。之后，它搜索文件系统中的init程序（也可以由“init=”命令行参数指定init程序），并使用run_init_process()函数执行init程序。（事实上，run_init_process()函数又调用了kernel_execve()来实际执行程序）。搜索init程序的顺序为/sbin/init、/etc/init、/bin/init、和/bin/sh。在嵌入式系统中，多数情况下，可以给内核传入一个简单的shell脚本来启动必需的嵌入式应用程序。</p> 
+   <p>至此，漫长的Linux内核引导和启动过程就结束了，而kernel_init()对应的由rest_init(void)函数创建的第一个线程也进入用户模式。</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>参考文献：</p> 
+   <p>arm 嵌入式LINUX启动过程：</p> 
+   <p>http://blog.ednchina.com/yujiebaomei/4153/message.aspx</p> 
+   <p>http://www.cnblogs.com/bluepointcq/articles/490954.html</p> 
+   <p>Linux设备驱动开发详解，宋宝华</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

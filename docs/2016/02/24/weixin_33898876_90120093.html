@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>uboot命令分析+实现【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://xouou.iteye.com/blog/2150061    先贴一个重要结构,位于uboot/include/command.h,这个结构代表每个uboot命令    struct&nbsp;cmd_tbl_s&nbsp;{    &nbsp;&nbsp;&nbs...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/02/24/weixin_33898876_90120093.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">uboot命令分析+实现【转】</h1>
+    <p class="post-meta">Feb 24, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://xouou.iteye.com/blog/2150061" rel="nofollow">http://xouou.iteye.com/blog/2150061</a></p> 
+   <p>先贴一个重要结构,位于uboot/include/command.h,这个结构代表每个uboot命令</p> 
+   <p>struct&nbsp;cmd_tbl_s&nbsp;{</p> 
+   <p>&nbsp;&nbsp;&nbsp;char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*name;&nbsp;&nbsp;&nbsp;/* Command Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;maxargs;&nbsp;&nbsp;&nbsp;&nbsp;/* maximum number of arguments*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;repeatable;/* autorepeat allowed?&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* Implementation function&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;int&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(*cmd)(struct&nbsp;cmd_tbl_s&nbsp;*,&nbsp;int,&nbsp;int,&nbsp;char&nbsp;*[]);</p> 
+   <p>&nbsp;&nbsp;&nbsp;char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*usage;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* Usage message&nbsp;&nbsp;&nbsp;(short)简短用法信息*/</p> 
+   <p>#ifdefCFG_LONGHELP</p> 
+   <p>&nbsp;&nbsp;&nbsp;char&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*help;&nbsp;&nbsp;&nbsp;/* Help&nbsp;&nbsp;message&nbsp;&nbsp;&nbsp;(long)&nbsp;长的帮助信息*/</p> 
+   <p>#endif</p> 
+   <p>#ifdef&nbsp;CONFIG_AUTO_COMPLETE</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* do auto completion on the arguments */</p> 
+   <p>&nbsp;&nbsp;&nbsp;int&nbsp;&nbsp;(*complete)(intargc,&nbsp;char&nbsp;*argv[],&nbsp;charlast_char,&nbsp;intmaxv,&nbsp;char*cmdv[]);</p> 
+   <p>#endif</p> 
+   <p>};</p> 
+   <p>&nbsp;</p> 
+   <p>typedef struct&nbsp;cmd_tbl_s&nbsp;&nbsp;&nbsp;&nbsp;cmd_tbl_t;</p> 
+   <p>============================================================</p> 
+   <p>&nbsp;</p> 
+   <p>uboot的第一阶段:硬件相关初始化</p> 
+   <p>0.reset&nbsp;执行arm920t/start.s&nbsp;&nbsp;过程如下</p> 
+   <p>1.设置cpu svc管理模式</p> 
+   <p>2.关看门狗中断,mmu等</p> 
+   <p>3.设置时钟,sdram,外部总线</p> 
+   <p>4.代码重定位,搬运代码,从flash到sdram</p> 
+   <p>5.设置栈,bss段清零, bss用于未初始化的全局变量和静态变量</p> 
+   <p>6.ldr pc, _start_armboot</p> 
+   <p>&nbsp;&nbsp;&nbsp;即进入uboot启动的第二阶段,调用c函数start_armboot()</p> 
+   <p>&nbsp;</p> 
+   <p>从start_armboot&nbsp;开始</p> 
+   <p>经过一系列外设初始化</p> 
+   <p>比如</p> 
+   <p>falsh_init</p> 
+   <p>nand_init</p> 
+   <p>...</p> 
+   <p>最后循环调用mian_loop()</p> 
+   <p>main_loop主要流程</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;1.&nbsp;生成环境变量mtdparts,&nbsp;调用mtdparts_init</p> 
+   <p>&nbsp;&nbsp;&nbsp;2.&nbsp;在启动过程中</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;若无空格键按下则boot_zImage,即run_command(getenv("bootcmd"),0)</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;有空格键按下则&nbsp;run_command("menu",0)</p> 
+   <p>&nbsp;&nbsp;&nbsp;3. shell过程，读取用户的输入并执行相应的命令</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;从控制台获得命令，保存在全局变量comsole_buffer中</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;解析命令行字符串,分割命令与参数,最后执行&nbsp;run_command(...);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>也就是说在mian_loop中,是处理环境变量和控制台人机交互,</p> 
+   <p>mian_loop调用readline ()读取命令行到console_buffer，</p> 
+   <p>再把console_buffer复制到lastcommand中去，</p> 
+   <p>还要设置flag，最后调用run_command (lastcommand, flag)函数,</p> 
+   <p>run_command (lastcommand, flag)函数中，首先定义cmd_tbl_t *cmdtp，再解析命令行。</p> 
+   <p>再调用find_cmd(argv[0])函数，其中argv[0]应该是命令本身，参数已经被剥离，</p> 
+   <p>这个函数返回的是一个cmd_tbl_t结构体，</p> 
+   <p>就是说每个命令都有一个cmd_tbl_t结构体相对应,关于run_command函数后面再分析</p> 
+   <p>&nbsp;</p> 
+   <p>mian_loop中有</p> 
+   <p>#define CONFIG_BOOTDELAY 3&nbsp;&nbsp;//设置启动延时时间</p> 
+   <p>//如果延时大于等于零，并且没有在延时过程中接收到按键，则引导内核</p> 
+   <p>if (bootdelay &gt;=&nbsp;0&nbsp;&amp;&amp; s &amp;&amp; !abortboot (bootdelay)) { //</p> 
+   <p># ifdef&nbsp;CONFIG_AUTOBOOT_KEYED</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;intprev&nbsp;= disable_ctrlc(1);/* disable Control C checking */</p> 
+   <p># endif&nbsp;&nbsp;&nbsp;//状态设置</p> 
+   <p>&nbsp;</p> 
+   <p># ifndef&nbsp;CFG_HUSH_PARSER</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printf("Booting Linux ...\n");&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;//启动&nbsp;linux&nbsp;&nbsp;&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;run_command&nbsp;(s,&nbsp;0);&nbsp;&nbsp;//运行引导内核的命令,s=getenv("bootcmd")&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;</p> 
+   <p>加载linux内核时将使用变量“bootcmd”和&nbsp;“bootargs”,</p> 
+   <p>变量“bootcmd”和&nbsp;“bootargs”的值可以在在加载linux内核前，</p> 
+   <p>uboot的命令控制台中进行修改</p> 
+   <p>&nbsp;</p> 
+   <p>bootcmd=nand read.jffs2 0x30007FC0 kernel;&nbsp;bootm&nbsp;0x30007FC0</p> 
+   <p>第一条命令&nbsp;&nbsp;从flash上读出内核&nbsp;&nbsp;&nbsp;kernel是一个分区标志</p> 
+   <p>第二条命令&nbsp;&nbsp;启动命令指示了启动地址</p> 
+   <p>&nbsp;</p> 
+   <p>而bootargs是其它参数信息</p> 
+   <p>而&nbsp;run_command (getenv ("bootcmd"), flag)</p> 
+   <p>&nbsp;</p> 
+   <p>bootcmd中的bootm,即boot application image from memory</p> 
+   <p>参数形式:"bootm addr"</p> 
+   <p>当addr省略的时候bootm加载默认的配置宏</p> 
+   <p>#define CONFIG_SYS_LOAD_ADDR&nbsp;&nbsp;0x30008000&nbsp;&nbsp;/* default load address */</p> 
+   <p>&nbsp;</p> 
+   <p>uboot中,"bootm"命令的执行函数为do_bootm(),这个是由U_BOOT_CMD绑定的函数指针,</p> 
+   <p>在do_bootm()中执行了do_bootm_linux(),</p> 
+   <p>do_bootm_linux()函数中获取了"bootargs"环境变量的值,最终将此值传递给linux内核,</p> 
+   <p>并调用theKernel函数,完成对linux内核的加载启动</p> 
+   <p>&nbsp;</p> 
+   <p>linux内核的启动,主要就是执行环境变量bootcmd和bootargs所定义的命令.</p> 
+   <p>============================================================</p> 
+   <p>&nbsp;</p> 
+   <p>uboot的核心功能是用run_command()来执行的</p> 
+   <p>run_command是怎么实现的?</p> 
+   <p>&nbsp;</p> 
+   <p>int&nbsp;run_command (const&nbsp;char&nbsp;*cmd,&nbsp;intflag)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;cmd_tbl_t&nbsp;*cmdtp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;charcmdbuf[CFG_CBSIZE];&nbsp;&nbsp;&nbsp;&nbsp;/* working copy of cmd&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;char&nbsp;*token;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* start of token in cmdbuf*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;char&nbsp;*sep;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* end of token (separator) in cmdbuf */</p> 
+   <p>&nbsp;&nbsp;&nbsp;charfinaltoken[CFG_CBSIZE];</p> 
+   <p>&nbsp;&nbsp;&nbsp;char&nbsp;*str&nbsp;=&nbsp;cmdbuf;</p> 
+   <p>&nbsp;&nbsp;&nbsp;char&nbsp;*argv[CFG_MAXARGS +&nbsp;1];&nbsp;&nbsp;&nbsp;/* NULL terminated*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;intargc,&nbsp;inquotes;</p> 
+   <p>&nbsp;&nbsp;&nbsp;intrepeatable&nbsp;=&nbsp;1;</p> 
+   <p>&nbsp;&nbsp;&nbsp;intrc&nbsp;=&nbsp;0;</p> 
+   <p>&nbsp;&nbsp;&nbsp;...</p> 
+   <p>&nbsp;&nbsp;&nbsp;if ((cmdtp =&nbsp;find_cmd(argv[0])) == NULL) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;printf ("Unknown command '%s' - try 'help'\n", argv[0]);</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rc = -1;/* give up after bad command */</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;continue;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;...</p> 
+   <p>&nbsp;&nbsp;&nbsp;if ((cmdtp-&gt;cmd) (cmdtp, flag, argc, argv)&nbsp;!= 0) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rc = -1;</p> 
+   <p>&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;...</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>run_command(...)&nbsp;&nbsp;&nbsp;&nbsp;//流程解析</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;1.&nbsp;对\;解析,分割出一个个命令</p> 
+   <p>&nbsp;&nbsp;&nbsp;2.&nbsp;然后对每一个完整的命令执行</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;parse_line</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;line是整条的命令行bootcmd的值</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;例如line =&nbsp;nand read.jffs2 0x30007FC0 kernel;&nbsp;bootm&nbsp;0x30007FC0</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;先去掉开头的空格,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;然后对命令进行解析，找到空格之后将空格替换为\0，这样解析出命令和参数</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;find_cmd(argv[0])</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;从&nbsp;__u_boot_cmd_start&nbsp;到&nbsp;__u_boot_cmd_end&nbsp;的array进行遍历,</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;从找到的cmd_tbl_t中,字符串寻找cmdtp-&gt;name与argv[0]相同的命令</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;找到匹配的命令后，调用cmd_tbl_t-&gt;cmd执行</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>run_command函数中的parse_line函数主要代码如下</p> 
+   <p>int&nbsp;parse_line&nbsp;(char *line, char *argv[])</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;...</p> 
+   <p>&nbsp;&nbsp;&nbsp;while ((*line == ' ') || (*line == '\t'))</p> 
+   <p>&nbsp;&nbsp;&nbsp;{</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;++line;</p> 
+   <p>&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;...</p> 
+   <p>}</p> 
+   <p>============================================================</p> 
+   <p>run_command函数中的find_cmd()</p> 
+   <p>cmd_tbl_t *find_cmd (const&nbsp;char&nbsp;*cmd)</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;cmd_tbl_t *cmdtp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;cmd_tbl_t *cmdtp_temp&nbsp;= &amp;__u_boot_cmd_start;&nbsp;&nbsp;&nbsp;/*Init value */</p> 
+   <p>&nbsp;&nbsp;&nbsp;const&nbsp;char&nbsp;*p;</p> 
+   <p>&nbsp;&nbsp;&nbsp;intlen;</p> 
+   <p>&nbsp;&nbsp;&nbsp;intn_found&nbsp;=&nbsp;0;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;/*</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;* Some commands allow length modifiers (like "cp.b");</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;* compare command name only until first dot.</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;*/</p> 
+   <p>&nbsp;&nbsp;&nbsp;len&nbsp;= ((p&nbsp;=&nbsp;strchr(cmd,&nbsp;'.')) ==&nbsp;NULL) ?&nbsp;strlen&nbsp;(cmd) : (p&nbsp;-&nbsp;cmd);</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;for (cmdtp&nbsp;&nbsp;= &amp;__u_boot_cmd_start;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cmdtp&nbsp;!= &amp;__u_boot_cmd_start;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cmdtp++) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (strncmp&nbsp;(cmd,&nbsp;cmdtp-&gt;name,&nbsp;len) ==&nbsp;0) {</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;if (len&nbsp;==&nbsp;strlen&nbsp;(cmdtp-&gt;name))</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;cmdtp;&nbsp;&nbsp;&nbsp;/* full match */</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;//如果名字匹配,就返回这个结构体,否则比较下一个</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cmdtp_temp&nbsp;=&nbsp;cmdtp;&nbsp;&nbsp;&nbsp;/* abbreviated command ? */</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;n_found++;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;if (n_found&nbsp;==&nbsp;1) {&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/* exactly one match */</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;return&nbsp;cmdtp_temp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;}</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;return&nbsp;NULL;/* not found or ambiguous command */</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>其中__u_boot_cmd_start和__u_boot_cmd_start是怎么来的?</p> 
+   <p>查找发现只有在command.h中有声明</p> 
+   <p>extern cmd_tbl_t&nbsp;&nbsp;__u_boot_cmd_start;</p> 
+   <p>extern cmd_tbl_t&nbsp;&nbsp;__u_boot_cmd_end;</p> 
+   <p>&nbsp;</p> 
+   <p>而__u_boot_cmd_start是在链接脚本uboot.lds里面定义的</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;. = .;</p> 
+   <p>&nbsp;&nbsp;&nbsp;__u_boot_cmd_start = .;</p> 
+   <p>&nbsp;&nbsp;&nbsp;.u_boot_cmd : { *(.u_boot_cmd) }&nbsp;&nbsp;//所有u_boot_cmd宏命令都保存在这个段</p> 
+   <p>&nbsp;&nbsp;&nbsp;__u_boot_cmd_end = .;</p> 
+   <p>&nbsp;</p> 
+   <p>在command.h中有</p> 
+   <p>#define Struct_Section&nbsp;&nbsp;__attribute__ ((unused,section (".u_boot_cmd")))</p> 
+   <p>&nbsp;</p> 
+   <p>#define&nbsp;U_BOOT_CMD(name,maxargs,rep,cmd,usage,help) \</p> 
+   <p>cmd_tbl_t&nbsp;__u_boot_cmd_##name Struct_Section = {#name, maxargs, rep, cmd, usage, help}</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>搜索到在cmd_bootm.c中有&nbsp;U_BOOT_CMD的实参</p> 
+   <p>U_BOOT_CMD(</p> 
+   <p>&nbsp;&nbsp;&nbsp;bootm,CFG_MAXARGS,1,do_bootm,</p> 
+   <p>&nbsp;&nbsp;&nbsp;"bootm&nbsp;&nbsp;&nbsp;- boot application image from memory\n",</p> 
+   <p>&nbsp;&nbsp;&nbsp;"[addr [arg ...]]\n&nbsp;&nbsp;&nbsp;&nbsp;- boot application image stored in memory\n"</p> 
+   <p>&nbsp;&nbsp;&nbsp;"\tpassing arguments 'arg ...'; when booting a Linux kernel,\n"</p> 
+   <p>&nbsp;&nbsp;&nbsp;"\t'arg' can be the address of an initrd image\n"</p> 
+   <p>#ifdef CONFIG_OF_FLAT_TREE</p> 
+   <p>&nbsp;&nbsp;&nbsp;"\tWhen booting a Linux kernel which requires a flat device-tree\n"</p> 
+   <p>&nbsp;&nbsp;&nbsp;"\ta third argument is required which is the address of the of the\n"</p> 
+   <p>&nbsp;&nbsp;&nbsp;"\tdevice-tree blob. To boot that kernel without an initrd image,\n"</p> 
+   <p>&nbsp;&nbsp;&nbsp;"\tuse a '-' for the second argument. If you do not pass a third\n"</p> 
+   <p>&nbsp;&nbsp;&nbsp;"\ta bd_info struct will be passed instead\n"</p> 
+   <p>#endif</p> 
+   <p>);</p> 
+   <p>&nbsp;</p> 
+   <p>将这个宏展开并替换</p> 
+   <p>#define&nbsp;U_BOOT_CMD(name,maxargs,rep,cmd,usage,help) \</p> 
+   <p>cmd_tbl_t&nbsp;__u_boot_cmd_bootm&nbsp;__attribute__ ((unused,section (".u_boot_cmd"))) =</p> 
+   <p>{"bootm", CFG_MAXARGS, 1, do_bootm, "bootm&nbsp;&nbsp;&nbsp;- boot application image from memory\n", "阴影部分"}</p> 
+   <p>参数说明---------------</p> 
+   <p>名称:bootm</p> 
+   <p>将段属性设置为: .u_boot_cmd</p> 
+   <p>最大参数个数:CFG_MAXARGS</p> 
+   <p>是否可重复:1 ,&nbsp;可重复,即下一次按回车时可重复执行</p> 
+   <p>cmd对应do_bootm,这是在cmd_tblt_t中定义的函数指针,命令就是在这个函数中实现</p> 
+   <p>usage:使用概要&nbsp;"bootm&nbsp;&nbsp;&nbsp;- boot application image from memory\n"</p> 
+   <p>help:详细帮助:那一大段阴影部分</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>总结:</p> 
+   <p>每个U_BOOT_CMD宏组成的命令实质上是一个个cmd_tbl_t结构,</p> 
+   <p>它们在链接时全部被定位保存到__u_boot_cmd_start起始地址开始的段中,也就是.u_boot_cmd段中.</p> 
+   <p>&nbsp;</p> 
+   <p>当上电后,若启动的是默认的linux内核,执行run_command (getenv ("bootcmd"), flag),</p> 
+   <p>由bootcmd字串中得知bootm,bootm的执行函数是do_bootm(),</p> 
+   <p>在do_bootm()中执行了do_bootm_linux(...),</p> 
+   <p>do_bootm_linux()函数中获取了"bootargs"环境变量的值,</p> 
+   <p>最终将此值传递给linux内核,并调用theKernel函数,完成对linux内核的加载启动</p> 
+   <p>&nbsp;</p> 
+   <p>当上电后,若用户按空格并输入命令,先同样执行run_command函数,调用find_cmd遍历每一个cmd_tbl_t结构,</p> 
+   <p>比较cmdtp-&gt;name,当名称匹配时,就通过cmd_tbl_t结构的(*cmd)(...)函数指针来执行命令功能,</p> 
+   <p>即执行cmd_tbl_t-&gt;cmd</p> 
+   <p>&nbsp;</p> 
+   <p>============================================================</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp;<strong>添加</strong><strong>uboot</strong><strong>命令</strong></p> 
+   <p>在uboot/include/configs/xxx.h文件中，添加#define CONFIG_CMD_MYCMD&nbsp;启用我们的自定义命令</p> 
+   <p>也可以在uboot/include/config_cmd_default.h文件中添加,不过这个define在这里不是必须的</p> 
+   <p>&nbsp;</p> 
+   <p>在common目录,命令都是在cmd_xxx.c文件中实现的,这个是命名规范,必须是cmd_xxx.c形式,</p> 
+   <p>所以我们在common目录新建一个文件cmd_myCmd.c</p> 
+   <p>&nbsp;</p> 
+   <p>#include&nbsp;&lt;common.h&gt;</p> 
+   <p>#include&nbsp;&lt;command.h&gt;</p> 
+   <p>&nbsp;</p> 
+   <p>#ifdef&nbsp;CONFIG_CMD_MYCMD</p> 
+   <p>int&nbsp;do_myCmd(cmd_tbl_t *cmdtp,&nbsp;intflag,&nbsp;intargc,&nbsp;char&nbsp;*argv[])</p> 
+   <p>{</p> 
+   <p>&nbsp;&nbsp;&nbsp;printf("Hello,this is myCmd test\n");</p> 
+   <p>&nbsp;&nbsp;&nbsp;return&nbsp;0;</p> 
+   <p>}</p> 
+   <p>&nbsp;</p> 
+   <p>U_BOOT_CMD(</p> 
+   <p>&nbsp;&nbsp;myTest,&nbsp;1,&nbsp;1,&nbsp;&nbsp;do_myCmd,</p> 
+   <p>&nbsp;&nbsp;"myTest - 123456myCmd.&nbsp;&nbsp;\n",</p> 
+   <p>&nbsp;&nbsp;"myTest - longHelp_abcdefgmyCmd ...\n"</p> 
+   <p>);</p> 
+   <p>#endif</p> 
+   <p>&nbsp;</p> 
+   <p>U_BOOT_CMD这里3个myTest&nbsp;写法最好一致,为什么?</p> 
+   <p>第一个myTest是uboot命令</p> 
+   <p>第二个myTest是在命令行输入help时输出的概要信息</p> 
+   <p>第三个myTest是当输入help myTest的时候显示的详细信息</p> 
+   <p>&nbsp;</p> 
+   <p>最后,修改common下的Makefile文件，将cmd_myCmd.o加入编译</p> 
+   <p>&nbsp;</p> 
+   <p>========================================================</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

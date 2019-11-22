@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>SpringCloud之Eureka集群搭建 « NotBeCN</title>
+  <meta name="description" content="                  一、前言       一般Eureka作微服务注册中心，都是搭集群，为了确保整个微服务RPC运程调用通讯。      1.1 Zookeeper与Eureka区别       CPA理论:一个分布式系统不可能同时满足C(一致性)、A(可用性)和P(分区容错性)。由于分区容错性在...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/10/1557729073845.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">SpringCloud之Eureka集群搭建</h1>
+    <p class="post-meta">May 10, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <h2><a id="_0"></a>一、前言</h2> 
+  <blockquote> 
+   <p>一般Eureka作微服务注册中心，都是搭集群，为了确保整个微服务RPC运程调用通讯。</p> 
+  </blockquote> 
+  <h4><a id="11_ZookeeperEureka_3"></a>1.1 Zookeeper与Eureka区别</h4> 
+  <blockquote> 
+   <p>CPA理论:一个分布式系统不可能同时满足C(一致性)、A(可用性)和P(分区容错性)。由于分区容错性在是分布式系统中必须要保证的，因此我们只能在A和C之间进行权衡。在此Zookeeper保证的是CP, 而Eureka则是AP。<br> <strong>Consistency(一致性)</strong>, 数据一致更新，所有数据变动都是同步的<br> <strong>Availability(可用性)</strong>, 好的响应性能<br> <strong>Partition tolerance(分区容忍性)</strong> 可靠性</p> 
+  </blockquote> 
+  <h6><a id="111_ZookeeperCP_9"></a>1.1.1 Zookeeper是保证CP</h6> 
+  <blockquote> 
+   <p>当向注册中心查询服务列表时，我们可以容忍注册中心返回的是几分钟以前的注册信息，但不能接受服务直接down掉不可用。也就是说，服务注册功能对可用性的要求要高于一致性。但是zk会出现这样一种情况，<strong>当master节点因为网络故障</strong>与其他节点失去联系时，剩余节点会重新进行leader选举。问题在于，选举leader的时间太长，<strong>30 ~ 120s, 且选举期间整个zk集群</strong>都是不可用的，这就<strong>导致在选举期间注册服务瘫痪</strong>。在云部署的环境下，因网络问题使得zk集群失去master节点是较大概率会发生的事，虽然服务能够最终恢复，但是漫长的选举时间导致的注册长期不可用是不能容忍的。</p> 
+  </blockquote> 
+  <h6><a id="112_EurekaAP_11"></a>1.1.2 Eureka是保证AP</h6> 
+  <blockquote> 
+   <p>Eureka看明白了这一点，因此在设计时就优先保证可用性。Eureka各个节点都是平等的，几个节点挂掉不会影响正常节点的工作，剩余的节点依然可以提供注册和查询服务。而Eureka的客户端在向某个Eureka注册或时如果发现连接失败，则会自动切换至其它节点，只要有一台Eureka还在，就能保证注册服务可用(保证可用性)，只不过查到的信息可能不是最新的(不保证强一致性)。除此之外，Eureka还有一种自我保护机制，如果在15分钟内超过85%的节点都没有正常的心跳，那么Eureka就认为客户端与注册中心出现了<strong>网络故障</strong>，此时会出现以下几种情况：</p> 
+   <ol> 
+    <li><strong>Eureka不再从注册列表中移除因为长时间没收到心跳而应该过期的服务</strong></li> 
+    <li><strong>Eureka仍然能够接受新服务的注册和查询请求，但是不会被同步到其它节点上(即保证当前节点依然可用)</strong></li> 
+    <li>当网络稳定时，当前实例新的注册信息会被同步到其它节点中<br> 因此， Eureka可以很好的应对因网络故障导致部分节点失去联系的情况，而不会像zookeeper那样使整个注册服务瘫痪。</li> 
+   </ol> 
+  </blockquote> 
+  <h6><a id="113_ConsulEureka_17"></a>1.1.3 Consul与Eureka区别</h6> 
+  <blockquote> 
+   <p><strong>最大的区别是Eureka保证AP, Consul为CP。</strong><br> Consul强一致性©带来的是：<br> 服务注册相比Eureka会稍慢一些。因为Consul的raft协议要求必须过半数的节点都写入成功才认为注册成功<br> <strong>Leader挂掉时，重新选举期间整个consul不可用</strong>。保证了强一致性但牺牲了可用性。<br> <strong>Eureka保证高可用(A)和最终一致性</strong>：<br> 服务注册相对要快，因为不需要等注册信息replicate到其他节点，也不保证注册信息是否replicate成功<br> 当数据出现不一致时，虽然A, B上的注册信息不完全相同，但每个Eureka节点依然能够正常对外提供服务，这会出现查询服务信息时如果请求A查不到，但请求B就能查到。如此保证了可用性但牺牲了一致性。<br> 其他方面，eureka就是个servlet程序，跑在servlet容器中; Consul则是go编写而成。</p> 
+  </blockquote> 
+  <p><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190510163922741.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2RzZW43MjY=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p> 
+  <h2><a id="Eureka_28"></a>二、Eureka集群环境搭建</h2> 
+  <h3><a id="21_Eureka01_29"></a>2.1 Eureka01节点搭建</h3> 
+  <h4><a id="211_Eureka01applicationyml_30"></a>2.1.1 Eureka01的application.yml配置</h4> 
+  <pre><code>###服务端口号
+server:
+  port: 8100
+###eureka 基本信息配置
+spring: 
+ application: 
+  name: eureka-server
+eureka:
+  instance:
+    ###注册到eurekaip地址
+    hostname: 127.0.0.1
+  client:
+    serviceUrl:
+      defaultZone: http://127.0.0.1:8200/eureka/
+###开启在Eureka02注册Eureka01，默认是false
+    register-with-eureka: true
+###开启在Eureka02注册Eureka01，默认是false
+    fetch-registry: true
+
+</code></pre> 
+  <blockquote> 
+   <p>注意：Eureka高可用实际上将自己作为服务向其他服务注册中心注册自己，这样就可以形成一组相互注册的服务注册中心，从而实现服务清单的互相同步，达到高可用效果。</p> 
+  </blockquote> 
+  <h4><a id="212_Eureka01_53"></a>2.1.2 Eureka01的启动类</h4> 
+  <pre><code>@EnableEurekaServer
+@SpringBootApplication
+public class Application {
+    public static void main(String [] args){
+        SpringApplication.run(Application.class, args);
+    }
+}
+</code></pre> 
+  <h4><a id="213_Eureka01pomxml_64"></a>2.1.3 Eureka01的pom.xml</h4> 
+  <pre><code>    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;2.0.1.RELEASE&lt;/version&gt;
+    &lt;/parent&gt;
+    &lt;!-- 管理依赖 --&gt;
+    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;Finchley.M7&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;
+    &lt;dependencies&gt;
+        &lt;!--SpringCloud eureka-server --&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-eureka-server&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+    &lt;!-- 注意： 这里必须要添加， 否者各种依赖有问题 --&gt;
+    &lt;repositories&gt;
+        &lt;repository&gt;
+            &lt;id&gt;spring-milestones&lt;/id&gt;
+            &lt;name&gt;Spring Milestones&lt;/name&gt;
+            &lt;url&gt;https://repo.spring.io/libs-milestone&lt;/url&gt;
+            &lt;snapshots&gt;
+                &lt;enabled&gt;false&lt;/enabled&gt;
+            &lt;/snapshots&gt;
+        &lt;/repository&gt;
+    &lt;/repositories&gt;
+    &lt;!-- 打jar包 --&gt;
+    &lt;build&gt;
+        &lt;plugins&gt;
+            &lt;plugin&gt;
+                &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-boot-maven-plugin&lt;/artifactId&gt;
+            &lt;/plugin&gt;
+        &lt;/plugins&gt;
+    &lt;/build&gt;
+</code></pre> 
+  <h3><a id="22_Eureka02_112"></a>2.2 Eureka02节点搭建</h3> 
+  <h4><a id="221_Eureka02applicationyml_113"></a>2.2.1 Eureka02的application.yml配置</h4> 
+  <pre><code>###服务端口号
+server:
+  port: 8200
+###eureka 基本信息配置
+eureka:
+  instance:
+    ###注册到eurekaip地址
+    hostname: 127.0.0.1
+  client:
+    serviceUrl:
+      defaultZone: http://127.0.0.1:8100/eureka/
+   ###开启在Eureka01注册Eureka02，默认是false
+    register-with-eureka: true
+   ###开启在Eureka01注册Eureka02，默认是false
+    fetch-registry: true
+</code></pre> 
+  <h4><a id="222_Eureka02_132"></a>2.2.2 Eureka02的启动类</h4> 
+  <pre><code>@EnableEurekaServer
+@SpringBootApplication
+public class Application {
+    public static void main(String [] args){
+        SpringApplication.run(Application.class, args);
+    }
+}
+</code></pre> 
+  <h4><a id="223_Eureka02pomxml_143"></a>2.2.3 Eureka02的pom.xml</h4> 
+  <pre><code>    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;2.0.1.RELEASE&lt;/version&gt;
+    &lt;/parent&gt;
+    &lt;!-- 管理依赖 --&gt;
+    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;Finchley.M7&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;
+    &lt;dependencies&gt;
+        &lt;!--SpringCloud eureka-server --&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-eureka-server&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+    &lt;!-- 注意： 这里必须要添加， 否者各种依赖有问题 --&gt;
+    &lt;repositories&gt;
+        &lt;repository&gt;
+            &lt;id&gt;spring-milestones&lt;/id&gt;
+            &lt;name&gt;Spring Milestones&lt;/name&gt;
+            &lt;url&gt;https://repo.spring.io/libs-milestone&lt;/url&gt;
+            &lt;snapshots&gt;
+                &lt;enabled&gt;false&lt;/enabled&gt;
+            &lt;/snapshots&gt;
+        &lt;/repository&gt;
+    &lt;/repositories&gt;
+    &lt;build&gt;
+        &lt;plugins&gt;
+            &lt;plugin&gt;
+                &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-boot-maven-plugin&lt;/artifactId&gt;
+            &lt;/plugin&gt;
+        &lt;/plugins&gt;
+    &lt;/build&gt;
+</code></pre> 
+  <h2><a id="_191"></a>三、测试结果</h2> 
+  <table> 
+   <thead> 
+    <tr> 
+     <th>Eureka01</th> 
+     <th>Eureka02</th> 
+    </tr> 
+   </thead> 
+   <tbody> 
+    <tr> 
+     <td><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190510170448576.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2RzZW43MjY=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></td> 
+     <td><img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190510170523102.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2RzZW43MjY=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></td> 
+    </tr> 
+   </tbody> 
+  </table>
+  <h2><a id="_197"></a>四、客户端</h2> 
+  <h3><a id="41applicationyml_198"></a>4.1客户端的application.yml配置</h3> 
+  <pre><code>server:
+  port: 8000
+spring:
+  application:
+    name: app-member
+###集群地址
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8100/eureka,http://localhost:8200/eureka
+    register-with-eureka: true
+    fetch-registry: true
+</code></pre> 
+  <h3><a id="42_214"></a>4.2客户端的启动类</h3> 
+  <pre><code>@EnableEurekaClient
+@SpringBootApplication
+public class Application {
+    public static void main(String [] args){
+        SpringApplication.run(Application.class, args);
+    }
+}
+</code></pre> 
+  <h3><a id="43pomxml_225"></a>4.3客户端的pom.xml</h3> 
+  <pre><code>    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;2.0.1.RELEASE&lt;/version&gt;
+    &lt;/parent&gt;
+    &lt;!-- 管理依赖 --&gt;
+    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-cloud-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;Finchley.M7&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;
+    &lt;dependencies&gt;
+        &lt;!--SpringCloud eureka-server --&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.cloud&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-cloud-starter-netflix-eureka-server&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+    &lt;!-- 注意： 这里必须要添加， 否者各种依赖有问题 --&gt;
+    &lt;repositories&gt;
+        &lt;repository&gt;
+            &lt;id&gt;spring-milestones&lt;/id&gt;
+            &lt;name&gt;Spring Milestones&lt;/name&gt;
+            &lt;url&gt;https://repo.spring.io/libs-milestone&lt;/url&gt;
+            &lt;snapshots&gt;
+                &lt;enabled&gt;false&lt;/enabled&gt;
+            &lt;/snapshots&gt;
+        &lt;/repository&gt;
+    &lt;/repositories&gt;
+    &lt;build&gt;
+        &lt;plugins&gt;
+            &lt;plugin&gt;
+                &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-boot-maven-plugin&lt;/artifactId&gt;
+            &lt;/plugin&gt;
+        &lt;/plugins&gt;
+    &lt;/build&gt;
+</code></pre> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

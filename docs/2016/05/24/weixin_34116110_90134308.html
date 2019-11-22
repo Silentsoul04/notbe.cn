@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核设计与实现读书笔记(8)-内核同步方法【转】 « NotBeCN</title>
+  <meta name="description" content="                 转自：http://blog.chinaunix.net/uid-10469829-id-2953001.html           1、原子操作可以保证指令以原子的方式执行——执行过程不被打断。内核提供了两组原子操作接口，一组针对整数进行操作，一组针对单独的位进行操作。   ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/05/24/weixin_34116110_90134308.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核设计与实现读书笔记(8)-内核同步方法【转】</h1>
+    <p class="post-meta">May 24, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <div>
+    <span style="font-size:medium;">转自：<a href="http://blog.chinaunix.net/uid-10469829-id-2953001.html" rel="nofollow">http://blog.chinaunix.net/uid-10469829-id-2953001.html</a></span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">1、原子操作可以保证指令以原子的方式执行——执行过程不被打断。内核提供了两组原子操作接口，一组针对整数进行操作，一组针对单独的位进行操作。</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">&nbsp;&nbsp;&nbsp; 2、针对整数的原子操作只能对atomic_t类型的数据进行处理。引入这个特殊数据类型主要是出于三个原因：首先，让原子函数只接受atomic_t类型的操作数可以确保原子操作只与这种特殊类型的数据一起使用。同时这也保证了该类型的数据不会被传递给其他任何非原子函数。其次，使用atomic_t类型确保编译器不对相应的值进行访问优化——这点使得原子操作最终接收到正确的内存地址，而不只是一个别名。最后，在不同体系结构上实现原子操作的时候，使用atomic_t可以屏蔽期间的差异。</span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">&nbsp;&nbsp;&nbsp; 3、尽管Linux支持的所有机器上的整型数据都是32位的，但是使用atomic_t的代码只能将该类型的数据当作24位来用。这是因为在SPARC体系结构上对原子操作缺乏指令级的支持，所以32位int类型的低8位被嵌入一个锁中，利用该锁来避免对原子类型数据的并发访问。</span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">&nbsp;&nbsp;&nbsp;</span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">&nbsp;&nbsp;&nbsp; 4、原子整数操作最常见的应用是实现计数器，一般使用atomic_inc()和atomic_dec()这两个函数。所有的标准原子整数操作见下表：</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <table border="1">
+     <tbody>
+      <tr>
+       <td valign="top"> <p><strong>原子整数操作</strong></p> </td> 
+       <td valign="top"> <p><strong>描述</strong></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">ATOMIC_INIT(int i)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>在声明一个<span style="font-family:'Times New Roman';">atomic_t</span>变量时，将它初始化为<span style="font-family:'Times New Roman';">i</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int atomic_read(atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地读取整数变量<span style="font-family:'Times New Roman';">v</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">void atomic_set(atomic_t *v, int i)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地设置<span style="font-family:'Times New Roman';">v</span>值为<span style="font-family:'Times New Roman';">i</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">void atomic_add(int i, atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地给<span style="font-family:'Times New Roman';">v</span>加<span style="font-family:'Times New Roman';">i</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">void atomic_sub(int i, atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地从<span style="font-family:'Times New Roman';">v</span>减<span style="font-family:'Times New Roman';">i</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">void atomic_inc(atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地给<span style="font-family:'Times New Roman';">v</span>加<span style="font-family:'Times New Roman';">1</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">void atomic_dec(atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地给<span style="font-family:'Times New Roman';">v</span>减<span style="font-family:'Times New Roman';">1</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int atomic_sub_and_test(int i, atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地从<span style="font-family:'Times New Roman';">v</span>减<span style="font-family:'Times New Roman';">i</span>，若结果等于<span style="font-family:'Times New Roman';">0</span>返回真，否则返回假</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int atomic_add_negative(int i, atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地从<span style="font-family:'Times New Roman';">v</span>加<span style="font-family:'Times New Roman';">i</span>，若结果是负数返回真，否则返回假</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int atomic_dec_and_test(atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;">原子地从<span style="font-family:'Times New Roman';">v</span>减<span style="font-family:'Times New Roman';">1</span>，若结果等于<span style="font-family:'Times New Roman';">0</span>返回真，否则返回假</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int atomic_inc_and_test(atomic_t *v)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地从<span style="font-family:'Times New Roman';">v</span>加<span style="font-family:'Times New Roman';">1</span>，若结果等于<span style="font-family:'Times New Roman';">0</span>返回真，否则返回假</span></p> </td> 
+      </tr>
+     </tbody>
+    </table>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">&nbsp;&nbsp;&nbsp; 5、原子操作通常是内联函数，往往是通过内嵌汇编指令来实现的。在编写代码时，能使用原子操作的时候，就尽量不要使用复杂的加锁机制。对多数体系结构来讲，原子操作与更复杂的同步方法相比较，给系统带来的开销小，对高速缓存行的影响也小。</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">&nbsp;&nbsp;&nbsp; 6、内核提供了针对位这一级数据进行操作的函数，他们定义在中。位操作函数是对普通的内存地址进行操作的，它的参数是一个指针和一个位号。标准原子位操作见下表：</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <table border="1">
+     <tbody>
+      <tr>
+       <td valign="top"> <p><strong>原子位操作</strong></p> </td> 
+       <td valign="top"> <p><strong>描述</strong></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">void set_bit(int nr, void *addr)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地设置<span style="font-family:'Times New Roman';">addr</span>所指对象的第<span style="font-family:'Times New Roman';">nr</span>位</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">void clear_bit(int nr, void *addr)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地清空<span style="font-family:'Times New Roman';">addr</span>所指对象的第<span style="font-family:'Times New Roman';">nr</span>位</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">void change_bit(int nr, void *addr)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地翻转<span style="font-family:'Times New Roman';">addr</span>所指对象的第<span style="font-family:'Times New Roman';">nr</span>位</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int test_and_set_bit(int nr, void *addr)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地设置<span style="font-family:'Times New Roman';">addr</span>所指对象的第<span style="font-family:'Times New Roman';">nr</span>位，并返回原先的值</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int test_and_clear_bit(int nr, void *addr)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地清空<span style="font-family:'Times New Roman';">addr</span>所指对象的第<span style="font-family:'Times New Roman';">nr</span>位，并返回原先的值</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int test_and_change_bit(int nr, void *addr)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地翻转<span style="font-family:'Times New Roman';">addr</span>所指对象的第<span style="font-family:'Times New Roman';">nr</span>位，并返回原先的值</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">int test_bit(int nr, void *addr)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>原子地返回<span style="font-family:'Times New Roman';">addr</span>所指对象的第<span style="font-family:'Times New Roman';">nr</span>位</span></p> </td> 
+      </tr>
+     </tbody>
+    </table>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">内核还提供了一组与上述操作对应的非原子位函数，其名字前缀多两个下划线。内核还提供了两个例程用来从指定的地址开始搜索第一个被设置(或未被设置)的位：</span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">int find_first_bit(unsigned long *addr,unsigned int size)</span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">int find_first_zero_bit(unsigned long *addr,unsigned int size)</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">7、自旋锁最多只能被一个可执行线程持有。如果一个执行线程试图获得一个被争用(已经被持有)的自旋锁，那么该线程就会一直进行忙循环——旋转——等待锁重新可用。一个被争用的自旋锁使得请求它的线程在等待重新可用时自旋(特别浪费处理器时间)，所以自旋锁不应该被长时间持有。自旋锁的初衷是在短期内进行轻量级加锁。另外，自旋锁是不可递归的。</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">8、自旋锁可以使用在中断处理程序中。在中断处理程序中使用自旋锁时，一定要在获取锁之前，首先禁止本地中断，否则，中断处理程序就会打断正持有锁的内核代码，有可能会试图争用这个已经被持有的自旋锁。顺便提一下，选项CONFIG_DEBUG_SPINLOCK可用来调试自旋锁。针对自旋锁的操作见下表：</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <table border="1">
+     <tbody>
+      <tr>
+       <td valign="top"> <p><strong>方法</strong></p> </td> 
+       <td valign="top"> <p><strong>描述</strong></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_lock( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>获取指定的自旋锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_lock_irq( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>禁止本地中断并获取指定的锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_lock_irqsave( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>保存本地中断的当前状态，禁止本地中断，并获取指定的锁<span style="font-family:'Times New Roman';">&nbsp;&nbsp;&nbsp;</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_unlock( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_unlock_irq( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的锁，并激活本地中断</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_unlock_irqrestore( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的锁，并让本地中断恢复到以前的状态</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_lock_init( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>初始化指定的<span style="font-family:'Times New Roman';">spinlock_t</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_trylock( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>试图获取指定的锁，如果未获取则返回非<span style="font-family:'Times New Roman';">0</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_is_locked( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>如果指定的锁当前正在被获取则返回非<span style="font-family:'Times New Roman';">0</span>，否则返回<span style="font-family:'Times New Roman';">0</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_lock_bh( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>禁止所有下半部的执行，并获取指定的锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">spin_unlock_bh( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的锁，允许下半部的执行</span></p> </td> 
+      </tr>
+     </tbody>
+    </table>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">9、当下半部和进程上下文共享数据时，需要加锁的同时还要禁止下半部执行；当中断处理程序和下半部共享数据时，需要加锁的同时还要禁止中断；当数据被两个不同种类的tasklet共享或软中断共享时，没有必要禁止下半部。</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">10、当对某个数据结构的操作可以被划分为读/写两种类别时，可以使用Linux专门提供的读——写自旋锁。这种自旋锁为读和写分别提供了不同的锁。一个或多个读任务可以并发的持有读者锁；相反，用于写的锁最多只能被一个写任务持有，而且此时不能有并发的读操作。</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">11、通常情况下，读锁和写锁会位于完全分割开的代码分支中，下面的代码将会带来死锁：</span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">&nbsp;&nbsp;&nbsp;&nbsp; read_lock(&amp;mr_rwlock);</span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">&nbsp;&nbsp;&nbsp;&nbsp; write_lock(&amp;mr_rwlock);</span>
+   </div> 
+   <div>
+    <span style="font-size:medium;">因为写锁会不断自旋，等待所有的读锁释放，其中也包括它自己。当确实需要写操作时，要在一开始就请求写锁。如果写和读不能清晰分开的话，那么就使用一般的自旋锁。多个读者可以安全地获得同一个读锁，即使一个线程递归地获得一个读锁也是安全的。这个特性使读——写自旋锁成为一种有用并且常用的优化手段。读——写锁这种机制照顾读要比照顾写多一点。读锁被持有时，写锁只能等待，但读者却可以继续成功地占用锁，大量的读者就会使挂起的写者处于饥饿状态。读——写锁的操作见下表：</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <table border="1">
+     <tbody>
+      <tr>
+       <td valign="top"> <p><strong>方法</strong></p> </td> 
+       <td valign="top"> <p><strong>描述</strong></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">read_lock( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>获取指定的读锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">read_lock_irq( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>禁止本地中断并获取指定的读锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">read_lock_irqsave( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>保存本地中断的当前状态，禁止本地中断并获取指定的读锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">read_unlock( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的读锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">read_unlock_irq( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的读锁，并激活本地中断</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">read_unlock_irqrestore( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的读锁，并让本地中断恢复到以前的状态</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">write_lock( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>获取指定的写锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">write_lock_irq( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>禁止本地中断并获取指定的写锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">write_lock_irqsave( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>保存本地中断的当前状态，禁止本地中断并获取指定的写锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">write_unlock( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的写锁</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">write_unlock_irq( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的写锁，并激活本地中断</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">write_unlock_irqrestore( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的写锁，并让本地中断恢复到以前的状态</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">write_trylock( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>试图获得指定的写锁；如果写锁不可用，返回非<span style="font-family:'Times New Roman';">0</span>值</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">rw_lock_init( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>初始化指定的<span style="font-family:'Times New Roman';">rwlock_t</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">rw_is_locked( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>如果指定的锁当前已被持有，该函数返回非<span style="font-family:'Times New Roman';">0</span>值，否则返回<span style="font-family:'Times New Roman';">0</span></span></p> </td> 
+      </tr>
+     </tbody>
+    </table>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">12、如果加锁时间不长且代码不会睡眠(如中断处理程序)，利用自旋锁是最佳选择；如果加锁时间可能很长或者在持有锁时有可能睡眠，那么最好使用信号量来完成加锁功能。Linux中的信号量是一种睡眠锁。如果一个任务试图获得一个已经被占用的信号量时，信号量会将其推进一个等待队列，然后让其睡眠。这时处理器能重获自由，从而去执行其他代码。信号量不会禁止内核抢占，这意味着，信号量不会对调度的等待时间带来负面影响。</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">13、信号量允许任意数量的锁的持有者，而自旋锁在一个时刻最多允许一个任务持有它。信号量同时允许的持有者数量可以在声明信号量时指定，这个值称为使用者数量。该数值为1的信号量成为互斥信号量，大于1的称为计数信号量。信号量支持两个原子操作P()和V()，这两个名字来自荷兰语Proberen(测试操作)和Vershogen(增加操作)。后来的系统包括Linux把这两种操作分别叫做down()和up()。信号量的操作见下表：</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <table border="1">
+     <tbody>
+      <tr>
+       <td valign="top"> <p><strong>方法</strong></p> </td> 
+       <td valign="top"> <p><strong>描述</strong></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">sema_init(struct semaphore *, int)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>以指定的计数值初始化动态创建的信号量</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">init_MUTEX(struct semaphore *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>以计数值<span style="font-family:'Times New Roman';">1</span>初始化动态创建的信号量</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">init_MUTEX_LOCKED(struct semaphore *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>以计数值<span style="font-family:'Times New Roman';">0</span>初始化动态创建的信号量<span style="font-family:'Times New Roman';">(</span>初始化为加锁状态<span style="font-family:'Times New Roman';">)</span></span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">down_interruptible(struct semaphore *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>试图获得指定的信号量，如果信号已被争用，则进入可中断睡眠状态</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">down(struct semaphore *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>试图获得指定的信号量，如果信号已被争用，则进入不可中断睡眠状态</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">down_trylock(struct semaphore *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>试图获得指定的信号量，如果信号已被争用，则立刻返回非<span style="font-family:'Times New Roman';">0</span>值</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">up(struct semaphore *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>释放指定的信号量，如果睡眠队列不空，则唤醒其中的一个任务</span></p> </td> 
+      </tr>
+     </tbody>
+    </table>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">14、与自旋锁一样，信号量也有区分读——写访问。读——写信号量要比普通信号量更具优势。所有的读——写信号量都是互斥信号量。只要没有写者，并发持有读锁的读者数不限。相反，只有唯一的写者可以获得写锁。所有读——写锁的睡眠都不会被信号打断。读——写信号量相比读——写自旋锁多了一种特有的操作：downgrade_writer()。这个函数可以动态地将获取的写锁转换成读锁。</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">15、如果在内核中一个任务需要发出信号通知另一个任务发生了某个特定事件，利用完成变量是使两个任务得以同步的简单方法。完成变量提供了代替信号量的一个简单解决办法。如果一个任务要执行一些工作时，另一个任务就会在完成变量上等待，当这个任务完成后，会使用完成变量去唤醒在等待的任务。完成变量通常的用法是，将完成变量作为数据结构中的一项动态创建，而完成数据结构初始化工作的内核代码将调用wait_for_completion()进行等待。初始化完成后，初始化函数调用completion()唤醒在等待的内核任务。完成变量的操作见下表：</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <table border="1">
+     <tbody>
+      <tr>
+       <td valign="top"> <p><strong>方法</strong></p> </td> 
+       <td valign="top"> <p><strong>描述</strong></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">init_completion(struct completion *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>初始化指定的动态创建的完成变量</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">wait_for_completion(struct completion *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>等待指定的完成变量接受信号</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">completion(struct completion *)</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>发信号唤醒任何等待任务</span></p> </td> 
+      </tr>
+     </tbody>
+    </table>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">16、Seq锁是在2.6内核版本中才引入的一种新型锁。这种锁提供了一种很简单的机制，用于读写共享数据。实现这种锁主要依靠一个序列计数器。当有疑义的数据被写入时，会得到一个锁，并且序列值会增加。在读取数据之前和之后，序列号都被读取。如果读取的序列号相同，说明在读操作进行的过程中没有被写操作打断过。如果读的值是偶数，那么就表明写操作没有发生。Seq锁对写者更有利，只要没有其它写者，写锁总是能被成功获得。另外，挂起的写者会不断地使得读操作循环，直到不再有任何写者持有锁为止。</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">17、如果数据对每个处理器是唯一的，这样的数据可能就不需要使用锁来保护，但如果内核是抢占式的，为了防止数据被多个进程以伪并发的方式访问，需要禁止内核抢占，禁止抢占的相关操作如下表：</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <table border="1">
+     <tbody>
+      <tr>
+       <td valign="top"> <p><strong>方法</strong></p> </td> 
+       <td valign="top"> <p><strong>描述</strong></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">Preempt_disable( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>禁止内核抢占</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">Preempt_enable( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>激活内核抢占并检查和执行被挂起的需要调度的任务</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">Preempt_enable_no_resched( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>激活内核抢占但不再进行调度</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">Preempt_count( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;">返回抢占计数</span></p> </td> 
+      </tr>
+     </tbody>
+    </table>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div>
+    <span style="font-size:medium;">18、当处理多处理器之间或硬件设备之间的同步问题时，有时需要在程序代码中以指定的顺序发出读内存和写内存指令。在和硬件交互时，时常需要确保一个给定的读操作发生在其它读或写操作之前。另外，在多处理器上，可能需要按写数据的顺序读数据。但编译器和处理器为了提高效率，可能对读和写重新排序。Linux提供了确保顺序的指令称做屏障。其操作见下表：</span>
+   </div> 
+   <div>
+    &nbsp;
+   </div> 
+   <div> 
+    <table border="1">
+     <tbody>
+      <tr>
+       <td valign="top"> <p><strong>方法</strong></p> </td> 
+       <td valign="top"> <p><strong>描述</strong></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">rmb( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>阻止跨跃屏障的载入动作发生重排序</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">read_barrier_depends( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>阻止跨跃屏障的具有数据依赖关系的载入动作重排序</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">wmb( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>阻止跨跃屏障的存储动作发生重排序</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">mb( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>阻止跨跃屏障的载入和存储动作重新排序</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">smp_rmb( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>在<span style="font-family:'Times New Roman';">SMP</span>上提供<span style="font-family:'Times New Roman';">rmb( )</span>功能，在<span style="font-family:'Times New Roman';">UP</span>上提供<span style="font-family:'Times New Roman';">barrier( )</span>功能</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">smp_read_barrier_depends( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>在<span style="font-family:'Times New Roman';">SMP</span>上提供<span style="font-family:'Times New Roman';">read_barrier_depends( )</span>功能，在<span style="font-family:'Times New Roman';">UP</span>上提供<span style="font-family:'Times New Roman';">barrier( )</span>功能</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">smp_wmb( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>在<span style="font-family:'Times New Roman';">SMP</span>上提供<span style="font-family:'Times New Roman';">wmb( )</span>功能，在<span style="font-family:'Times New Roman';">UP</span>上提供<span style="font-family:'Times New Roman';">barrier( )</span>功能</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">smp_mb( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>在<span style="font-family:'Times New Roman';">SMP</span>上提供<span style="font-family:'Times New Roman';">mb( )</span>功能，在<span style="font-family:'Times New Roman';">UP</span>上提供<span style="font-family:'Times New Roman';">barrier( )</span>功能</span></p> </td> 
+      </tr>
+      <tr>
+       <td valign="top"> <p><strong><span style="font-size:medium;"><span style="font-family:'Times New Roman';">barrier( )</span></span></strong></p> </td> 
+       <td valign="top"> <p><span style="font-size:medium;"><span style="font-family:'Times New Roman';">&nbsp;&nbsp;</span>组织编译器跨屏障对载入或存储操作进行优化</span></p> </td> 
+      </tr>
+     </tbody>
+    </table>
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

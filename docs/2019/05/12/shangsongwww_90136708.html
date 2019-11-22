@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>【转】构建 Plasma 链 0x1 « NotBeCN</title>
+  <meta name="description" content="         Plasma 是由 Joseph Poon 和 Vitalik Buterin 提出的区块链扩展解决方案，利用子链回报根链 (以太坊) 的方式来提高交易流量，并最小化小链通常伴随的安全考虑。OMG (OmiseGO) 的分布式交易所将采 Plasma 的设计。我们将利用 Plasma 支持可扩展...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/shangsongwww_90136708.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">【转】构建 Plasma 链 0x1</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>Plasma 是由 Joseph Poon 和 Vitalik Buterin 提出的区块链扩展解决方案，利用子链回报根链 (以太坊) 的方式来提高交易流量，并最小化小链通常伴随的安全考虑。OMG (OmiseGO) 的分布式交易所将采 Plasma 的设计。我们将利用 Plasma 支持可扩展且完全链上的交易所，在不牺牲安全性下。本文我将会描述我们如何构建 Plasma。</p> 
+  <h2 id="目标：产生不需要依赖自己安全性的区块链">目标：产生不需要依赖自己安全性的区块链</h2> 
+  <p>安全性会构建在使用者离开子链，当有错误发生。以下说明如何工作：</p> 
+  <ol>
+   <li>如果有无效的交易被包含在子链，那所有用户必须七天内离开。</li> 
+   <li>如果用户无法存取子链，但他所在子链的区块已递交到母链，用户必须要能重新存取子链，所以要能检查有效性，或是在七天内离开该子链。</li> 
+   <li>提款(撤离)会参照之前交易的产生顺序进行处理，从未花费的 UTXO 选择最旧的交易，参照其在母链所在区块的最小高度会优先于之后的区块。这可使最新的无效交易，在处理的优先权低于急于提款离开的旧交易。</li> 
+   <li>只在交易的拥有者确认其交易在母链上已被转换且确认时，交易才被视为有效。</li> 
+  </ol>
+  <h2>Responsibility Breakdown (任务拆分)</h2> 
+  <p><img alt="" class="has" height="415" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512075121734.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9ja2NoYWluLWZhbnMuYmxvZy5jc2RuLm5ldA==,size_16,color_FFFFFF,t_70" width="639"></p> 
+  <ol>
+   <li>Client (客户端) — 监看 Ethereum 且运行子链，当侦测到诈欺的行为就立即离开</li> 
+   <li>Child chain (子链) — 监看在 Ethereum 上 deposit 的行为，并执行所有与该子链目前状态相关的计算。</li> 
+   <li>Root chain (根链) — 透过智能合约锚钉子链在 Ethereum 链上，处理子链上要存款与离开(提款)的业务，当收到足够的信息进行确认与处理，或是拒绝诈欺的提款(离开)。</li> 
+   <li>Parent chain (母链) — 作用是保护子链，在 MVP 上母链等同于根链。但在最终版本上，子链上可能会有多个母链，但只有一个根链。</li> 
+  </ol>
+  <h2>Deposits (存款)</h2> 
+  <p>为了使用 Plasma 链，使用者需要将他们的资产 (以太币或代币) 从母链移动到子链，为了进行存款，用户将他们资产转移到适当的 Plsama 智能合约，该合约运行在以太坊上。</p> 
+  <p>在 MVP 中，存款的行为有所简化，不同于 Plasma 白皮书中般复杂。在 Plasma 上的存款会立即被纪录到子链的母链纪录上，并且没有机会取消存款。相比于取消存款，用户可以更希望能立刻提款。</p> 
+  <p>对存款方没有额外风险， 一旦转移资产的合约交易被确认，则可提领资产。即使在子链上没有反映相应的存款，存款方仍可提领他们的资产。</p> 
+  <h2>Withdrawals (提款)</h2> 
+  <p>为了将资金转回母链，使用者可以进行提款。使用者可能只是简单地将资金转回到母链并持有。或当使用者侦测到有故障的子链时，可以进行提款，使用者可能失去资金，如果未能即使反应的话。</p> 
+  <p>有两类的提款行为，第一类是简单地提款 (simple withdrawals)，子链上的单一参与方进行提款，第二类则是，多个参与方同时进行大量提款 (mass withdrawals)，大量提款因为较为复杂，会在之后的文章说明。</p> 
+  <p>当使用者要从 Plasma 链提领资金，提领依交易被产生的顺序 (先来的先离开) 而被提款离开，提款流程会在挑战期结束后完成，在挑战期间，任何人都可以提出欺诈行为的证据。</p> 
+  <h2>Simple Withdrawals (简单地提款)</h2> 
+  <p>简单提款包含下列四个步骤：</p> 
+  <ol>
+   <li>使用者向母链上的智能合约递交提款请求。</li> 
+   <li>提款请求会进入一段时间的挑战期，在此期间，任何人都可向智能合约递交双花的支付证据，证明该提领请求是无效的。如果挑战成功，则尝试提款退出的使用者将无法提领。</li> 
+   <li>如果提款请求被发现是无效的，提领者会被处罚，回报者会被奖励。如果在挑战期结束前没有收到成功的挑战，那提领者提领成功。背后的经济激励设计尚为完成。</li> 
+  </ol>
+  <h2>Finality (最终性)</h2> 
+  <p>有两种型态的最终性：</p> 
+  <ol>
+   <li>子链的最终性 (Child chain finality) — 取决于子链使用的共识算法，我们选择 PoS</li> 
+   <li>根链的最终性 (Root chain finality) — 取决于根链使用的共识算法，以太坊目前使用 PoW</li> 
+  </ol>
+  <p>子链的最终性和安全性取决于根链，所有 Plasma 链的安全保证假设来自以太坊正常工作</p> 
+  <h2>关于 Plasma MVP 的一些事项</h2> 
+  <ol>
+   <li>目前使用 Proof of Authority, PoS 将会之后加上</li> 
+   <li>不使用保证金来处罚诈欺</li> 
+   <li>如果有个无效的交易被包含进子链，需要每个人立即退出子链</li> 
+   <li>子链会依赖于以太坊本身的最终性 (区块确认数)</li> 
+  </ol>
+  <p>Plasma 的 MVP 面向</p> 
+  <ol>
+   <li>理解其对于以太坊主链扩展性的潜力</li> 
+   <li>被用来建立 OMG 分布式交易所，为主流金融使用预备</li> 
+  </ol>
+  <p>随着 OmiseGO 进一步对 Plasma 的发展，这个设计会演进并扩展到 Plasma 和 OmiseGO 白皮书中描述的其他功能。</p> 
+  <blockquote> 
+   <p>我想特别感谢 Joseph Poon, Vitalik Buterin 和 Karl Floersch 的时间与见解，这对未来的区块链扩展解决方案，转化为正在实现的 MVP 技术规格是非常有价值的。有任何错误请告知我。</p> 
+  </blockquote> 
+  <hr>
+  <p><strong>链接:</strong>&nbsp;<a href="https://medium.com/taipei-ethereum-meetup/%E6%A7%8B%E5%BB%BA-plasma-%E9%8F%88-0x1-1a743c0f36d6" rel="nofollow">https://medium.com/taipei-ethereum-meetup/%E6%A7%8B%E5%BB%BA-plasma-%E9%8F%88-0x1-1a743c0f36d6</a></p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

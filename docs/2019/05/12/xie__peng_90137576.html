@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>GLIBC内存管理源码分析 « NotBeCN</title>
+  <meta name="description" content="         1. glibc公共接口 #define SIZE_SZ sizeof(size_t) //32位机下位4个字节，64位机下位8个字节   #define MALLOC_ALIGNMENT 16 //不管是32位还是64位，均为16   #define MALLOC_ALIGN_MASK (MA...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/xie__peng_90137576.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">GLIBC内存管理源码分析</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>1. glibc公共接口<br> #define SIZE_SZ sizeof(size_t) //32位机下位4个字节，64位机下位8个字节</p> 
+  <p>#define MALLOC_ALIGNMENT 16 //不管是32位还是64位，均为16</p> 
+  <p>#define MALLOC_ALIGN_MASK (MALLOC_ALIGNMENT - 1)</p> 
+  <p>#define MIN_CHUNK_SIZE &nbsp;(offsetof(struct malloc_chunk, fd_nextsize)) //在32位机下大小为16字节，64位机位32字节</p> 
+  <p>/*! 32位为16，64位为32 */<br> #define MINSIZE &nbsp;\<br> &nbsp; (unsigned long)(((MIN_CHUNK_SIZE+MALLOC_ALIGN_MASK) &amp; ~MALLOC_ALIGN_MASK))</p> 
+  <p>/*! request2size要求16字节对齐，即大小能被16整除；在32位机下最小值为16，64位机为32 */<br> #define request2size(req) &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; \<br> &nbsp; (((req) + SIZE_SZ + MALLOC_ALIGN_MASK &lt; MINSIZE) &nbsp;? &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; \<br> &nbsp; &nbsp;MINSIZE : &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;\<br> &nbsp; &nbsp;((req) + SIZE_SZ + MALLOC_ALIGN_MASK) &amp; ~MALLOC_ALIGN_MASK)</p> 
+  <p>#define NBINS 128</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 2. glibc内存管理最小单元，即每个被分配给用户的内存，在glibc内部都具有一个对应的malloc_chunk块由glibc进行统一的管理。<br> struct malloc_chunk {<br> &nbsp; &nbsp; INTERNAL_SIZE_T &nbsp; &nbsp; &nbsp;mchunk_prev_size; &nbsp;/* Size of previous chunk (if free). &nbsp;*/<br> &nbsp; &nbsp; INTERNAL_SIZE_T &nbsp; &nbsp; &nbsp;mchunk_size; &nbsp; &nbsp; &nbsp; /* Size in bytes, including overhead. */</p> 
+  <p>&nbsp; &nbsp; struct malloc_chunk* fd; &nbsp; &nbsp; &nbsp; &nbsp; /* double links -- used only if free. */<br> &nbsp; &nbsp; struct malloc_chunk* bk;</p> 
+  <p>&nbsp; &nbsp; struct malloc_chunk* fd_nextsize; /* double links -- used only if free. */<br> &nbsp; &nbsp; struct malloc_chunk* bk_nextsize;<br> };</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 2.1. nchunk_size<br> 该字段由两部分组成，后3bit位分别代表A、M和P，A表示是否是主arena，M表示是否是mmap所分配，P代表前一个chunk是否在使用。剩余的其余bit表示当前chunk的大小。<br> 对主arean所分配的内存，都有sbrk系统调用来完成；除主arean外的所有arean为线程arean，线程内存分配均有mmap来完成。</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 2.2. mchunk_prev_size<br> 该字段表示前一个chunk的大小，只有当当前P bit位为0时，mchunk_prev_size才有效，当前chunk可通过偏移mchunk_prev_size长度可找到前一个chunk。找到前一个chunk块后，可将当前chunk与上一个chunk进行合并。</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 3. struct malloc_state<br> 该结构是用来管理malloc_chunk的主体结构，所有被分配给用户的内存块，在free后都由malloc_state来进行管理。<br> struct malloc_state {<br> &nbsp; &nbsp; /* Serialize access. &nbsp;*/<br> &nbsp; &nbsp; __libc_lock_define (, mutex);</p> 
+  <p>&nbsp; &nbsp; /* Flags (formerly in max_fast). &nbsp;*/<br> &nbsp; &nbsp; int flags;</p> 
+  <p>&nbsp; &nbsp; /* Set if the fastbin chunks contain recently inserted free blocks. &nbsp;*/<br> &nbsp; &nbsp; /* Note this is a bool but not all targets support atomics on booleans. &nbsp;*/<br> &nbsp; &nbsp; int have_fastchunks;</p> 
+  <p>&nbsp; &nbsp; /* Fastbins */<br> &nbsp; &nbsp; mfastbinptr fastbinsY[NFASTBINS];</p> 
+  <p>&nbsp; &nbsp; /* Base of the topmost chunk -- not otherwise kept in a bin */<br> &nbsp; &nbsp; mchunkptr top;</p> 
+  <p>&nbsp; &nbsp; /* The remainder from the most recent split of a small request */<br> &nbsp; &nbsp; mchunkptr last_remainder;</p> 
+  <p>&nbsp; &nbsp; /* Normal bins packed as described above */<br> &nbsp; &nbsp; mchunkptr bins[NBINS * 2 - 2];</p> 
+  <p>&nbsp; &nbsp; /* Bitmap of bins */<br> &nbsp; &nbsp; unsigned int binmap[BINMAPSIZE];</p> 
+  <p>&nbsp; &nbsp; /* Linked list */<br> &nbsp; &nbsp; struct malloc_state *next;</p> 
+  <p>&nbsp; &nbsp; /* Linked list for free arenas. &nbsp;Access to this field is serialized<br> &nbsp; &nbsp; &nbsp;by free_list_lock in arena.c. &nbsp;*/<br> &nbsp; &nbsp; struct malloc_state *next_free;</p> 
+  <p>&nbsp; &nbsp; /* Number of threads attached to this arena. &nbsp;0 if the arena is on<br> &nbsp; &nbsp; &nbsp;the free list. &nbsp;Access to this field is serialized by<br> &nbsp; &nbsp; &nbsp;free_list_lock in arena.c. &nbsp;*/<br> &nbsp; &nbsp; INTERNAL_SIZE_T attached_threads;</p> 
+  <p>&nbsp; &nbsp; /* Memory allocated from the system in this arena. &nbsp;*/<br> &nbsp; &nbsp; INTERNAL_SIZE_T system_mem;<br> &nbsp; &nbsp; INTERNAL_SIZE_T max_system_mem;<br> }</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 3.1. fastbinsY[NFASTBINS]<br> fastbinsY是一个数组，数组大小计算如下：</p> 
+  <p>#define fastbin_index(sz) ((((unsigned int) (sz)) &gt;&gt; (SIZE_SZ == 8 ? 4 : 3)) - 2)</p> 
+  <p>/* The maximum fastbin request size we support */<br> #define MAX_FAST_SIZE &nbsp; (80 * SIZE_SZ / 4) //在32位机下值为80；64位为160</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 3.1.1. fastbinsY数组大小<br> /*!<br> &nbsp;* 32位机的情况：<br> &nbsp;* &nbsp; &nbsp; request2size (MAX_FAST_SIZE) = 96<br> &nbsp;* &nbsp; &nbsp; fastbin_index (request2size (MAX_FAST_SIZE)) //将96右移3位得12，减2得10<br> &nbsp;* &nbsp; &nbsp; fastbin_index (request2size (MAX_FAST_SIZE)) + 1 //结果为10 + 1 = 11<br> &nbsp;* &nbsp; &nbsp; 综上可知，NFASTBINS = 11，即fastbinsY是一个大小为11的数组<br> &nbsp;* 64位机的情况：<br> &nbsp;* &nbsp; &nbsp; request2size (MAX_FAST_SIZE) = 176<br> &nbsp;* &nbsp; &nbsp; fastbin_index (request2size (MAX_FAST_SIZE)) //将176右移4位得11，减2得9<br> &nbsp;* &nbsp; &nbsp; fastbin_index (request2size (MAX_FAST_SIZE)) + 1 //结果为9 + 1 = 10<br> &nbsp;* &nbsp; &nbsp; 综上可知，NFASTBINS = 10，即fastbinsY是一个大小为10的数组<br> &nbsp;*/<br> #define NFASTBINS &nbsp;(fastbin_index (request2size (MAX_FAST_SIZE)) + 1)</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 3.1.2. fastbinsY chunk范围<br> /*! 32位为64字节，64位为128字节 */<br> #define DEFAULT_MXFAST &nbsp; &nbsp; (64 * SIZE_SZ / 4)</p> 
+  <p>#define SMALLBIN_WIDTH &nbsp;MALLOC_ALIGNMENT</p> 
+  <p>/*! 32位为64字节，64位为128字节 */<br> #define set_max_fast(s) \<br> &nbsp; &nbsp; global_max_fast = (((s) == 0) \<br> &nbsp; &nbsp; ? SMALLBIN_WIDTH : ((s + SIZE_SZ) &amp; ~MALLOC_ALIGN_MASK))</p> 
+  <p>3.1.3. fastbinsY最多能用多少个？？<br> 根据fastbin_index可知：32位和64位系统最对能用7个<br> 它们之间的大小情况如下：<br> &nbsp; &nbsp; 32位 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; 64位<br> &nbsp; &nbsp; fastbinsY[0] = 16 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;fastbinsY[0] = 32<br> &nbsp; &nbsp; fastbinsY[2] = 32&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fastbinsY[1] = 48<br> &nbsp; &nbsp; fastbinsY[4] = 48 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;fastbinsY[2] = 64<br> &nbsp; &nbsp; fastbinsY[6] = 64&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fastbinsY[3] = 80<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;fastbinsY[4] = 96<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;fastbinsY[5] = 112<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;fastbinsY[6] = 128</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 4. bins[NBINS * 2 - 2]<br> bins被分为unsorted、small和large bins，bins[0]是不存在的</p> 
+  <ul>
+   <li>unsorted_bin[1]：该bin中存放的chunk块是无序的，在free过程中，首先将chunk块统一放到unsorted bin中，待在后续的malloc中将其放入相应的small和large bins中或直接作为用户请求返回</li> 
+   <li>smallbin[2-63]：同一个bin中存放的大小都是相同的，两个相邻的bin之间相差2个机器字长，即32位位8字节，64位为16字节</li> 
+   <li>largebin[64-128]</li> 
+  </ul>
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5. 内存管理malloc和free<br> 5.1. 内存分配顺序<br> fastbinsY——&gt;smallbin——&gt;largebin——&gt;unsortedbin——&gt;top<br> 在首次进行malloc时，由于fastbinsY、smallbin、largebin和unsortedbin均为空，只能从top处获得内存。</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.2. top内存管理<br> top作为一个堆的堆顶元素，在首次请求内存时，glibc会向操作提供申请虚拟内存，以达到堆向上增长的要求，glibc默认一次性申请DEFAULT_TOP_PAD（131072，为128KB，且以内存页4KB进行对齐，这样在后续的堆增长中，都以内存页4KB进行对齐增长）大小的堆。<br> 当用户从top请求一定大小的内存后，剩余的部分被称为last_remainder，last_remainder将会是新的top。</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.3. unsortedbin<br> 在真正的free中，chunk并不会直接放到smallbin中，而是直接unsortedbin中；如果在free过程中有连续相邻的chunk块被释放，就会在free过程中进行合并，然后重新放入unsortedbin中。unsortedbin在内存分配malloc过程中，作为最后一个被选择的bin。在利用unsortedbin分配内存时，首先会对满足smallbin的请求考虑从last_remainder中进行分配内存，然后会判定从unsortedbin中拿出来的是否满足用户需求，满足则直接返回给用否，否则会一次遍历unsortedbin的chunk块，并将其从unsortedbin中移除，依次根据条件放入smallbin和largebin中。</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.3.1. 对满足smallbin的请求从last_remainder中分配内存<br> if (in_smallbin_range (nb) &amp;&amp;<br> &nbsp; &nbsp; bck == unsorted_chunks (av) &amp;&amp;<br> &nbsp; &nbsp; victim == av-&gt;last_remainder &amp;&amp;<br> &nbsp; &nbsp; (unsigned long) (size) &gt; (unsigned long) (nb + MINSIZE))<br> {}<br> ------------------------------------------------------------------------------------------------------------------------------<br> 5.3.2. 判断unsortedbin中的chunk块是否满足用户需求<br> if (size == nb) {<br> &nbsp; &nbsp; set_inuse_bit_at_offset (victim, size);<br> &nbsp; &nbsp; if (av != &amp;main_arena)<br> &nbsp; &nbsp; &nbsp; &nbsp; set_non_main_arena (victim);<br> #if USE_TCACHE<br> &nbsp; &nbsp; /* Fill cache first, return to user only if cache fills.<br> &nbsp; &nbsp; We may return one of these chunks later. &nbsp;*/<br> &nbsp; &nbsp; if (tcache_nb<br> &nbsp; &nbsp; &amp;&amp; tcache-&gt;counts[tc_idx] &lt; mp_.tcache_count)<br> &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; tcache_put (victim, tc_idx);<br> &nbsp; &nbsp; &nbsp; &nbsp; return_cached = 1;<br> &nbsp; &nbsp; &nbsp; &nbsp; continue;<br> &nbsp; &nbsp; }<br> &nbsp; &nbsp; else<br> &nbsp; &nbsp; {<br> #endif<br> &nbsp; &nbsp; &nbsp; &nbsp; check_malloced_chunk (av, victim, nb);<br> &nbsp; &nbsp; &nbsp; &nbsp; void *p = chunk2mem (victim);<br> &nbsp; &nbsp; &nbsp; &nbsp; alloc_perturb (p, bytes);<br> &nbsp; &nbsp; &nbsp; &nbsp; return p;<br> #if USE_TCACHE<br> &nbsp; &nbsp; }<br> #endif<br> }</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.3.3. 放入smallbin中<br> if (in_smallbin_range (size))<br> {<br> &nbsp; &nbsp; victim_index = smallbin_index (size);<br> &nbsp; &nbsp; bck = bin_at (av, victim_index);<br> &nbsp; &nbsp; fwd = bck-&gt;fd;<br> }</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.3.4. 放入largebin中<br> victim_index = largebin_index (size);<br> bck = bin_at (av, victim_index);</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.4. 从smallbin和largebin中分配内存<br> 待smallbin和largebin中成功放入chunk块后，在后续的内存情况中会考虑从smallbin和largebin中进行分配。</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.4.1. 从smallbin中分配内存<br> if (in_smallbin_range (nb))<br> {<br> &nbsp; &nbsp; idx = smallbin_index (nb);<br> &nbsp; &nbsp; bin = bin_at (av, idx);</p> 
+  <p>&nbsp; &nbsp; if ((victim = last (bin)) != bin)<br> &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; bck = victim-&gt;bk;<br> &nbsp; &nbsp; &nbsp; &nbsp; if (__glibc_unlikely (bck-&gt;fd != victim))<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; malloc_printerr ("malloc(): smallbin double linked list corrupted");<br> &nbsp; &nbsp; &nbsp; &nbsp; set_inuse_bit_at_offset (victim, nb);<br> &nbsp; &nbsp; &nbsp; &nbsp; bin-&gt;bk = bck;<br> &nbsp; &nbsp; &nbsp; &nbsp; bck-&gt;fd = bin;</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; if (av != &amp;main_arena)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; set_non_main_arena (victim);<br> &nbsp; &nbsp; &nbsp; &nbsp; check_malloced_chunk (av, victim, nb);<br> #if USE_TCACHE<br> &nbsp; &nbsp; &nbsp; &nbsp; /* While we're here, if we see other chunks of the same size,<br> &nbsp; &nbsp; &nbsp; &nbsp; stash them in the tcache. &nbsp;*/<br> &nbsp; &nbsp; &nbsp; &nbsp; size_t tc_idx = csize2tidx (nb);<br> &nbsp; &nbsp; &nbsp; &nbsp; if (tcache &amp;&amp; tc_idx &lt; mp_.tcache_bins)<br> &nbsp; &nbsp; &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; mchunkptr tc_victim;</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; /* While bin not empty and tcache not full, copy chunks over. &nbsp;*/<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; while (tcache-&gt;counts[tc_idx] &lt; mp_.tcache_count<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &amp;&amp; (tc_victim = last (bin)) != bin)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (tc_victim != 0)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; bck = tc_victim-&gt;bk;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; set_inuse_bit_at_offset (tc_victim, nb);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (av != &amp;main_arena)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; set_non_main_arena (tc_victim);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; bin-&gt;bk = bck;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; bck-&gt;fd = bin;</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; tcache_put (tc_victim, tc_idx);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> #endif<br> &nbsp; &nbsp; &nbsp; &nbsp; void *p = chunk2mem (victim);</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; alloc_perturb (p, bytes);<br> &nbsp; &nbsp; &nbsp; &nbsp; return p;<br> &nbsp; &nbsp; }<br> }</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.4.2. 从smallbin中分配内存<br> if (!in_smallbin_range (nb))<br> {<br> &nbsp; &nbsp; bin = bin_at (av, idx);</p> 
+  <p>&nbsp; &nbsp; /* skip scan if empty or largest chunk is too small */<br> &nbsp; &nbsp; if ((victim = first (bin)) != bin<br> &nbsp; &nbsp; &nbsp; &nbsp; &amp;&amp; (unsigned long) chunksize_nomask (victim)<br> &nbsp; &nbsp; &nbsp; &nbsp; &gt;= (unsigned long) (nb))<br> &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; victim = victim-&gt;bk_nextsize;<br> &nbsp; &nbsp; &nbsp; &nbsp; while (((unsigned long) (size = chunksize (victim)) &lt;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (unsigned long) (nb)))<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; victim = victim-&gt;bk_nextsize;</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; /* Avoid removing the first entry for a size so that the skip<br> &nbsp; &nbsp; &nbsp; &nbsp; list does not have to be rerouted. &nbsp;*/<br> &nbsp; &nbsp; &nbsp; &nbsp; if (victim != last (bin)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &amp;&amp; chunksize_nomask (victim)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; == chunksize_nomask (victim-&gt;fd))<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; victim = victim-&gt;fd;</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; remainder_size = size - nb;<br> &nbsp; &nbsp; &nbsp; &nbsp; unlink_chunk (av, victim);</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; /* Exhaust */<br> &nbsp; &nbsp; &nbsp; &nbsp; if (remainder_size &lt; MINSIZE)<br> &nbsp; &nbsp; &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; set_inuse_bit_at_offset (victim, size);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (av != &amp;main_arena)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; set_non_main_arena (victim);<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; /* Split */<br> &nbsp; &nbsp; &nbsp; &nbsp; else<br> &nbsp; &nbsp; &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; remainder = chunk_at_offset (victim, nb);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; /* We cannot assume the unsorted list is empty and therefore<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; have to perform a complete insert here. &nbsp;*/<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; bck = unsorted_chunks (av);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fwd = bck-&gt;fd;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (__glibc_unlikely (fwd-&gt;bk != bck))<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; malloc_printerr ("malloc(): corrupted unsorted chunks");<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; remainder-&gt;bk = bck;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; remainder-&gt;fd = fwd;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; bck-&gt;fd = remainder;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; fwd-&gt;bk = remainder;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (!in_smallbin_range (remainder_size))<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; remainder-&gt;fd_nextsize = NULL;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; remainder-&gt;bk_nextsize = NULL;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; set_head (victim, nb | PREV_INUSE |<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; (av != &amp;main_arena ? NON_MAIN_ARENA : 0));<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; set_head (remainder, remainder_size | PREV_INUSE);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; set_foot (remainder, remainder_size);<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; check_malloced_chunk (av, victim, nb);<br> &nbsp; &nbsp; &nbsp; &nbsp; void *p = chunk2mem (victim);<br> &nbsp; &nbsp; &nbsp; &nbsp; alloc_perturb (p, bytes);<br> &nbsp; &nbsp; &nbsp; &nbsp; return p;<br> &nbsp; &nbsp; }<br> }</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.5. free管理<br> 5.5.1. 将free的chunk块放入fastbinsY中<br> if ((unsigned long)(size) &lt;= (unsigned long)(get_max_fast ())<br> #if TRIM_FASTBINS<br> &nbsp; &nbsp; /*<br> &nbsp; &nbsp; &nbsp; If TRIM_FASTBINS set, don't place chunks<br> &nbsp; &nbsp; &nbsp; bordering top into fastbins<br> &nbsp; &nbsp; */<br> &nbsp; &nbsp; &amp;&amp; (chunk_at_offset(p, size) != av-&gt;top)<br> #endif<br> &nbsp; &nbsp; &nbsp; )<br> {}</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.5.2. 放入unsortedbin，前项和后项合并<br> 对free的chunk在放入unsortedbin后，做了如下操作：<br> A：通过当前free的chunk找到与之相邻的下一个chunk块，即nextchunk，并对nextchunk对应的inuse位进行清0（clear_inuse_bit_at_offset(nextchunk, 0);），设置当前chunk的inuse位为1（set_head(p, size | PREV_INUSE);），设置nextchunk对应的prev_size为当前chunk的值。这样在真正free nextchunk时，可通过inuse为0和prev_size找到与之相应的前一个块进行合并。<br> clear_inuse_bit_at_offset(nextchunk, 0);</p> 
+  <p>/* consolidate backward */<br> /*! 后向合并将两个相邻的chunk块合成一个 */<br> if (!prev_inuse(p)) {<br> &nbsp; &nbsp; prevsize = prev_size (p);<br> &nbsp; &nbsp; size += prevsize;</p> 
+  <p>&nbsp; &nbsp; p = chunk_at_offset(p, -((long) prevsize));<br> &nbsp; &nbsp; if (__glibc_unlikely (chunksize(p) != prevsize))<br> &nbsp; &nbsp; &nbsp; &nbsp; malloc_printerr ("corrupted size vs. prev_size while consolidating");<br> &nbsp; &nbsp; unlink_chunk (av, p);<br> }</p> 
+  <p>if (nextchunk != av-&gt;top) {<br> &nbsp; &nbsp; /* get and clear inuse bit */<br> &nbsp; &nbsp; nextinuse = inuse_bit_at_offset(nextchunk, nextsize);</p> 
+  <p>&nbsp; &nbsp; /* consolidate forward */<br> &nbsp; &nbsp; /*! 前向合并将多个相邻的chunk块合并成一个 */<br> &nbsp; &nbsp; if (!nextinuse) {<br> &nbsp; &nbsp; &nbsp; &nbsp; unlink_chunk (av, nextchunk);<br> &nbsp; &nbsp; &nbsp; &nbsp; size += nextsize;<br> &nbsp; &nbsp; } else<br> &nbsp; &nbsp; &nbsp; &nbsp; clear_inuse_bit_at_offset(nextchunk, 0); //置nextchunk inuse位为0，为后向合并做准备</p> 
+  <p>&nbsp; &nbsp; /*<br> &nbsp; &nbsp; Place the chunk in unsorted chunk list. Chunks are<br> &nbsp; &nbsp; not placed into regular bins until after they have<br> &nbsp; &nbsp; been given one chance to be used in malloc.<br> &nbsp; &nbsp; */<br> &nbsp; &nbsp; bck = unsorted_chunks(av);<br> &nbsp; &nbsp; fwd = bck-&gt;fd;</p> 
+  <p>&nbsp; &nbsp; if (__glibc_unlikely (fwd-&gt;bk != bck))<br> &nbsp; &nbsp; &nbsp; &nbsp; malloc_printerr ("free(): corrupted unsorted chunks");<br> &nbsp; &nbsp; p-&gt;fd = fwd;<br> &nbsp; &nbsp; p-&gt;bk = bck;<br> &nbsp; &nbsp; if (!in_smallbin_range(size))<br> &nbsp; &nbsp; {<br> &nbsp; &nbsp; &nbsp; &nbsp; p-&gt;fd_nextsize = NULL;<br> &nbsp; &nbsp; &nbsp; &nbsp; p-&gt;bk_nextsize = NULL;<br> &nbsp; &nbsp; }<br> &nbsp; &nbsp; bck-&gt;fd = p;<br> &nbsp; &nbsp; fwd-&gt;bk = p;</p> 
+  <p>&nbsp; &nbsp; set_head(p, size | PREV_INUSE); //设置当前inuse位<br> &nbsp; &nbsp; set_foot(p, size); //设置nextchunk的prev_size为当前chunk的大小</p> 
+  <p>&nbsp; &nbsp; check_free_chunk(av, p);<br> }<br> 从上可知，free的chunk会直接放入到unsortedbin中，在前向和后向合并后，会将合并后的大chunk块也放入到unsortedbin中。</p> 
+  <p>------------------------------------------------------------------------------------------------------------------------------<br> 5.5.3. 将free的chunk还给操作系统<br> #define FASTBIN_CONSOLIDATION_THRESHOLD &nbsp;(65536UL) //64Kb</p> 
+  <p>if ((unsigned long)(size) &gt;= FASTBIN_CONSOLIDATION_THRESHOLD) {<br> &nbsp; &nbsp; if (atomic_load_relaxed (&amp;av-&gt;have_fastchunks))<br> &nbsp; &nbsp; malloc_consolidate(av);</p> 
+  <p>&nbsp; &nbsp; if (av == &amp;main_arena) {<br> #ifndef MORECORE_CANNOT_TRIM<br> &nbsp; &nbsp; &nbsp; &nbsp; if ((unsigned long)(chunksize(av-&gt;top)) &gt;=<br> &nbsp; &nbsp; &nbsp; &nbsp; (unsigned long)(mp_.trim_threshold))<br> &nbsp; &nbsp; &nbsp; &nbsp; systrim(mp_.top_pad, av);<br> #endif<br> &nbsp; &nbsp; } else {<br> &nbsp; &nbsp; &nbsp; &nbsp; /* Always try heap_trim(), even if the top chunk is not<br> &nbsp; &nbsp; &nbsp; &nbsp; large, because the corresponding heap might go away. &nbsp;*/<br> &nbsp; &nbsp; &nbsp; &nbsp; heap_info *heap = heap_for_ptr(top(av));</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; assert(heap-&gt;ar_ptr == av);<br> &nbsp; &nbsp; &nbsp; &nbsp; heap_trim(heap, mp_.top_pad);<br> &nbsp; &nbsp; }<br> }<br> 只有当free的chunk size大于FASTBIN_CONSOLIDATION_THRESHOLD（64Kb）时，才会将内存直接还给操作系统。（注：size的大小不仅仅是用户free的chunk的大小，也会是前向和后向合并后的chunk大小）<br> malloc_consolidate会将fastbinsY中的所有chunk块与unsortedbin进行合并，合并后由systrim或heap_trim将其还给操作系统。</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

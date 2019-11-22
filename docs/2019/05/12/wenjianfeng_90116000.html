@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>select、poll、epoll之间的区别总结[整理] « NotBeCN</title>
+  <meta name="description" content="         select，poll，epoll都是IO多路复用的机制。I/O多路复用就通过一种机制，可以监视多个描述符，一旦某个描述符就绪（一般是读就绪或者写就绪），能够通知程序进行相应的读写操作。但select，poll，epoll本质上都是同步I/O，因为他们都需要在读写事件就绪后自己负责进行读写，也就...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/wenjianfeng_90116000.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">select、poll、epoll之间的区别总结[整理]</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>select，poll，epoll都是IO多路复用的机制。I/O多路复用就通过一种机制，可以监视多个描述符，一旦某个描述符就绪（一般是读就绪或者写就绪），能够通知程序进行相应的读写操作。<strong>但select，poll，epoll本质上都是同步I/O，因为他们都需要在读写事件就绪后自己负责进行读写，也就是说这个读写过程是阻塞的</strong>，而异步I/O则无需自己负责进行读写，异步I/O的实现会负责把数据从内核拷贝到用户空间。关于这三种IO多路复用的用法，前面三篇总结写的很清楚，并用服务器回射echo程序进行了测试。连接如下所示：</p> 
+  <p>select：<a href="http://www.cnblogs.com/Anker/archive/2013/08/14/3258674.html" rel="nofollow">http://www.cnblogs.com/Anker/archive/2013/08/14/3258674.html</a></p> 
+  <p>poll：<a href="http://www.cnblogs.com/Anker/archive/2013/08/15/3261006.html" rel="nofollow">http://www.cnblogs.com/Anker/archive/2013/08/15/3261006.html</a></p> 
+  <p>epoll：<a href="http://www.cnblogs.com/Anker/archive/2013/08/17/3263780.html" rel="nofollow">http://www.cnblogs.com/Anker/archive/2013/08/17/3263780.html</a></p> 
+  <p>　　今天对这三种IO多路复用进行对比，参考网上和书上面的资料，整理如下：</p> 
+  <p><strong>1、select实现</strong></p> 
+  <p><strong>select的调用过程如下所示：</strong></p> 
+  <p><strong><img alt="" class="has" src="https://images0.cnblogs.com/blog/305504/201308/17201205-8ac47f1f1fcd4773bd4edd947c0bb1f4.png"></strong></p> 
+  <p>（1）使用copy_from_user从用户空间拷贝fd_set到内核空间</p> 
+  <p>（2）注册回调函数__pollwait</p> 
+  <p>（3）遍历所有fd，调用其对应的poll方法（对于socket，这个poll方法是sock_poll，sock_poll根据情况会调用到tcp_poll,udp_poll或者datagram_poll）</p> 
+  <p>（4）以tcp_poll为例，其核心实现就是__pollwait，也就是上面注册的回调函数。</p> 
+  <p>（5）__pollwait的主要工作就是把current（当前进程）挂到设备的等待队列中，不同的设备有不同的等待队列，对于tcp_poll来说，其等待队列是sk-&gt;sk_sleep（注意把进程挂到等待队列中并不代表进程已经睡眠了）。在设备收到一条消息（网络设备）或填写完文件数据（磁盘设备）后，会唤醒设备等待队列上睡眠的进程，这时current便被唤醒了。</p> 
+  <p>（6）poll方法返回时会返回一个描述读写操作是否就绪的mask掩码，根据这个mask掩码给fd_set赋值。</p> 
+  <p>（7）如果遍历完所有的fd，还没有返回一个可读写的mask掩码，则会调用schedule_timeout是调用select的进程（也就是current）进入睡眠。当设备驱动发生自身资源可读写后，会唤醒其等待队列上睡眠的进程。如果超过一定的超时时间（schedule_timeout指定），还是没人唤醒，则调用select的进程会重新被唤醒获得CPU，进而重新遍历fd，判断有没有就绪的fd。</p> 
+  <p>（8）把fd_set从内核空间拷贝到用户空间。</p> 
+  <p><strong>总结：</strong></p> 
+  <p><strong>select的几大缺点：</strong></p> 
+  <p><strong>（1）每次调用select，都需要把fd集合从用户态拷贝到内核态，这个开销在fd很多时会很大</strong></p> 
+  <p><strong>（2）同时每次调用select都需要在内核遍历传递进来的所有fd，这个开销在fd很多时也很大</strong></p> 
+  <p><strong>（3）select支持的文件描述符数量太小了，默认是1024</strong></p> 
+  <p><strong>2 poll实现</strong></p> 
+  <p>　　poll的实现和select非常相似，只是描述fd集合的方式不同，poll使用pollfd结构而不是select的fd_set结构，其他的都差不多。</p> 
+  <p>关于select和poll的实现分析，可以参考下面几篇博文：</p> 
+  <p><a href="http://blog.csdn.net/lizhiguo0532/article/details/6568964#comments" rel="nofollow">http://blog.csdn.net/lizhiguo0532/article/details/6568964#comments</a></p> 
+  <p><a href="http://blog.csdn.net/lizhiguo0532/article/details/6568968" rel="nofollow">http://blog.csdn.net/lizhiguo0532/article/details/6568968</a></p> 
+  <p><a href="http://blog.csdn.net/lizhiguo0532/article/details/6568969" rel="nofollow">http://blog.csdn.net/lizhiguo0532/article/details/6568969</a></p> 
+  <p><a href="http://www.ibm.com/developerworks/cn/linux/l-cn-edntwk/index.html?ca=drs-" rel="nofollow">http://www.ibm.com/developerworks/cn/linux/l-cn-edntwk/index.html?ca=drs-</a></p> 
+  <p><a href="http://linux.chinaunix.net/techdoc/net/2009/05/03/1109887.shtml" rel="nofollow">http://linux.chinaunix.net/techdoc/net/2009/05/03/1109887.shtml</a></p> 
+  <p><strong>3、epoll</strong></p> 
+  <p>　　epoll既然是对select和poll的改进，就应该能避免上述的三个缺点。那epoll都是怎么解决的呢？在此之前，我们先看一下epoll和select和poll的调用接口上的不同，select和poll都只提供了一个函数——select或者poll函数。而epoll提供了三个函数，epoll_create,epoll_ctl和epoll_wait，epoll_create是创建一个epoll句柄；epoll_ctl是注册要监听的事件类型；epoll_wait则是等待事件的产生。</p> 
+  <p>　　对于第一个缺点，epoll的解决方案在epoll_ctl函数中。每次注册新的事件到epoll句柄中时（在epoll_ctl中指定EPOLL_CTL_ADD），会把所有的fd拷贝进内核，而不是在epoll_wait的时候重复拷贝。epoll保证了每个fd在整个过程中只会拷贝一次。</p> 
+  <p>　　对于第二个缺点，epoll的解决方案不像select或poll一样每次都把current轮流加入fd对应的设备等待队列中，而只在epoll_ctl时把current挂一遍（这一遍必不可少）并为每个fd指定一个回调函数，当设备就绪，唤醒等待队列上的等待者时，就会调用这个回调函数，而这个回调函数会把就绪的fd加入一个就绪链表）。epoll_wait的工作实际上就是在这个就绪链表中查看有没有就绪的fd（利用schedule_timeout()实现睡一会，判断一会的效果，和select实现中的第7步是类似的）。</p> 
+  <p>　　对于第三个缺点，epoll没有这个限制，它所支持的FD上限是最大可以打开文件的数目，这个数字一般远大于2048,举个例子,在1GB内存的机器上大约是10万左右，具体数目可以cat /proc/sys/fs/file-max察看,一般来说这个数目和系统内存关系很大。</p> 
+  <p><strong>总结：</strong></p> 
+  <p>（1）select，poll实现需要自己不断轮询所有fd集合，直到设备就绪，期间可能要睡眠和唤醒多次交替。而epoll其实也需要调用epoll_wait不断轮询就绪链表，期间也可能多次睡眠和唤醒交替，但是它是设备就绪时，调用回调函数，把就绪fd放入就绪链表中，并唤醒在epoll_wait中进入睡眠的进程。虽然都要睡眠和交替，但是select和poll在“醒着”的时候要遍历整个fd集合，而epoll在“醒着”的时候只要判断一下就绪链表是否为空就行了，这节省了大量的CPU时间。这就是回调机制带来的性能提升。</p> 
+  <p>（2）select，poll每次调用都要把fd集合从用户态往内核态拷贝一次，并且要把current往设备等待队列中挂一次，而epoll只要一次拷贝，而且把current往等待队列上挂也只挂一次（在epoll_wait的开始，注意这里的等待队列并不是设备等待队列，只是一个epoll内部定义的等待队列）。这也能节省不少的开销。</p> 
+  <p><strong>参考资料：</strong></p> 
+  <p><a href="http://www.cnblogs.com/apprentice89/archive/2013/05/09/3070051.html" rel="nofollow">http://www.cnblogs.com/apprentice89/archive/2013/05/09/3070051.html</a></p> 
+  <p><a href="http://www.linuxidc.com/Linux/2012-05/59873p3.htm" rel="nofollow">http://www.linuxidc.com/Linux/2012-05/59873p3.htm</a></p> 
+  <p><a href="http://xingyunbaijunwei.blog.163.com/blog/static/76538067201241685556302/" rel="nofollow">http://xingyunbaijunwei.blog.163.com/blog/static/76538067201241685556302/</a></p> 
+  <p><a href="http://blog.csdn.net/kkxgx/article/details/7717125" rel="nofollow">http://blog.csdn.net/kkxgx/article/details/7717125</a></p> 
+  <p><a href="https://banu.com/blog/2/how-to-use-epoll-a-complete-example-in-c/epoll-example.c" rel="nofollow">https://banu.com/blog/2/how-to-use-epoll-a-complete-example-in-c/epoll-example.c</a></p> 
+  <p>&nbsp;</p> 
+  <p>转自：<a href="https://www.cnblogs.com/Anker/p/3265058.html" rel="nofollow">https://www.cnblogs.com/Anker/p/3265058.html</a></p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

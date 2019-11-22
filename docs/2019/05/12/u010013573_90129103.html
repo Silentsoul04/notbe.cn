@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Zookeeper的核心设计与运用场景分析 « NotBeCN</title>
+  <meta name="description" content="                   概述       Zookeeper的设计目的，可以根据它的名字“zoo”和“keeper”推断，即动物园的管理者，而这样命名的起因是很多分布式组件，如Hadoop是大象，tomcat是猫等，故zookeeper是一种分布式协调和分布式组件管理服务，即负责管理和协调一个复杂的...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/u010013573_90129103.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Zookeeper的核心设计与运用场景分析</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-tomorrow-night-eighties"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <h3><a id="_1"></a>概述</h3> 
+  <ul> 
+   <li>Zookeeper的设计目的，可以根据它的名字“zoo”和“keeper”推断，即动物园的管理者，而这样命名的起因是很多分布式组件，如Hadoop是大象，tomcat是猫等，故zookeeper是一种分布式协调和分布式组件管理服务，即负责管理和协调一个复杂的分布式系统的各个组件，使得这些组件能够相互协作，共同构成一个分布式系统。</li> 
+   <li>具体来说，Zookeeper是Hadoop生态的中的一个用于管理MapReduce集群的子项目，主要用于维护集群各子节点的状态，如新增，运行中，节点宕机等，以及当子节点状态发生变化时通知其他节点，如在集群中新增机器节点，或者某个节点挂了通知集群的其他节点。</li> 
+   <li>在实现层面，Zookeeper是一个分布式目录服务，在每个zookeeper节点将所有数据组织成目录树结构，在各目录节点进行数据存储，数据存储方式如图，由父目录和子目录共同确定一个唯一路径：<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512014817228.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTAwMTM1NzM=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></li> 
+  </ul> 
+  <h3><a id="_7"></a>核心设计</h3> 
+  <h4><a id="1__8"></a>1. 目录节点的数据内容</h4> 
+  <ul> 
+   <li>由以上分析可知，zookeeper是基于目录树结构来存储数据的，即在每个目录树节点存放数据，而每个目录节点主要存放的数据包括节点状态数据和实际业务数据： 
+    <ol> 
+     <li>状态数据：节点名称，版本，ACL访问控制列表，即限制哪些ip可以访问该目录节点等；</li> 
+     <li>业务数据：客户端存放在节点的数据，如机器的配置数据等。</li> 
+    </ol> </li> 
+   <li>目录节点的容量：由于zookeeper的定位是集群的协调和管理，故每个目录节点主要用于存放集群节点的相关配置信息，所以zookeeper规定每个目录节点最大不能超过1M，主要用来存放配置数据、状态数据等，而不是用于大数据存储。</li> 
+   <li>目录的唯一性：由于目录节点的名称是路径引用，所以在整个目录树中，每个目录节点都是唯一的，即从根节点到当前目录节点的路径是唯一的。</li> 
+  </ul> 
+  <h4><a id="2__15"></a>2. 目录节点类型</h4> 
+  <ul> 
+   <li>zookeeper所提供的功能主要是通过创建不同类型的目录节点来实现，即我们在使用zookeeper时，需要根据业务特征来确定需要创建哪种类型的节点。</li> 
+   <li>zookeeper包含四种类型的目录节点，分别为： 
+    <ol> 
+     <li>持久节点：PERSISTENT</li> 
+     <li>持久顺序节点：PERSISTENT-SEQUENTIAL</li> 
+     <li>临时节点：EPHEMERAL</li> 
+     <li>临时顺序节点：EPHEMERAL-SEQUENTIAL</li> 
+    </ol> </li> 
+   <li>持久节点：客户端与zookeeper端口连接，节点依然存在，持久顺序节点：则是zookeeper会额外给这些持久节点的名称进行顺序编号。</li> 
+   <li>临时节点：客户端与zookeeper断开连接，则节点自动删除；临时顺序节点，则是zookeeper会额外给这些临时节点的名称进行顺序编号。</li> 
+  </ul> 
+  <h4><a id="3_Watcher_25"></a>3. 节点状态监听器Watcher</h4> 
+  <ul> 
+   <li>zookeeper支持通过对某个目录节点znode设置监听器watcher来监视该目录节点的状态变化，包含该节点的数据内容变化和该节点的子节点变化。</li> 
+   <li>具体使用方式为：客户端可以在相应目录节点znode设置监听器watcher，在该节点状态变化时，实时得到所该节点的当前最新状态信息。其中数据变化监听为对该节点调用exists或getData；对子节点列表的变化则是调用getChildren方法。</li> 
+  </ul> 
+  <h4><a id="4__29"></a>4. 高可用集群</h4> 
+  <ul> 
+   <li>zookeeper作为一个分布式系统的协调管理者，将分布式系统的各个组件之间连接起来共同构成一个完整的系统，故zookeeper自身需要保证高可用，否则如果zookeeper自身挂了，则其管理的分布式系统的各个组件的协作就会被切断，导致整个分布式系统不可用，就如同动物园的笼子都打开了，动物到处乱跑，导致游客无法游览。</li> 
+   <li>zookeeper的高可用主要是通过zookeeper集群的方式来实现的，如图上面蓝色部分就是zookeeper集群：<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512014943665.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTAwMTM1NzM=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></li> 
+   <li>当某个zookeeper机器节点挂了，如leader节点，马上有另外一个zookeeper节点来接管它的的工作。zookeeper集群高可用的相关设计与实现和可能出现的问题，具体可参考：<a href="https://blog.csdn.net/u010013573/article/details/90148935" rel="nofollow">Zookeeper的高可用集群与leader选举策略<br> </a></li> 
+  </ul> 
+  <h3><a id="_36"></a>运用场景</h3> 
+  <ul> 
+   <li>zookeeper最初主要是对Hadoop的mapreduce集群的各个机器节点进行管理，后来将zookeeper项目独立出来之后，可以结合zookeeper的内部结构特点，即目录树结构和目录节点类型来运用在更多的场景。</li> 
+  </ul> 
+  <h4><a id="1__39"></a>1. 集群管理：临时节点的运用</h4> 
+  <ul> 
+   <li> <p>集群管理是zookeeper的最初的一个运用场景，主要首先创建一个父目录节点，这个父目录节点代表一个集群，即可以将该目录节点的名称设置为集群名称，如cluster1，然后在该父目录节点下面创建多个子目录节点，其中节点类型为临时节点，每个子目录节点存储集群的一个机器节点的信息，具体如图所示：每个client节点代表一个机器节点<img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512015117490.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTAwMTM1NzM=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></p> </li> 
+   <li> <p>集群管理：所以可以在该父目录节点设置一个监听器watcher，监听其下面子节点的变化，从而能实时获取集群的机器节点的运作情况，如当某个机器宕机时，则其对应的临时节点就会被删除。</p> </li> 
+  </ul> 
+  <h4><a id="2__44"></a>2. 配置管理：持久节点的运用</h4> 
+  <ul> 
+   <li>一个分布式系统可能需要通过部署多个节点来进行拓展，然后通过负载均衡设施来将请求分散到各个部署节点，从而应对高并发请求，避免单点问题。</li> 
+   <li>为了避免当系统配置文件修改时，需要将配置文件更新到每个部署节点本地，可以将配置文件放在zookeeper的一个持久目录节点中，各个部署节点通过对该目录节点设置监视器watcher来实时获取该节点的数据内容变化，从而获取最新的配置文件信息，如图：<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/2019051201521024.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTAwMTM1NzM=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></li> 
+  </ul> 
+  <h4><a id="3__49"></a>3. 服务统一命令服务：服务注册与发现</h4> 
+  <ul> 
+   <li>命名服务主要是利用了zookeeper的目录树的路径引用唯一的特性，所以可以通过一个完整的路径引用来唯一命名一个服务，如zookeeper作为dubbo的服务注册中心，每个目录节点代表某个Service的完整包名的一部分，完整路径代表一个Service。除此之外在底层节点保存当前的服务提供者和服务消费者ip信息，如图：<br> <img src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512015233635.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3UwMTAwMTM1NzM=,size_16,color_FFFFFF,t_70" alt="在这里插入图片描述"></li> 
+  </ul> 
+  <h4><a id="4__53"></a>4. 分布式锁：临时顺序节点与临时节点</h4> 
+  <h5><a id="_54"></a>公平锁</h5> 
+  <ul> 
+   <li>zookeeper用作分布式锁主要是利用了临时顺序节点的特性，即多个分布式机器节点同时往某个父目录节点下创建一个临时顺序节点，其中创建的节点的序号最小的机器获取该分布式锁，其他机器则需要等待。之后该机器断开连接，释放锁，则其对应的序号最小的临时节点就会被删除，则序号第二小的节点此时变成序号最小的节点，故对应的机器获取该分布式锁。</li> 
+  </ul> 
+  <h5><a id="_57"></a>非公平锁</h5> 
+  <ul> 
+   <li>以上通过创建临时有序节点来实现公平锁，即所有请求获取锁的进程都可以在zookeeper的该父目录下面创建一个临时有序节点。而非公平锁的实现是在父目录创建临时节点，故任何时候只有一个客户端进程可以创建成功，其他客户端进程则需要继续等待，watcher监控该父目录节点的变化，如果持有锁的客户端进程断开连接，从而父目录节点被删了，则继续竞争创建该父目录节点。所以整个过程需要客户端在父目录节点设置wathcer，并多次发送写请求竞争创建该父节点，由于zookeeper是适用于读多写少的应用场景，故使用zookeeper来实现非公平锁通常性能较低。</li> 
+  </ul> 
+  <h5><a id="_59"></a>可重入性</h5> 
+  <ul> 
+   <li>可重入性：由于在临时节点的生命周期是客户端与zookeeper服务端的连接会话session期间，故该会话期间该客户端的多次加锁请求是可重入的，即该客户端对应的临时节点顺序始终是最小的。</li> 
+  </ul> 
+  <h5><a id="_61"></a>死锁问题</h5> 
+  <ul> 
+   <li>死锁问题：由于客户端断开连接，即不管是正常断开还是异常断开，该临时节点都会被删除，即锁会自动释放，故不会发生死锁问题。</li> 
+  </ul> 
+  <h4><a id="5__64"></a>5. 消息队列</h4> 
+  <ul> 
+   <li>消息队列也是利用了临时顺序节点的特性，从而实现队列的FIFO功能。</li> 
+  </ul> 
+  <h4><a id="6_leader_67"></a>6. 分布式leader选举：临时节点</h4> 
+  <ul> 
+   <li>zookeeper也可以用于实现其他分布式集群的leader选举，跟非公平锁的实现类似，也是集群的多个节点竞争在zookeeper中创建临时目录节点，创建成功的称为leader，失败的称为follower，并且follower在该目录节点设置watcher，当leader宕机时，该临时目录节点会被删除，则follower可以竞争创建该目录节点，重新选举出新的leader。</li> 
+  </ul> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

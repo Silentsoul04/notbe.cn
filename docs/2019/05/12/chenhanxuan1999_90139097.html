@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>[linux]用C语言实现一个Linux中的myshell « NotBeCN</title>
+  <meta name="description" content="         编写一个C语言程序myshell作为Linux内核的Shell命令行解释程序，实现以下功能：   (1)解析用户提交的命令行；按照环境变量搜索目录系统；执行命令,如果将要在后台运行命令，它将以“&amp;”结尾。   (2)提供ls、mkdir&nbsp; rmdir、pwd、ps等内部命令。 ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/chenhanxuan1999_90139097.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">[linux]用C语言实现一个Linux中的myshell</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p style="margin-left:0cm;">编写一个C语言程序myshell作为Linux内核的Shell命令行解释程序，实现以下功能：</p> 
+  <p style="margin-left:0cm;">(1)解析用户提交的命令行；按照环境变量搜索目录系统；执行命令,如果将要在后台运行命令，它将以“&amp;”结尾。</p> 
+  <p style="margin-left:0cm;">(2)提供ls、mkdir&nbsp; rmdir、pwd、ps等内部命令。</p> 
+  <p style="margin-left:0cm;">(3)提供历史查询功能。如用户按下Ctrl+C，信号处理器将输出最近的10个命令列表。</p> 
+  <p style="margin-left:0cm;">(4)'r\n'重复执行最近的一次命令,如果历史命令列表为空,给出提示</p> 
+  <p style="margin-left:0cm;">(5)'r x'执行最近一次以字符x开头的命令(逆向搜索),如命令列表中不存在,给出提示</p> 
+  <p style="margin-left:0cm;">HNUers,学长只能帮你们到这里了,可能会要改一下结尾的符号"&amp;"</p> 
+  <pre class="has">
+<code class="language-cpp">#include &lt;stdio.h&gt;   // to include printf
+#include &lt;signal.h&gt;  // to include struct sigaction handler
+#include &lt;unistd.h&gt;  // to include the system function 'execvp'
+#include &lt;stdlib.h&gt;  // to include exit()
+#include &lt;sys/types.h&gt;  // to include pid_t
+#include &lt;sys/wait.h&gt;   // to include wait()
+#include &lt;string.h&gt;  // to include strcpy
+#define BUFFERSIZE 50
+#define MAXLINE 80
+#define true 1
+#define false 0
+
+char buffer[BUFFERSIZE];
+char historyCommands[10][81];
+int currentCommandIndex = -1; // where to storage the current command
+
+void printHis () {
+    int i = 0;
+    printf("\n");
+    for (i = 0 ; i &lt; 10 ; ++i) {
+	printf("%d : %s", i, historyCommands[i]);
+    }
+}
+
+void handle_SIGINTO() {
+    write(STDOUT_FILENO, buffer, strlen(buffer));    
+    printHis();
+} 
+
+void addHistory(char *inputBuffer) {
+    //add history into the message queue
+    currentCommandIndex = (currentCommandIndex + 1) % 10;
+    strcpy(historyCommands[currentCommandIndex], inputBuffer);    
+}
+
+char* checkHis (char ch, int type) {
+    if (type == 3) {
+        int i = 0;
+        for (i = currentCommandIndex ; i &gt;= 0 ; --i) {
+    	    if (historyCommands[i][0] == ch) {
+			return historyCommands[i];
+	    }	
+	}
+		for (i = 9 ; i &gt;= currentCommandIndex ; --i) {
+	    	    if (historyCommands[i][0] == ch) {
+				return historyCommands[i];
+		    }	
+		}   
+    }
+    return NULL;
+}
+
+void setup(char inputBuffer[], char *args[],int *background) {
+	int i = 0;
+	int length = -1;  // storage the length of the command
+	length = read(STDIN_FILENO, inputBuffer, MAXLINE);
+	inputBuffer[length] = '\0';  // read method don't add '\0' automatically
+	if (length == 0) {
+		exit(0);		 
+	}
+	else if (length == -1) { 
+		args[0] = NULL;  
+		return;  // caught nothing, return
+	}
+	int currParamStartIndex = -1;  // to storage the current parameters'
+	int currPos = 0;  // args[currentPosition]
+	int copyFlag = false;  // did not call r or 'r x' 	
+	char* pCommand = NULL;
+	if (inputBuffer[0] == 'r') {
+	    // condition 3 : 'r\n' get the most recent one
+            if (inputBuffer[1] == '\n') {
+            	if (currentCommandIndex == -1) {
+                    printf("No valid commands\n");	
+		    		return;
+                }	
+		else {	
+		    strcpy(inputBuffer, historyCommands[currentCommandIndex]); 
+		    copyFlag = true;
+		}
+            }    
+            else if (inputBuffer[1] == ' ' &amp;&amp; inputBuffer[2] != ' ') {
+	         if ((pCommand = checkHis(inputBuffer[2], 3)) == NULL) { 
+                    printf("No recent valid commands begin with %c\n", inputBuffer[2]);	
+		     		return;
+                 }
+		 else {
+                strcpy(inputBuffer, pCommand);                   
+                copyFlag = true; 
+        	}
+	    } 
+	}
+	if (!copyFlag) {
+	    addHistory(inputBuffer);
+	}
+	else {
+            length = strlen(inputBuffer);
+	    addHistory(inputBuffer);
+        }
+	for (i = 0 ; i &lt; length ; ++i) {
+		if (inputBuffer[i] == '&amp;') {
+			*background = 1;
+			inputBuffer[i] = '\0';
+		}
+		else if (inputBuffer[i] == ' ' || inputBuffer[i] == '\t') {
+			if (currParamStartIndex != -1) {
+				args[currPos++] = &amp;inputBuffer[currParamStartIndex];
+				inputBuffer[i] = '\0';
+				currParamStartIndex = -1;
+			}
+		}
+		else if (inputBuffer[i] == '\n') {  // end of the current command
+			if (currParamStartIndex != -1) {
+				args[currPos++] = &amp;inputBuffer[currParamStartIndex];
+				inputBuffer[i] = '\0';
+				args[currPos] = NULL;
+				currParamStartIndex = -1;
+			}
+		}
+		else {  // storage the valid phrase of the order
+			if (currParamStartIndex == -1) {
+				currParamStartIndex = i;
+			}
+		}
+	}
+	args[currPos] = NULL;  // command length &gt; MAX_LINE
+}
+
+int main() {
+        int i = 0;
+	for (i = 0 ; i &lt; 10 ; i++) {
+	    historyCommands[i][0] = '\0'; // Initailize the command Array
+	}		
+	// create signal handler
+	struct sigaction handler;
+	handler.sa_handler = handle_SIGINTO;
+	sigaction(SIGINT, &amp;handler, NULL);
+        		
+	char inputBuffer[MAXLINE+1];  // maximum for 80 characters
+	int background = 0; 
+	char* args[MAXLINE/2 + 1];
+	while (true) {
+		background = 0; // default value to call wait(0)
+		printf("COMMAND-&gt;");
+		fflush(stdout);  // print the order to the screen
+		setup(inputBuffer, args, &amp;background);
+		pid_t pid = fork();
+		if (pid == -1) {
+			perror("fork");
+			exit(1);  // exit the process by accident
+		}
+		if (pid == 0) {  // child code
+			execvp(args[0], args);
+			exit(0);  // exit the process simoutaneously
+		}
+		if (background == 0) {
+			wait(0); 
+		}
+	}
+	return 0;
+} 
+</code></pre> 
+  <p style="margin-left:0cm;">&nbsp;</p> 
+  <p style="margin-left:0cm;">&nbsp;</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

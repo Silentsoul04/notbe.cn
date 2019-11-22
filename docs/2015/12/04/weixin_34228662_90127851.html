@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>理解 Memory barrier（内存屏障）【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://name5566.com/4535.html    参考文献列表：http://en.wikipedia.org/wiki/Memory_barrierhttp://en.wikipedia.org/wiki/Out-of-order_executionhttps:/...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2015/12/04/weixin_34228662_90127851.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">理解 Memory barrier（内存屏障）【转】</h1>
+    <p class="post-meta">Dec 4, 2015</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://name5566.com/4535.html" rel="nofollow">http://name5566.com/4535.html</a></p> 
+   <p>参考文献列表：<br><a href="http://en.wikipedia.org/wiki/Memory_barrier" rel="nofollow">http://en.wikipedia.org/wiki/Memory_barrier</a><br><a href="http://en.wikipedia.org/wiki/Out-of-order_execution" rel="nofollow">http://en.wikipedia.org/wiki/Out-of-order_execution</a><br><a href="https://www.kernel.org/doc/Documentation/memory-barriers.txt" rel="nofollow">https://www.kernel.org/doc/Documentation/memory-barriers.txt</a></p> 
+   <p>本文例子均在 Linux（g++）下验证通过，CPU 为 X86-64 处理器架构。所有罗列的 Linux 内核代码也均在（或只在）X86-64 下有效。</p> 
+   <p>本文首先通过范例（以及内核代码）来解释 Memory barrier，然后介绍一个利用 Memory barrier 实现的无锁环形缓冲区。</p> 
+   <h4>Memory barrier 简介</h4> 
+   <p>程序在运行时内存实际的访问顺序和程序代码编写的访问顺序不一定一致，这就是内存乱序访问。内存乱序访问行为出现的理由是为了提升程序运行时的性能。内存乱序访问主要发生在两个阶段：</p> 
+   <ol>
+    <li>编译时，编译器优化导致内存乱序访问（指令重排）</li> 
+    <li>运行时，多 CPU 间交互引起内存乱序访问</li> 
+   </ol>
+   <p>Memory barrier 能够让 CPU 或编译器在内存访问上有序。一个 Memory barrier 之前的内存访问操作必定先于其之后的完成。Memory barrier 包括两类：</p> 
+   <ol>
+    <li>编译器 barrier</li> 
+    <li>CPU Memory barrier</li> 
+   </ol>
+   <p>很多时候，编译器和 CPU 引起内存乱序访问不会带来什么问题，但一些特殊情况下，程序逻辑的正确性依赖于内存访问顺序，这时候内存乱序访问会带来逻辑上的错误，例如：</p> 
+   <ol>
+    <li class="L0"><span class="com">// thread 1</span></li> 
+    <li class="L1"><span class="kwd">while<span class="pln"> <span class="pun">(!<span class="pln">ok<span class="pun">);</span></span></span></span></span></li> 
+    <li class="L2"><span class="kwd">do<span class="pun">(<span class="pln">x<span class="pun">);</span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="com">// thread 2</span></li> 
+    <li class="L5"><span class="pln">x <span class="pun">=<span class="pln"> <span class="lit">42<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L6"><span class="pln">ok <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></li> 
+   </ol>
+   <p>此段代码中，ok 初始化为 0，线程 1 等待 ok 被设置为 1 后执行 do 函数。假如说，线程 2 对内存的写操作乱序执行，也就是 x 赋值后于 ok 赋值完成，那么 do 函数接受的实参就很可能出乎程序员的意料，不为 42。</p> 
+   <h4>编译时内存乱序访问</h4> 
+   <p>在编译时，编译器对代码做出优化时可能改变实际执行指令的顺序（例如 gcc 下 O2 或 O3 都会改变实际执行指令的顺序）：</p> 
+   <ol>
+    <li class="L0"><span class="com">// test.cpp</span></li> 
+    <li class="L1"><span class="kwd">int<span class="pln"> x<span class="pun">,<span class="pln"> y<span class="pun">,<span class="pln"> r<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="kwd">void<span class="pln"> f<span class="pun">()</span></span></span></li> 
+    <li class="L3"><span class="pun">{</span></li> 
+    <li class="L4"><span class="pln"> x <span class="pun">=<span class="pln"> r<span class="pun">;</span></span></span></span></li> 
+    <li class="L5"><span class="pln"> y <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L6"><span class="pun">}</span></li> 
+   </ol>
+   <p>编译器优化的结果可能导致 y = 1 在 x = r 之前执行完成。首先直接编译此源文件：</p> 
+   <ol>
+    <li class="L0"><span class="pln">g<span class="pun">++<span class="pln"> <span class="pun">-<span class="pln">S test<span class="pun">.<span class="pln">cpp</span></span></span></span></span></span></span></li> 
+   </ol>
+   <p>得到相关的汇编代码如下：</p> 
+   <ol>
+    <li class="L0"><span class="pln">movl r<span class="pun">(%<span class="pln">rip<span class="pun">),<span class="pln"> <span class="pun">%<span class="pln">eax</span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln">movl <span class="pun">%<span class="pln">eax<span class="pun">,<span class="pln"> x<span class="pun">(%<span class="pln">rip<span class="pun">)</span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln">movl $1<span class="pun">,<span class="pln"> y<span class="pun">(%<span class="pln">rip<span class="pun">)</span></span></span></span></span></span></li> 
+   </ol>
+   <p>这里我们看到，x = r 和 y = 1 并没有乱序。现使用优化选项 O2（或 O3）编译上面的代码（g++ -O2 -S test.cpp），生成汇编代码如下：</p> 
+   <ol>
+    <li class="L0"><span class="pln">movl r<span class="pun">(%<span class="pln">rip<span class="pun">),<span class="pln"> <span class="pun">%<span class="pln">eax</span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln">movl $1<span class="pun">,<span class="pln"> y<span class="pun">(%<span class="pln">rip<span class="pun">)</span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln">movl <span class="pun">%<span class="pln">eax<span class="pun">,<span class="pln"> x<span class="pun">(%<span class="pln">rip<span class="pun">)</span></span></span></span></span></span></span></span></li> 
+   </ol>
+   <p>我们可以清楚的看到经过编译器优化之后 movl $1, y(%rip) 先于 movl %eax, x(%rip) 执行。避免编译时内存乱序访问的办法就是使用编译器 barrier（又叫优化 barrier）。Linux 内核提供函数 barrier() 用于让编译器保证其之前的内存访问先于其之后的完成。内核实现 barrier() 如下（X86-64 架构）：</p> 
+   <ol>
+    <li class="L0"><span class="com">#define<span class="pln"> barrier<span class="pun">()<span class="pln"> __asm__ __volatile__<span class="pun">(<span class="str">""<span class="pln"> <span class="pun">:::<span class="pln"> <span class="str">"memory"<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></li> 
+   </ol>
+   <p>现在把此编译器 barrier 加入代码中：</p> 
+   <ol>
+    <li class="L0"><span class="kwd">int<span class="pln"> x<span class="pun">,<span class="pln"> y<span class="pun">,<span class="pln"> r<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="kwd">void<span class="pln"> f<span class="pun">()</span></span></span></li> 
+    <li class="L2"><span class="pun">{</span></li> 
+    <li class="L3"><span class="pln"> x <span class="pun">=<span class="pln"> r<span class="pun">;</span></span></span></span></li> 
+    <li class="L4"><span class="pln"> __asm__ __volatile__<span class="pun">(<span class="str">""<span class="pln"> <span class="pun">:::<span class="pln"> <span class="str">"memory"<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> y <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L6"><span class="pun">}</span></li> 
+   </ol>
+   <p>这样就避免了编译器优化带来的内存乱序访问的问题了（如果有兴趣可以再看看编译之后的汇编代码）。本例中，我们还可以使用 volatile 这个关键字来避免编译时内存乱序访问（而无法避免后面要说的运行时内存乱序访问）。volatile 关键字能够让相关的变量之间在内存访问上避免乱序，这里可以修改 x 和 y 的定义来解决问题：</p> 
+   <ol>
+    <li class="L0"><span class="kwd">volatile<span class="pln"> <span class="kwd">int<span class="pln"> x<span class="pun">,<span class="pln"> y<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="kwd">int<span class="pln"> r<span class="pun">;</span></span></span></li> 
+    <li class="L2"><span class="kwd">void<span class="pln"> f<span class="pun">()</span></span></span></li> 
+    <li class="L3"><span class="pun">{</span></li> 
+    <li class="L4"><span class="pln"> x <span class="pun">=<span class="pln"> r<span class="pun">;</span></span></span></span></li> 
+    <li class="L5"><span class="pln"> y <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L6"><span class="pun">}</span></li> 
+   </ol>
+   <p>现加上了 volatile 关键字，这使得 x 相对于 y、y 相对于 x 在内存访问上有序。在 Linux 内核中，提供了一个宏 ACCESS_ONCE 来避免编译器对于连续的 ACCESS_ONCE 实例进行指令重排。其实 ACCESS_ONCE 实现源码如下：</p> 
+   <ol>
+    <li class="L0"><span class="com">#define<span class="pln"> ACCESS_ONCE<span class="pun">(<span class="pln">x<span class="pun">)<span class="pln"> <span class="pun">(*(<span class="kwd">volatile<span class="pln"> <span class="kwd">typeof<span class="pun">(<span class="pln">x<span class="pun">)<span class="pln"> <span class="pun">*)&amp;(<span class="pln">x<span class="pun">))</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+   </ol>
+   <p>此代码只是将变量 x 转换为 volatile 的而已。现在我们就有了第三个修改方案：</p> 
+   <ol>
+    <li class="L0"><span class="kwd">int<span class="pln"> x<span class="pun">,<span class="pln"> y<span class="pun">,<span class="pln"> r<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="kwd">void<span class="pln"> f<span class="pun">()</span></span></span></li> 
+    <li class="L2"><span class="pun">{</span></li> 
+    <li class="L3"><span class="pln"> ACCESS_ONCE<span class="pun">(<span class="pln">x<span class="pun">)<span class="pln"> <span class="pun">=<span class="pln"> r<span class="pun">;</span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> ACCESS_ONCE<span class="pun">(<span class="pln">y<span class="pun">)<span class="pln"> <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pun">}</span></li> 
+   </ol>
+   <p>到此基本上就阐述完了我们的编译时内存乱序访问的问题。下面开始介绍运行时内存乱序访问。</p> 
+   <h4>运行时内存乱序访问</h4> 
+   <p>在运行时，CPU 虽然会乱序执行指令，但是在单个 CPU 的上，硬件能够保证程序执行时所有的内存访问操作看起来像是按程序代码编写的顺序执行的，这时候 Memory barrier 没有必要使用（不考虑编译器优化的情况下）。这里我们了解一下 CPU 乱序执行的行为。在乱序执行时，一个处理器真正执行指令的顺序由可用的输入数据决定，而非程序员编写的顺序。<br>早期的处理器为有序处理器（In-order processors），有序处理器处理指令通常有以下几步：</p> 
+   <ol>
+    <li>指令获取</li> 
+    <li>如果指令的输入操作对象（input operands）可用（例如已经在寄存器中了），则将此指令分发到适当的功能单元中。如果一个或者多个操作对象不可用（通常是由于需要从内存中获取），则处理器会等待直到它们可用</li> 
+    <li>指令被适当的功能单元执行</li> 
+    <li>功能单元将结果写回寄存器堆（Register file，一个 CPU 中的一组寄存器）</li> 
+   </ol>
+   <p>相比之下，乱序处理器（Out-of-order processors）处理指令通常有以下几步：</p> 
+   <ol>
+    <li>指令获取</li> 
+    <li>指令被分发到指令队列</li> 
+    <li>指令在指令队列中等待，直到输入操作对象可用（一旦输入操作对象可用，指令就可以离开队列，即便更早的指令未被执行）</li> 
+    <li>指令被分配到适当的功能单元并执行</li> 
+    <li>执行结果被放入队列（而不立即写入寄存器堆）</li> 
+    <li>只有所有更早请求执行的指令的执行结果被写入寄存器堆后，指令执行的结果才被写入寄存器堆（执行结果重排序，让执行看起来是有序的）</li> 
+   </ol>
+   <p>从上面的执行过程可以看出，乱序执行相比有序执行能够避免等待不可用的操作对象（有序执行的第二步）从而提高了效率。现代的机器上，处理器运行的速度比内存快很多，有序处理器花在等待可用数据的时间里已经可以处理大量指令了。<br>现在思考一下乱序处理器处理指令的过程，我们能得到几个结论：</p> 
+   <ol>
+    <li>对于单个 CPU 指令获取是有序的（通过队列实现）</li> 
+    <li>对于单个 CPU 指令执行结果也是有序返回寄存器堆的（通过队列实现）</li> 
+   </ol>
+   <p>由此可知，在单 CPU 上，不考虑编译器优化导致乱序的前提下，多线程执行不存在内存乱序访问的问题。我们从内核源码也可以得到类似的结论（代码不完全的摘录）：</p> 
+   <ol>
+    <li class="L0"><span class="com">#ifdef<span class="pln"> CONFIG_SMP</span></span></li> 
+    <li class="L1"><span class="com">#define<span class="pln"> smp_mb<span class="pun">()<span class="pln"> mb<span class="pun">()</span></span></span></span></span></li> 
+    <li class="L2"><span class="com">#else</span></li> 
+    <li class="L3"><span class="com">#define<span class="pln"> smp_mb<span class="pun">()<span class="pln"> barrier<span class="pun">()</span></span></span></span></span></li> 
+    <li class="L4"><span class="com">#endif</span></li> 
+   </ol>
+   <p>这里可以看到，如果是 SMP 则使用 mb，mb 被定义为 CPU Memory barrier（后面会讲到），而非 SMP 时，直接使用编译器 barrier。</p> 
+   <p>在多 CPU 的机器上，问题又不一样了。每个 CPU 都存在 cache（cache 主要是为了弥补 CPU 和内存之间较慢的访问速度），当一个特定数据第一次被特定一个 CPU 获取时，此数据显然不在 CPU 的 cache 中（这就是 cache miss）。此 cache miss 意味着 CPU 需要从内存中获取数据（这个过程需要 CPU 等待数百个周期），此数据将被加载到 CPU 的 cache 中，这样后续就能直接从 cache 上快速访问。当某个 CPU 进行写操作时，它必须确保其他的 CPU 已经将此数据从它们的 cache 中移除（以便保证一致性），只有在移除操作完成后此 CPU 才能安全的修改数据。显然，存在多个 cache 时，我们必须通过一个 cache 一致性协议来避免数据不一致的问题，而这个通讯的过程就可能导致乱序访问的出现，也就是这里说的运行时内存乱序访问。这里不再深入讨论整个细节，这是一个比较复杂的问题，有兴趣可以研究<a href="http://www.rdrop.com/users/paulmck/scalability/paper/whymb.2010.06.07c.pdf" rel="nofollow">http://www.rdrop.com/users/paulmck/scalability/paper/whymb.2010.06.07c.pdf</a>&nbsp;一文，其详细的分析了整个过程。</p> 
+   <p>现在通过一个例子来说明多 CPU 下内存乱序访问：</p> 
+   <ol>
+    <li class="L0"><span class="com">// test2.cpp</span></li> 
+    <li class="L1"><span class="com">#include<span class="pln"> <span class="str">&lt;pthread.h&gt;</span></span></span></li> 
+    <li class="L2"><span class="com">#include<span class="pln"> <span class="str">&lt;assert.h&gt;</span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="com">// -------------------</span></li> 
+    <li class="L5"><span class="kwd">int<span class="pln"> cpu_thread1 <span class="pun">=<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L6"><span class="kwd">int<span class="pln"> cpu_thread2 <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="kwd">volatile<span class="pln"> <span class="kwd">int<span class="pln"> x<span class="pun">,<span class="pln"> y<span class="pun">,<span class="pln"> r1<span class="pun">,<span class="pln"> r2<span class="pun">;</span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="kwd">void<span class="pln"> start<span class="pun">()</span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> x <span class="pun">=<span class="pln"> y <span class="pun">=<span class="pln"> r1 <span class="pun">=<span class="pln"> r2 <span class="pun">=<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pun">}</span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="kwd">void<span class="pln"> <span class="kwd">end<span class="pun">()</span></span></span></span></li> 
+    <li class="L6"><span class="pun">{</span></li> 
+    <li class="L7"><span class="pln"> <span class="kwd">assert<span class="pun">(!(<span class="pln">r1 <span class="pun">==<span class="pln"> <span class="lit">0<span class="pln"> <span class="pun">&amp;&amp;<span class="pln"> r2 <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">));</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pun">}</span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="kwd">void<span class="pln"> run1<span class="pun">()</span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> x <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> r1 <span class="pun">=<span class="pln"> y<span class="pun">;</span></span></span></span></li> 
+    <li class="L4"><span class="pun">}</span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="kwd">void<span class="pln"> run2<span class="pun">()</span></span></span></li> 
+    <li class="L7"><span class="pun">{</span></li> 
+    <li class="L8"><span class="pln"> y <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> r2 <span class="pun">=<span class="pln"> x<span class="pun">;</span></span></span></span></li> 
+    <li class="L0"><span class="pun">}</span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="com">// -------------------</span></li> 
+    <li class="L3"><span class="kwd">static<span class="pln"> <span class="typ">pthread_barrier_t<span class="pln"> barrier_start<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L4"><span class="kwd">static<span class="pln"> <span class="typ">pthread_barrier_t<span class="pln"> barrier_end<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="kwd">static<span class="pln"> <span class="kwd">void<span class="pun">*<span class="pln"> thread1<span class="pun">(<span class="kwd">void<span class="pun">*)</span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pun">{</span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">while<span class="pln"> <span class="pun">(<span class="lit">1<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> pthread_barrier_wait<span class="pun">(&amp;<span class="pln">barrier_start<span class="pun">);</span></span></span></span></li> 
+    <li class="L0"><span class="pln"> run1<span class="pun">();</span></span></li> 
+    <li class="L1"><span class="pln"> pthread_barrier_wait<span class="pun">(&amp;<span class="pln">barrier_end<span class="pun">);</span></span></span></span></li> 
+    <li class="L2"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">return<span class="pln"> NULL<span class="pun">;</span></span></span></span></li> 
+    <li class="L5"><span class="pun">}</span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="kwd">static<span class="pln"> <span class="kwd">void<span class="pun">*<span class="pln"> thread2<span class="pun">(<span class="kwd">void<span class="pun">*)</span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pun">{</span></li> 
+    <li class="L9"><span class="pln"> <span class="kwd">while<span class="pln"> <span class="pun">(<span class="lit">1<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln"> pthread_barrier_wait<span class="pun">(&amp;<span class="pln">barrier_start<span class="pun">);</span></span></span></span></li> 
+    <li class="L1"><span class="pln"> run2<span class="pun">();</span></span></li> 
+    <li class="L2"><span class="pln"> pthread_barrier_wait<span class="pun">(&amp;<span class="pln">barrier_end<span class="pun">);</span></span></span></span></li> 
+    <li class="L3"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="pln"> <span class="kwd">return<span class="pln"> NULL<span class="pun">;</span></span></span></span></li> 
+    <li class="L6"><span class="pun">}</span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="kwd">int<span class="pln"> main<span class="pun">()</span></span></span></li> 
+    <li class="L9"><span class="pun">{</span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">assert<span class="pun">(<span class="pln">pthread_barrier_init<span class="pun">(&amp;<span class="pln">barrier_start<span class="pun">,<span class="pln"> NULL<span class="pun">,<span class="pln"> <span class="lit">3<span class="pun">)<span class="pln"> <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> <span class="kwd">assert<span class="pun">(<span class="pln">pthread_barrier_init<span class="pun">(&amp;<span class="pln">barrier_end<span class="pun">,<span class="pln"> NULL<span class="pun">,<span class="pln"> <span class="lit">3<span class="pun">)<span class="pln"> <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln">&nbsp;</span></li> 
+    <li class="L3"><span class="pln"> <span class="typ">pthread_t<span class="pln"> t1<span class="pun">;</span></span></span></span></li> 
+    <li class="L4"><span class="pln"> <span class="typ">pthread_t<span class="pln"> t2<span class="pun">;</span></span></span></span></li> 
+    <li class="L5"><span class="pln"> <span class="kwd">assert<span class="pun">(<span class="pln">pthread_create<span class="pun">(&amp;<span class="pln">t1<span class="pun">,<span class="pln"> NULL<span class="pun">,<span class="pln"> thread1<span class="pun">,<span class="pln"> NULL<span class="pun">)<span class="pln"> <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln"> <span class="kwd">assert<span class="pun">(<span class="pln">pthread_create<span class="pun">(&amp;<span class="pln">t2<span class="pun">,<span class="pln"> NULL<span class="pun">,<span class="pln"> thread2<span class="pun">,<span class="pln"> NULL<span class="pun">)<span class="pln"> <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="pln"> <span class="typ">cpu_set_t<span class="pln"> cs<span class="pun">;</span></span></span></span></li> 
+    <li class="L9"><span class="pln"> CPU_ZERO<span class="pun">(&amp;<span class="pln">cs<span class="pun">);</span></span></span></span></li> 
+    <li class="L0"><span class="pln"> CPU_SET<span class="pun">(<span class="pln">cpu_thread1<span class="pun">,<span class="pln"> <span class="pun">&amp;<span class="pln">cs<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> <span class="kwd">assert<span class="pun">(<span class="pln">pthread_setaffinity_np<span class="pun">(<span class="pln">t1<span class="pun">,<span class="pln"> <span class="kwd">sizeof<span class="pun">(<span class="pln">cs<span class="pun">),<span class="pln"> <span class="pun">&amp;<span class="pln">cs<span class="pun">)<span class="pln"> <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> CPU_ZERO<span class="pun">(&amp;<span class="pln">cs<span class="pun">);</span></span></span></span></li> 
+    <li class="L3"><span class="pln"> CPU_SET<span class="pun">(<span class="pln">cpu_thread2<span class="pun">,<span class="pln"> <span class="pun">&amp;<span class="pln">cs<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">assert<span class="pun">(<span class="pln">pthread_setaffinity_np<span class="pun">(<span class="pln">t2<span class="pun">,<span class="pln"> <span class="kwd">sizeof<span class="pun">(<span class="pln">cs<span class="pun">),<span class="pln"> <span class="pun">&amp;<span class="pln">cs<span class="pun">)<span class="pln"> <span class="pun">==<span class="pln"> <span class="lit">0<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> <span class="kwd">while<span class="pln"> <span class="pun">(<span class="lit">1<span class="pun">)<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> start<span class="pun">();</span></span></li> 
+    <li class="L8"><span class="pln"> pthread_barrier_wait<span class="pun">(&amp;<span class="pln">barrier_start<span class="pun">);</span></span></span></span></li> 
+    <li class="L9"><span class="pln"> pthread_barrier_wait<span class="pun">(&amp;<span class="pln">barrier_end<span class="pun">);</span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">end<span class="pun">();</span></span></span></li> 
+    <li class="L1"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L2"><span class="pln">&nbsp;</span></li> 
+    <li class="L3"><span class="pln"> <span class="kwd">return<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L4"><span class="pun">}</span></li> 
+   </ol>
+   <p>这里创建了两个线程来运行测试代码（需要测试的代码将放置在 run 函数中）。我使用了 pthread barrier（区别于本文讨论的 Memory barrier）主要为了让两个子线程能够同时运行它们的 run 函数。此段代码不停的尝试同时运行两个线程的 run 函数，以便得出我们期望的结果。在每次运行 run 函数前会调用一次 start 函数（进行数据初始化），run 运行后会调用一次 end 函数（进行结果检查）。run1 和 run2 两个函数运行在哪个 CPU 上则通过 cpu_thread1 和 cpu_thread2 两个变量控制。<br>先编译此程序：g++ -lpthread -o test2 test2.cpp（这里未优化，目的是为了避免编译器优化的干扰）。需要注意的是，两个线程运行在两个不同的 CPU 上（CPU 0 和 CPU 1）。只要内存不出现乱序访问，那么 r1 和 r2 不可能同时为 0，因此断言失败表示存在内存乱序访问。编译之后运行此程序，会发现存在一定概率导致断言失败。为了进一步说明问题，我们把 cpu_thread2 的值改为 0，换而言之就是让两个线程跑在同一个 CPU 下，再运行程序发现断言不再失败。</p> 
+   <p>最后，我们使用 CPU Memory barrier 来解决内存乱序访问的问题（X86-64 架构下）：</p> 
+   <ol>
+    <li class="L0"><span class="kwd">int<span class="pln"> cpu_thread1 <span class="pun">=<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="kwd">int<span class="pln"> cpu_thread2 <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln">&nbsp;</span></li> 
+    <li class="L3"><span class="kwd">void<span class="pln"> run1<span class="pun">()</span></span></span></li> 
+    <li class="L4"><span class="pun">{</span></li> 
+    <li class="L5"><span class="pln"> x <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L6"><span class="pln"> __asm__ __volatile__<span class="pun">(<span class="str">"mfence"<span class="pln"> <span class="pun">:::<span class="pln"> <span class="str">"memory"<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> r1 <span class="pun">=<span class="pln"> y<span class="pun">;</span></span></span></span></li> 
+    <li class="L8"><span class="pun">}</span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="kwd">void<span class="pln"> run2<span class="pun">()</span></span></span></li> 
+    <li class="L1"><span class="pun">{</span></li> 
+    <li class="L2"><span class="pln"> y <span class="pun">=<span class="pln"> <span class="lit">1<span class="pun">;</span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> __asm__ __volatile__<span class="pun">(<span class="str">"mfence"<span class="pln"> <span class="pun">:::<span class="pln"> <span class="str">"memory"<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> r2 <span class="pun">=<span class="pln"> x<span class="pun">;</span></span></span></span></li> 
+    <li class="L5"><span class="pun">}</span></li> 
+   </ol>
+   <h4>准备使用 Memory barrier</h4> 
+   <p>Memory barrier 常用场合包括：</p> 
+   <ol>
+    <li>实现同步原语（synchronization primitives）</li> 
+    <li>实现无锁数据结构（lock-free data structures）</li> 
+    <li>驱动程序</li> 
+   </ol>
+   <p>实际的应用程序开发中，开发者可能完全不知道 Memory barrier 就可以开发正确的多线程程序，这主要是因为各种同步机制中已经隐含了 Memory barrier（但和实际的 Memory barrier 有细微差别），这就使得不直接使用 Memory barrier 不会存在任何问题。但是如果你希望编写诸如无锁数据结构，那么 Memory barrier 还是很有用的。</p> 
+   <p>通常来说，在单个 CPU 上，存在依赖的内存访问有序：</p> 
+   <ol>
+    <li class="L0"><span class="pln">Q <span class="pun">=<span class="pln"> P<span class="pun">;</span></span></span></span></li> 
+    <li class="L1"><span class="pln">D <span class="pun">=<span class="pln"> <span class="pun">*<span class="pln">Q<span class="pun">;</span></span></span></span></span></span></li> 
+   </ol>
+   <p>这里内存操作有序。然而在 Alpha CPU 上，存在依赖的内存读取操作不一定有序，需要使用数据依赖 barrier（由于 Alpha 不常见，这里就不详细解释了）。</p> 
+   <p>在 Linux 内核中，除了前面说到的编译器 barrier — barrier() 和 ACCESS_ONCE()，还有 CPU Memory barrier：</p> 
+   <ol>
+    <li>通用 barrier，保证读写操作有序的，mb() 和 smp_mb()</li> 
+    <li>写操作 barrier，仅保证写操作有序的，wmb() 和 smp_wmb()</li> 
+    <li>读操作 barrier，仅保证读操作有序的，rmb() 和 smp_rmb()</li> 
+   </ol>
+   <p>注意，所有的 CPU Memory barrier（除了数据依赖 barrier 之外）都隐含了编译器 barrier。这里的 smp 开头的 Memory barrier 会根据配置在单处理器上直接使用编译器 barrier，而在 SMP 上才使用 CPU Memory barrier（也就是 mb()、wmb()、rmb()，回忆上面相关内核代码）。</p> 
+   <p>最后需要注意一点的是，CPU Memory barrier 中某些类型的 Memory barrier 需要成对使用，否则会出错，详细来说就是：一个写操作 barrier 需要和读操作（或数据依赖）barrier 一起使用（当然，通用 barrier 也是可以的），反之依然。</p> 
+   <h4>Memory barrier 的范例</h4> 
+   <p>读内核代码进一步学习 Memory barrier 的使用。<br>Linux 内核实现的无锁（只有一个读线程和一个写线程时）环形缓冲区 kfifo 就使用到了 Memory barrier，实现源码如下：</p> 
+   <ol>
+    <li class="L0"><span class="com">/*</span></li> 
+    <li class="L1"><span class="com"> * A simple kernel FIFO implementation.</span></li> 
+    <li class="L2"><span class="com"> *</span></li> 
+    <li class="L3"><span class="com"> * Copyright (C) 2004 Stelian Pop &lt;stelian@popies.net&gt;</span></li> 
+    <li class="L4"><span class="com"> *</span></li> 
+    <li class="L5"><span class="com"> * This program is free software; you can redistribute it and/or modify</span></li> 
+    <li class="L6"><span class="com"> * it under the terms of the GNU General Public License as published by</span></li> 
+    <li class="L7"><span class="com"> * the Free Software Foundation; either version 2 of the License, or</span></li> 
+    <li class="L8"><span class="com"> * (at your option) any later version.</span></li> 
+    <li class="L9"><span class="com"> *</span></li> 
+    <li class="L0"><span class="com"> * This program is distributed in the hope that it will be useful,</span></li> 
+    <li class="L1"><span class="com"> * but WITHOUT ANY WARRANTY; without even the implied warranty of</span></li> 
+    <li class="L2"><span class="com"> * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the</span></li> 
+    <li class="L3"><span class="com"> * GNU General Public License for more details.</span></li> 
+    <li class="L4"><span class="com"> *</span></li> 
+    <li class="L5"><span class="com"> * You should have received a copy of the GNU General Public License</span></li> 
+    <li class="L6"><span class="com"> * along with this program; if not, write to the Free Software</span></li> 
+    <li class="L7"><span class="com"> * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.</span></li> 
+    <li class="L8"><span class="com"> *</span></li> 
+    <li class="L9"><span class="com"> */</span></li> 
+    <li class="L0"><span class="pln">&nbsp;</span></li> 
+    <li class="L1"><span class="com">#include<span class="pln"> <span class="str">&lt;linux/kernel.h&gt;</span></span></span></li> 
+    <li class="L2"><span class="com">#include<span class="pln"> <span class="str">&lt;linux/module.h&gt;</span></span></span></li> 
+    <li class="L3"><span class="com">#include<span class="pln"> <span class="str">&lt;linux/slab.h&gt;</span></span></span></li> 
+    <li class="L4"><span class="com">#include<span class="pln"> <span class="str">&lt;linux/err.h&gt;</span></span></span></li> 
+    <li class="L5"><span class="com">#include<span class="pln"> <span class="str">&lt;linux/kfifo.h&gt;</span></span></span></li> 
+    <li class="L6"><span class="com">#include<span class="pln"> <span class="str">&lt;linux/log2.h&gt;</span></span></span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="com">/**</span></li> 
+    <li class="L9"><span class="com"> * kfifo_init - allocates a new FIFO using a preallocated buffer</span></li> 
+    <li class="L0"><span class="com"> * @buffer: the preallocated buffer to be used.</span></li> 
+    <li class="L1"><span class="com"> * @size: the size of the internal buffer, this have to be a power of 2.</span></li> 
+    <li class="L2"><span class="com"> * @gfp_mask: get_free_pages mask, passed to kmalloc()</span></li> 
+    <li class="L3"><span class="com"> * @lock: the lock to be used to protect the fifo buffer</span></li> 
+    <li class="L4"><span class="com"> *</span></li> 
+    <li class="L5"><span class="com"> * Do NOT pass the kfifo to kfifo_free() after use! Simply free the</span></li> 
+    <li class="L6"><span class="com"> * &amp;struct kfifo with kfree().</span></li> 
+    <li class="L7"><span class="com"> */</span></li> 
+    <li class="L8"><span class="kwd">struct<span class="pln"> kfifo <span class="pun">*<span class="pln">kfifo_init<span class="pun">(<span class="kwd">unsigned<span class="pln"> <span class="kwd">char<span class="pln"> <span class="pun">*<span class="pln">buffer<span class="pun">,<span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">int<span class="pln"> size<span class="pun">,</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="typ">gfp_t<span class="pln"> gfp_mask<span class="pun">,<span class="pln"> <span class="typ">spinlock_t<span class="pln"> <span class="pun">*<span class="kwd">lock<span class="pun">)</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pun">{</span></li> 
+    <li class="L1"><span class="pln"> <span class="kwd">struct<span class="pln"> kfifo <span class="pun">*<span class="pln">fifo<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln">&nbsp;</span></li> 
+    <li class="L3"><span class="pln"> <span class="com">/* size must be a power of 2 */</span></span></li> 
+    <li class="L4"><span class="pln"> BUG_ON<span class="pun">(!<span class="pln">is_power_of_2<span class="pun">(<span class="pln">size<span class="pun">));</span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> fifo <span class="pun">=<span class="pln"> kmalloc<span class="pun">(<span class="kwd">sizeof<span class="pun">(<span class="kwd">struct<span class="pln"> kfifo<span class="pun">),<span class="pln"> gfp_mask<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(!<span class="pln">fifo<span class="pun">)</span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">return<span class="pln"> ERR_PTR<span class="pun">(-<span class="pln">ENOMEM<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="pln"> fifo<span class="pun">-&gt;<span class="pln">buffer <span class="pun">=<span class="pln"> buffer<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> fifo<span class="pun">-&gt;<span class="pln">size <span class="pun">=<span class="pln"> size<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">in<span class="pln"> <span class="pun">=<span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">out<span class="pln"> <span class="pun">=<span class="pln"> <span class="lit">0<span class="pun">;</span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">lock<span class="pln"> <span class="pun">=<span class="pln"> <span class="kwd">lock<span class="pun">;</span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="pln"> <span class="kwd">return<span class="pln"> fifo<span class="pun">;</span></span></span></span></li> 
+    <li class="L6"><span class="pun">}</span></li> 
+    <li class="L7"><span class="pln">EXPORT_SYMBOL<span class="pun">(<span class="pln">kfifo_init<span class="pun">);</span></span></span></span></li> 
+    <li class="L8"><span class="pln">&nbsp;</span></li> 
+    <li class="L9"><span class="com">/**</span></li> 
+    <li class="L0"><span class="com"> * kfifo_alloc - allocates a new FIFO and its internal buffer</span></li> 
+    <li class="L1"><span class="com"> * @size: the size of the internal buffer to be allocated.</span></li> 
+    <li class="L2"><span class="com"> * @gfp_mask: get_free_pages mask, passed to kmalloc()</span></li> 
+    <li class="L3"><span class="com"> * @lock: the lock to be used to protect the fifo buffer</span></li> 
+    <li class="L4"><span class="com"> *</span></li> 
+    <li class="L5"><span class="com"> * The size will be rounded-up to a power of 2.</span></li> 
+    <li class="L6"><span class="com"> */</span></li> 
+    <li class="L7"><span class="kwd">struct<span class="pln"> kfifo <span class="pun">*<span class="pln">kfifo_alloc<span class="pun">(<span class="kwd">unsigned<span class="pln"> <span class="kwd">int<span class="pln"> size<span class="pun">,<span class="pln"> <span class="typ">gfp_t<span class="pln"> gfp_mask<span class="pun">,<span class="pln"> <span class="typ">spinlock_t<span class="pln"> <span class="pun">*<span class="kwd">lock<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pun">{</span></li> 
+    <li class="L9"><span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">char<span class="pln"> <span class="pun">*<span class="pln">buffer<span class="pun">;</span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">struct<span class="pln"> kfifo <span class="pun">*<span class="pln">ret<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L3"><span class="com"> * round up to the next power of 2, since our 'let the indices</span></li> 
+    <li class="L4"><span class="com"> * wrap' technique works only in this case.</span></li> 
+    <li class="L5"><span class="com"> */</span></li> 
+    <li class="L6"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(!<span class="pln">is_power_of_2<span class="pun">(<span class="pln">size<span class="pun">))<span class="pln"> <span class="pun">{</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln"> BUG_ON<span class="pun">(<span class="pln">size <span class="pun">&gt;<span class="pln"> <span class="lit">0x80000000<span class="pun">);</span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> size <span class="pun">=<span class="pln"> roundup_pow_of_two<span class="pun">(<span class="pln">size<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="pun">}</span></span></li> 
+    <li class="L0"><span class="pln">&nbsp;</span></li> 
+    <li class="L1"><span class="pln"> buffer <span class="pun">=<span class="pln"> kmalloc<span class="pun">(<span class="pln">size<span class="pun">,<span class="pln"> gfp_mask<span class="pun">);</span></span></span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(!<span class="pln">buffer<span class="pun">)</span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln"> <span class="kwd">return<span class="pln"> ERR_PTR<span class="pun">(-<span class="pln">ENOMEM<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="pln"> ret <span class="pun">=<span class="pln"> kfifo_init<span class="pun">(<span class="pln">buffer<span class="pun">,<span class="pln"> size<span class="pun">,<span class="pln"> gfp_mask<span class="pun">,<span class="pln"> <span class="kwd">lock<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pln">&nbsp;</span></li> 
+    <li class="L7"><span class="pln"> <span class="kwd">if<span class="pln"> <span class="pun">(<span class="pln">IS_ERR<span class="pun">(<span class="pln">ret<span class="pun">))</span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln"> kfree<span class="pun">(<span class="pln">buffer<span class="pun">);</span></span></span></span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="pln"> <span class="kwd">return<span class="pln"> ret<span class="pun">;</span></span></span></span></li> 
+    <li class="L1"><span class="pun">}</span></li> 
+    <li class="L2"><span class="pln">EXPORT_SYMBOL<span class="pun">(<span class="pln">kfifo_alloc<span class="pun">);</span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="com">/**</span></li> 
+    <li class="L5"><span class="com"> * kfifo_free - frees the FIFO</span></li> 
+    <li class="L6"><span class="com"> * @fifo: the fifo to be freed.</span></li> 
+    <li class="L7"><span class="com"> */</span></li> 
+    <li class="L8"><span class="kwd">void<span class="pln"> kfifo_free<span class="pun">(<span class="kwd">struct<span class="pln"> kfifo <span class="pun">*<span class="pln">fifo<span class="pun">)</span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pun">{</span></li> 
+    <li class="L0"><span class="pln"> kfree<span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="pln">buffer<span class="pun">);</span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln"> kfree<span class="pun">(<span class="pln">fifo<span class="pun">);</span></span></span></span></li> 
+    <li class="L2"><span class="pun">}</span></li> 
+    <li class="L3"><span class="pln">EXPORT_SYMBOL<span class="pun">(<span class="pln">kfifo_free<span class="pun">);</span></span></span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="com">/**</span></li> 
+    <li class="L6"><span class="com"> * __kfifo_put - puts some data into the FIFO, no locking version</span></li> 
+    <li class="L7"><span class="com"> * @fifo: the fifo to be used.</span></li> 
+    <li class="L8"><span class="com"> * @buffer: the data to be added.</span></li> 
+    <li class="L9"><span class="com"> * @len: the length of the data to be added.</span></li> 
+    <li class="L0"><span class="com"> *</span></li> 
+    <li class="L1"><span class="com"> * This function copies at most @len bytes from the @buffer into</span></li> 
+    <li class="L2"><span class="com"> * the FIFO depending on the free space, and returns the number of</span></li> 
+    <li class="L3"><span class="com"> * bytes copied.</span></li> 
+    <li class="L4"><span class="com"> *</span></li> 
+    <li class="L5"><span class="com"> * Note that with only one concurrent reader and one concurrent</span></li> 
+    <li class="L6"><span class="com"> * writer, you don't need extra locking to use these functions.</span></li> 
+    <li class="L7"><span class="com"> */</span></li> 
+    <li class="L8"><span class="kwd">unsigned<span class="pln"> <span class="kwd">int<span class="pln"> __kfifo_put<span class="pun">(<span class="kwd">struct<span class="pln"> kfifo <span class="pun">*<span class="pln">fifo<span class="pun">,</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L9"><span class="pln"> <span class="kwd">const<span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">char<span class="pln"> <span class="pun">*<span class="pln">buffer<span class="pun">,<span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">int<span class="pln"> len<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pun">{</span></li> 
+    <li class="L1"><span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">int<span class="pln"> l<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L2"><span class="pln">&nbsp;</span></li> 
+    <li class="L3"><span class="pln"> len <span class="pun">=<span class="pln"> min<span class="pun">(<span class="pln">len<span class="pun">,<span class="pln"> fifo<span class="pun">-&gt;<span class="pln">size <span class="pun">-<span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">in<span class="pln"> <span class="pun">+<span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">out<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L6"><span class="com"> * Ensure that we sample the fifo-&gt;out index -before- we</span></li> 
+    <li class="L7"><span class="com"> * start putting bytes into the kfifo.</span></li> 
+    <li class="L8"><span class="com"> */</span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="pln"> smp_mb<span class="pun">();</span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> <span class="com">/* first put the data starting from fifo-&gt;in to buffer end */</span></span></li> 
+    <li class="L3"><span class="pln"> l <span class="pun">=<span class="pln"> min<span class="pun">(<span class="pln">len<span class="pun">,<span class="pln"> fifo<span class="pun">-&gt;<span class="pln">size <span class="pun">-<span class="pln"> <span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="kwd">in<span class="pln"> <span class="pun">&amp;<span class="pln"> <span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="pln">size <span class="pun">-<span class="pln"> <span class="lit">1<span class="pun">)));</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln"> memcpy<span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="pln">buffer <span class="pun">+<span class="pln"> <span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="kwd">in<span class="pln"> <span class="pun">&amp;<span class="pln"> <span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="pln">size <span class="pun">-<span class="pln"> <span class="lit">1<span class="pun">)),<span class="pln"> buffer<span class="pun">,<span class="pln"> l<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> <span class="com">/* then put the rest (if any) at the beginning of the buffer */</span></span></li> 
+    <li class="L7"><span class="pln"> memcpy<span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="pln">buffer<span class="pun">,<span class="pln"> buffer <span class="pun">+<span class="pln"> l<span class="pun">,<span class="pln"> len <span class="pun">-<span class="pln"> l<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln">&nbsp;</span></li> 
+    <li class="L9"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L0"><span class="com"> * Ensure that we add the bytes to the kfifo -before-</span></li> 
+    <li class="L1"><span class="com"> * we update the fifo-&gt;in index.</span></li> 
+    <li class="L2"><span class="com"> */</span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> smp_wmb<span class="pun">();</span></span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">in<span class="pln"> <span class="pun">+=<span class="pln"> len<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="pln"> <span class="kwd">return<span class="pln"> len<span class="pun">;</span></span></span></span></li> 
+    <li class="L9"><span class="pun">}</span></li> 
+    <li class="L0"><span class="pln">EXPORT_SYMBOL<span class="pun">(<span class="pln">__kfifo_put<span class="pun">);</span></span></span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="com">/**</span></li> 
+    <li class="L3"><span class="com"> * __kfifo_get - gets some data from the FIFO, no locking version</span></li> 
+    <li class="L4"><span class="com"> * @fifo: the fifo to be used.</span></li> 
+    <li class="L5"><span class="com"> * @buffer: where the data must be copied.</span></li> 
+    <li class="L6"><span class="com"> * @len: the size of the destination buffer.</span></li> 
+    <li class="L7"><span class="com"> *</span></li> 
+    <li class="L8"><span class="com"> * This function copies at most @len bytes from the FIFO into the</span></li> 
+    <li class="L9"><span class="com"> * @buffer and returns the number of copied bytes.</span></li> 
+    <li class="L0"><span class="com"> *</span></li> 
+    <li class="L1"><span class="com"> * Note that with only one concurrent reader and one concurrent</span></li> 
+    <li class="L2"><span class="com"> * writer, you don't need extra locking to use these functions.</span></li> 
+    <li class="L3"><span class="com"> */</span></li> 
+    <li class="L4"><span class="kwd">unsigned<span class="pln"> <span class="kwd">int<span class="pln"> __kfifo_get<span class="pun">(<span class="kwd">struct<span class="pln"> kfifo <span class="pun">*<span class="pln">fifo<span class="pun">,</span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L5"><span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">char<span class="pln"> <span class="pun">*<span class="pln">buffer<span class="pun">,<span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">int<span class="pln"> len<span class="pun">)</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L6"><span class="pun">{</span></li> 
+    <li class="L7"><span class="pln"> <span class="kwd">unsigned<span class="pln"> <span class="kwd">int<span class="pln"> l<span class="pun">;</span></span></span></span></span></span></li> 
+    <li class="L8"><span class="pln">&nbsp;</span></li> 
+    <li class="L9"><span class="pln"> len <span class="pun">=<span class="pln"> min<span class="pun">(<span class="pln">len<span class="pun">,<span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">in<span class="pln"> <span class="pun">-<span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">out<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln">&nbsp;</span></li> 
+    <li class="L1"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L2"><span class="com"> * Ensure that we sample the fifo-&gt;in index -before- we</span></li> 
+    <li class="L3"><span class="com"> * start removing bytes from the kfifo.</span></li> 
+    <li class="L4"><span class="com"> */</span></li> 
+    <li class="L5"><span class="pln">&nbsp;</span></li> 
+    <li class="L6"><span class="pln"> smp_rmb<span class="pun">();</span></span></li> 
+    <li class="L7"><span class="pln">&nbsp;</span></li> 
+    <li class="L8"><span class="pln"> <span class="com">/* first get the data from fifo-&gt;out until the end of the buffer */</span></span></li> 
+    <li class="L9"><span class="pln"> l <span class="pun">=<span class="pln"> min<span class="pun">(<span class="pln">len<span class="pun">,<span class="pln"> fifo<span class="pun">-&gt;<span class="pln">size <span class="pun">-<span class="pln"> <span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="kwd">out<span class="pln"> <span class="pun">&amp;<span class="pln"> <span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="pln">size <span class="pun">-<span class="pln"> <span class="lit">1<span class="pun">)));</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L0"><span class="pln"> memcpy<span class="pun">(<span class="pln">buffer<span class="pun">,<span class="pln"> fifo<span class="pun">-&gt;<span class="pln">buffer <span class="pun">+<span class="pln"> <span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="kwd">out<span class="pln"> <span class="pun">&amp;<span class="pln"> <span class="pun">(<span class="pln">fifo<span class="pun">-&gt;<span class="pln">size <span class="pun">-<span class="pln"> <span class="lit">1<span class="pun">)),<span class="pln"> l<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> <span class="com">/* then get the rest (if any) from the beginning of the buffer */</span></span></li> 
+    <li class="L3"><span class="pln"> memcpy<span class="pun">(<span class="pln">buffer <span class="pun">+<span class="pln"> l<span class="pun">,<span class="pln"> fifo<span class="pun">-&gt;<span class="pln">buffer<span class="pun">,<span class="pln"> len <span class="pun">-<span class="pln"> l<span class="pun">);</span></span></span></span></span></span></span></span></span></span></span></span></span></span></li> 
+    <li class="L4"><span class="pln">&nbsp;</span></li> 
+    <li class="L5"><span class="pln"> <span class="com">/*</span></span></li> 
+    <li class="L6"><span class="com"> * Ensure that we remove the bytes from the kfifo -before-</span></li> 
+    <li class="L7"><span class="com"> * we update the fifo-&gt;out index.</span></li> 
+    <li class="L8"><span class="com"> */</span></li> 
+    <li class="L9"><span class="pln">&nbsp;</span></li> 
+    <li class="L0"><span class="pln"> smp_mb<span class="pun">();</span></span></li> 
+    <li class="L1"><span class="pln">&nbsp;</span></li> 
+    <li class="L2"><span class="pln"> fifo<span class="pun">-&gt;<span class="kwd">out<span class="pln"> <span class="pun">+=<span class="pln"> len<span class="pun">;</span></span></span></span></span></span></span></li> 
+    <li class="L3"><span class="pln">&nbsp;</span></li> 
+    <li class="L4"><span class="pln"> <span class="kwd">return<span class="pln"> len<span class="pun">;</span></span></span></span></li> 
+    <li class="L5"><span class="pun">}</span></li> 
+    <li class="L6"><span class="pln">EXPORT_SYMBOL<span class="pun">(<span class="pln">__kfifo_get<span class="pun">);</span></span></span></span></li> 
+   </ol>
+   <p>为了更好的理解上面的源码，这里顺带说一下此实现使用到的一些和本文主题无关的技巧：</p> 
+   <ol>
+    <li>使用与操作来求取环形缓冲区的下标，相比取余操作来求取下标的做法效率要高不少。使用与操作求取下标的前提是环形缓冲区的大小必须是 2 的 N 次方，换而言之就是说环形缓冲区的大小为一个仅有一个 1 的二进制数，那么 index &amp; (size – 1) 则为求取的下标（这不难理解）</li> 
+    <li>使用了 in 和 out 两个索引且 in 和 out 是一直递增的（此做法比较巧妙），这样能够避免一些复杂的条件判断（某些实现下，in == out 时还无法区分缓冲区是空还是满）</li> 
+   </ol>
+   <p>这里，索引 in 和 out 被两个线程访问。in 和 out 指明了缓冲区中实际数据的边界，也就是 in 和 out 同缓冲区数据存在访问上的顺序关系，由于未使用同步机制，那么保证顺序关系就需要使用到 Memory barrier 了。索引 in 和 out 都分别只被一个线程修改，而被两个线程读取。__kfifo_put 先通过 in 和 out 来确定可以向缓冲区中写入数据量的多少，这时，out 索引应该先被读取后才能真正的将用户 buffer 中的数据写入缓冲区，因此这里使用到了 smp_mb()，对应的，__kfifo_get 也使用 smp_mb() 来确保修改 out 索引之前缓冲区中数据已经被成功读取并写入用户 buffer 中了。对于 in 索引，在 __kfifo_put 中，通过 smp_wmb() 保证先向缓冲区写入数据后才修改 in 索引，由于这里只需要保证写入操作有序，故选用写操作 barrier，在 __kfifo_get 中，通过 smp_rmb() 保证先读取了 in 索引（这时候 in 索引用于确定缓冲区中实际存在多少可读数据）才开始读取缓冲区中数据（并写入用户 buffer 中），由于这里只需要保证读取操作有序，故选用读操作 barrier。</p> 
+   <p>到这里，Memory barrier 就介绍完毕了。</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

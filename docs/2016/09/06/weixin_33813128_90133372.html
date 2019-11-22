@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux workqueue工作原理 【转】 « NotBeCN</title>
+  <meta name="description" content="             &nbsp;    转自：http://blog.chinaunix.net/uid-21977330-id-3754719.html    转自：http://bgutech.blog.163.com/blog/static/18261124320116181119889/1. 什么是...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2016/09/06/weixin_33813128_90133372.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux workqueue工作原理 【转】</h1>
+    <p class="post-meta">Sep 6, 2016</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>&nbsp;</p> 
+   <p>转自：<a href="http://blog.chinaunix.net/uid-21977330-id-3754719.html" rel="nofollow">http://blog.chinaunix.net/uid-21977330-id-3754719.html</a></p> 
+   <p><strong>转自：<a href="http://bgutech.blog.163.com/blog/static/18261124320116181119889/" rel="nofollow">http://bgutech.blog.163.com/blog/static/18261124320116181119889/</a><br>1. 什么是workqueue<br></strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Linux中的Workqueue机制就是为了简化内核线程的创建。通过调用workqueue的接口就能创建内核线程。并且可以根据当前系统CPU的个 数创建线程的数量，使得线程处理的事务能够并行化。workqueue是内核中实现简单而有效的机制，他显然简化了内核daemon的创建，方便了用户的 编程.</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 工作队列（workqueue）是另外一种将工作推后执行的形式.工作队列可以把工作推后，交由一个内核线程去执行，也就是说，这个下半部分可以在进程上下文中执行。最重要的就是工作队列允许被重新调度甚至是睡眠。<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 那么，什么情况下使用工作队列，什么情况下使用tasklet。如果推后执行的任务需要睡眠，那么就选择工作队列。如果推后执行的任务不需要睡眠，那么就 选择tasklet。另外，如果需要用一个可以重新调度的实体来执行你的下半部处理，也应该使用工作队列。它是唯一能在进程上下文运行的下半部实现的机 制，也只有它才可以睡眠。这意味着在需要获得大量的内存时、在需要获取信号量时，在需要执行阻塞式的I/O操作时，它都会非常有用。如果不需要用一个内核 线程来推后执行工作，那么就考虑使用tasklet。</p> 
+   <p><strong>2. 数据结构<br></strong>&nbsp;&nbsp;&nbsp;&nbsp; 我们把推后执行的任务叫做工作（work），描述它的数据结构为work_struct:</p> 
+   <p>&nbsp;</p> 
+   <pre><code class="language-cpp">struct work_struct {
+    atomic_long_t data;       /*工作处理函数func的参数*/
+#define WORK_STRUCT_PENDING 0        /* T if work item pending execution */
+#define WORK_STRUCT_STATIC 1        /* static initializer (debugobjects) */
+#define WORK_STRUCT_FLAG_MASK (3UL)
+#define WORK_STRUCT_WQ_DATA_MASK (~WORK_STRUCT_FLAG_MASK)
+    struct list_head entry;        /*连接工作的指针*/
+    work_func_t func;              /*工作处理函数*/
+#ifdef CONFIG_LOCKDEP
+    struct lockdep_map lockdep_map;
+#endif
+};
+
+</code></pre> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这些工作以队列结构组织成工作队列（workqueue），其数据结构为workqueue_struct:</p> 
+   <pre><code class="language-cpp">struct workqueue_struct {
+ struct cpu_workqueue_struct *cpu_wq;
+ struct list_head list;
+ const char *name;   /*workqueue name*/
+ int singlethread;   /*是不是单线程 - 单线程我们首选第一个CPU -0表示采用默认的工作者线程event*/
+ int freezeable;  /* Freeze threads during suspend */
+ int rt;
+}; 
+
+</code></pre> 
+   <p><br>&nbsp;&nbsp;&nbsp;&nbsp; 如果是多线程，Linux根据当前系统CPU的个数创建cpu_workqueue_struct 其结构体就是:</p> 
+   <pre><code class="language-cpp">truct cpu_workqueue_struct {
+ spinlock_t lock;/*因为工作者线程需要频繁的处理连接到其上的工作，所以需要枷锁保护*/
+ struct list_head worklist;
+ wait_queue_head_t more_work;
+ struct work_struct *current_work; /*当前的work*/
+ struct workqueue_struct *wq;   /*所属的workqueue*/
+ struct task_struct *thread; /*任务的上下文*/
+} ____cacheline_aligned;</code></pre> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 在该结构主要维护了一个任务队列，以及内核线程需要睡眠的等待队列，另外还维护了一个任务上下文，即task_struct。<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 三者之间的关系如下：</p> 
+   <p><img src="https://yqfile.alicdn.com/img_2270e5c930e70998f8771bd70fed4103.jpg" alt=""></p> 
+   <p>&nbsp;</p> 
+   <p><strong>3. 创建工作<br>3.1 创建工作queue<br>a. create_singlethread_workqueue(name)<br></strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 该函数的实现机制如下图所示，函数返回一个类型为struct workqueue_struct的指针变量，该指针变量所指向的内存地址在函数内部调用kzalloc动态生成。所以driver在不再使用该work queue的情况下调用:</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; void destroy_workqueue(struct workqueue_struct *wq)来释放此处的内存地址。</p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_bb3a408ae769d596a847643655f56aab.jpg" alt=""></p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 图中的cwq是一per-CPU类型的地址空间。对于create_singlethread_workqueue而言，即使是对于多CPU系统，内核也 只负责创建一个worker_thread内核进程。该内核进程被创建之后，会先定义一个图中的wait节点，然后在一循环体中检查cwq中的 worklist，如果该队列为空，那么就会把wait节点加入到cwq中的more_work中，然后休眠在该等待队列中。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Driver调用queue_work（struct workqueue_struct *wq, struct work_struct *work）向wq中加入工作节点。work会依次加在cwq-&gt;worklist所指向的链表中。queue_work向 cwq-&gt;worklist中加入一个work节点，同时会调用wake_up来唤醒休眠在cwq-&gt;more_work上的 worker_thread进程。wake_up会先调用wait节点上的autoremove_wake_function函数，然后将wait节点从 cwq-&gt;more_work中移走。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; worker_thread再次被调度，开始处理cwq-&gt;worklist中的所有work节点...当所有work节点处理完 毕，worker_thread重新将wait节点加入到cwq-&gt;more_work，然后再次休眠在该等待队列中直到Driver调用 queue_work...</p> 
+   <p><strong>b. create_workqueue</strong></p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_efd2bf33c1e64575e4e58dbab586dd14.jpg" alt=""></p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;相对于create_singlethread_workqueue, create_workqueue同样会分配一个wq的工作队列，但是不同之处在于，对于多CPU系统而言，对每一个CPU，都会为之创建一个per- CPU的cwq结构，对应每一个cwq，都会生成一个新的worker_thread进程。但是当用queue_work向cwq上提交work节点时， 是哪个CPU调用该函数，那么便向该CPU对应的cwq上的worklist上增加work节点。</p> 
+   <p><strong>c.小结<br></strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 当用户调用workqueue的初始化接口create_workqueue或者create_singlethread_workqueue对 workqueue队列进行初始化时，内核就开始为用户分配一个workqueue对象，并且将其链到一个全局的workqueue队列中。然后 Linux根据当前CPU的情况，为workqueue对象分配与CPU个数相同的cpu_workqueue_struct对象，每个 cpu_workqueue_struct对象都会存在一条任务队列。紧接着，Linux为每个cpu_workqueue_struct对象分配一个内 核thread，即内核daemon去处理每个队列中的任务。至此，用户调用初始化接口将workqueue初始化完毕，返回workqueue的指针。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; workqueue初始化完毕之后，将任务运行的上下文环境构建起来了，但是具体还没有可执行的任务，所以，需要定义具体的work_struct对象。然后将work_struct加入到任务队列中，Linux会唤醒daemon去处理任务。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 上述描述的workqueue内核实现原理可以描述如下：</p> 
+   <p>&nbsp;<img src="https://yqfile.alicdn.com/img_438136d154ab3bebb4856f0551ba0994.jpg" alt=""></p> 
+   <p>&nbsp;</p> 
+   <p><strong>3.2&nbsp; 创建工作<br></strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 要使用工作队列，首先要做的是创建一些需要推后完成的工作。可以通过DECLARE_WORK在编译时静态地建该结构：<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DECLARE_WORK(name,void (*func) (void *), void *data);<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 这样就会静态地创建一个名为name，待执行函数为func，参数为data的work_struct结构。<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 同样，也可以在运行时通过指针创建一个工作：<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;INIT_WORK(structwork_struct *work, woid(*func) (void *), void *data);</p> 
+   <p><strong>4. 调度<br>a. schedule_work</strong></p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 在大多数情况下, 并不需要自己建立工作队列，而是只定义工作, 将工作结构挂接到内核预定义的事件工作队列中调度, 在kernel/workqueue.c中定义了一个静态全局量的工作队列static struct workqueue_struct *keventd_wq;默认的工作者线程叫做events/n，这里n是处理器的编号，每个处理器对应一个线程。比如，单处理器的系统只有events /0这样一个线程。而双处理器的系统就会多一个events/1线程。<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 调度工作结构, 将工作结构添加到全局的事件工作队列keventd_wq，调用了queue_work通用模块。对外屏蔽了keventd_wq的接口，用户无需知道此 参数，相当于使用了默认参数。keventd_wq由内核自己维护，创建，销毁。这样work马上就会被调度，一旦其所在的处理器上的工作者线程被唤醒， 它就会被执行。</p> 
+   <p><strong>b. schedule_delayed_work(&amp;work,delay);<br></strong>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 有时候并不希望工作马上就被执行，而是希望它经过一段延迟以后再执行。在这种情况下，同时也可以利用timer来进行延时调度，到期后才由默认的定时器回调函数进行工作注册。延迟delay后，被定时器唤醒，将work添加到工作队列wq中。</p> 
+   <p>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;工作队列是没有优先级的，基本按照FIFO的方式进行处理。<br><br></p> 
+   <p><strong>5. work queue API</strong></p> 
+   <p>1. create_workqueue用于创建一个workqueue队列，为系统中的每个CPU都创建一个内核线程。输入参数：</p> 
+   <p>@name：workqueue的名称</p> 
+   <p>2. create_singlethread_workqueue用于创建workqueue，只创建一个内核线程。输入参数：</p> 
+   <p>@name：workqueue名称</p> 
+   <p>3.&nbsp;destroy_workqueue释放workqueue队列。输入参数：</p> 
+   <p>@ workqueue_struct：需要释放的workqueue队列指针</p> 
+   <p>4. schedule_work调度执行一个具体的任务，执行的任务将会被挂入Linux系统提供的workqueue——keventd_wq输入参数：</p> 
+   <p>@ work_struct：具体任务对象指针</p> 
+   <p>5.&nbsp;schedule_delayed_work延迟一定时间去执行一个具体的任务，功能与schedule_work类似，多了一个延迟时间，输入参数：</p> 
+   <p>@work_struct：具体任务对象指针</p> 
+   <p>@delay：延迟时间</p> 
+   <p>6. queue_work调度执行一个指定workqueue中的任务。输入参数：</p> 
+   <p>@ workqueue_struct：指定的workqueue指针</p> 
+   <p>@work_struct：具体任务对象指针</p> 
+   <p>7. queue_delayed_work延迟调度执行一个指定workqueue中的任务，功能与queue_work类似，输入参数多了一个delay。</p> 
+   <p>&nbsp;</p> 
+   <p><strong>6.</strong><strong>&nbsp;示例<br></strong><br><br></p> 
+   <div class="codeText">
+    <ol>
+     <li>//声明</li> 
+     <li> </li> 
+     <li>static struct workqueue_struct&nbsp;*mdp_pipe_ctrl_wq;&nbsp;/*&nbsp;mdp mdp pipe ctrl wq&nbsp;*/</li> 
+     <li> </li> 
+     <li>static struct delayed_work mdp_pipe_ctrl_worker;</li> 
+     <li> </li> 
+     <li> </li> 
+     <li>mdp_pipe_ctrl_wq&nbsp;=&nbsp;create_singlethread_workqueue("mdp_pipe_ctrl_wq");//创建工作队列</li> 
+     <li> </li> 
+     <li>INIT_DELAYED_WORK(&amp;mdp_pipe_ctrl_worker,mdp_pipe_ctrl_workqueue_handler);//delayed_work与task_func绑定。</li> 
+     <li> </li> 
+     <li>//处理函数</li> 
+     <li> </li> 
+     <li>static void mdp_pipe_ctrl_workqueue_handler(struct work_struct&nbsp;*work)</li> 
+     <li>{</li> 
+     <li>&nbsp;mdp_pipe_ctrl(MDP_MASTER_BLOCK,&nbsp;MDP_BLOCK_POWER_OFF,&nbsp;FALSE);</li> 
+     <li>}</li> 
+     <li> </li> 
+     <li>//开始调用工作队列，delay时间到了就执行处理函数。</li> 
+     <li> </li> 
+     <li>unsigned long mdp_timer_duration&nbsp;=&nbsp;(HZ/20);&nbsp;/*&nbsp;50 msecond&nbsp;*/</li> 
+     <li> </li> 
+     <li>/*&nbsp;send workqueue&nbsp;to&nbsp;turn off mdp power&nbsp;*/</li> 
+     <li> </li> 
+     <li>queue_delayed_work(mdp_pipe_ctrl_wq,&amp;mdp_pipe_ctrl_worker,&nbsp;mdp_timer_duration);</li> 
+     <li> </li> 
+     <li>&nbsp;</li> 
+     <li> </li> 
+     <li>/*&nbsp;cancel pipe ctrl worker&nbsp;*/</li> 
+     <li> </li> 
+     <li>cancel_delayed_work(&amp;mdp_pipe_ctrl_worker);</li> 
+     <li> </li> 
+     <li>/*&nbsp;for&nbsp;workder can't be cancelled...&nbsp;*/</li> 
+     <li> </li> 
+     <li>flush_workqueue(mdp_pipe_ctrl_wq);</li> 
+     <li> </li> 
+     <li>/*&nbsp;for&nbsp;workder can't be cancelled...&nbsp;*/</li> 
+     <li> </li> 
+     <li>flush_workqueue(mdp_pipe_ctrl_wq);</li> 
+    </ol>
+   </div> 
+   <p>&nbsp;</p> 
+   <p> 在driver 程序中许多很多情况需要设置延后执行的，这样工作队列就很好帮助我们实现。</p> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

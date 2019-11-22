@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>hibernate二级缓存(三) 自定义实现一个简单的hibernate二级缓存 « NotBeCN</title>
+  <meta name="description" content="                   hibernate二级缓存(三) 自定义实现一个简单的hibernate二级缓存   前面我们已经提及过hibernate内部为二级缓存的扩展做了很多的实现。我们只需要实现RegionFactoryTemplate和DomainDataStorageAccess即可自已实现h...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/qq447995687_90139940.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">hibernate二级缓存(三) 自定义实现一个简单的hibernate二级缓存</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post">  
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div id="content_views" class="markdown_views prism-atom-one-dark"> 
+  <!-- flowchart 箭头图标 勿删 --> 
+  <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+   <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+  </svg> 
+  <h1><a id="hibernate_hibernate_0"></a>hibernate二级缓存(三) 自定义实现一个简单的hibernate二级缓存</h1> 
+  <p>前面我们已经提及过hibernate内部为二级缓存的扩展做了很多的实现。我们只需要实现RegionFactoryTemplate和DomainDataStorageAccess即可自已实现hibernate缓存。在DomainDataStorageAccess实现中可以将缓存放置到redis或者memcache，来实现分布式的二级缓存。下面用hashmap实现了一个简单的二级缓存。</p> 
+  <h2><a id="1_RegionFactoryTemplate_2"></a>1. 实现RegionFactoryTemplate</h2> 
+  <p>RegionFactoryTemplate模版类为实现RegionFactory简化了很多操作。通常需要实现以下几个方法</p> 
+  <pre><code>//创建查询结果缓存，该缓存用于hibernate的查询缓存
+StorageAccess createQueryResultsRegionStorageAccess(String regionName, SessionFactoryImplementor sessionFactory)；
+//创建时间戳缓存
+StorageAccess createTimestampsRegionStorageAccess(String regionName, SessionFactoryImplementor sessionFactory)；
+//创建实体缓存
+DomainDataStorageAccess createDomainDataStorageAccess(DomainDataRegionConfig regionConfig, DomainDataRegionBuildingContext buildingContext)；
+//简单的理解为初始化之前需要做的一些准备工作
+void prepareForUse(SessionFactoryOptions settings, Map configValues)；
+//释放缓存
+void releaseFromUse() ；
+</code></pre> 
+  <p>从RegionFactoryTemplate的实现不难看出实际上是通过StorageAccess 来管理缓存的。简化了之前讲过的DomainDataRegion，EntityDataAccess等实现细节。<br> 实现类如下：</p> 
+  <pre><code>public class MyRegionFactoryImpl extends RegionFactoryTemplate {
+    private static final long serialVersionUID = -401479360060731148L;
+	//缓存管理器
+    private volatile CacheManager cacheManager;
+
+    @Override
+    protected StorageAccess createQueryResultsRegionStorageAccess(String regionName, SessionFactoryImplementor sessionFactory) {
+        return new MyDomainDataStorageAccess(getOrCreateCache(regionName));
+    }
+
+    private Cache getOrCreateCache(String regionName) {
+        Cache cache = cacheManager.getCache(regionName);
+        if (cache == null) {
+            return createCache(regionName);
+        }
+        return cache;
+    }
+
+    private Cache createCache(String regionName) {
+        cacheManager.addCache(regionName);
+        return cacheManager.getCache(regionName);
+    }
+
+    @Override
+    protected StorageAccess createTimestampsRegionStorageAccess(String regionName, SessionFactoryImplementor sessionFactory) {
+        return new MyDomainDataStorageAccess(getOrCreateCache(regionName));
+    }
+
+    /**
+     * 该方法必须覆盖RegionFactoryTemplate的方法，RegionFactoryTemplate默认实现是抛出异常
+     *
+     * @param regionConfig
+     * @param buildingContext
+     * @return
+     */
+    @Override
+    protected DomainDataStorageAccess createDomainDataStorageAccess(DomainDataRegionConfig regionConfig, DomainDataRegionBuildingContext buildingContext) {
+        return new MyDomainDataStorageAccess(getOrCreateCache(regionConfig.getRegionName()));
+    }
+
+    @Override
+    protected void prepareForUse(SessionFactoryOptions settings, Map configValues) {
+        this.cacheManager = new CacheManager();
+        //一个打印缓存内容的线程，用于观察缓存里面的内容
+        /*Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (true){
+                    System.out.println(cacheManager);
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        });
+        t.start();*/
+    }
+
+    @Override
+    protected void releaseFromUse() {
+        cacheManager = null;
+    }
+}
+</code></pre> 
+  <p>通过MyDomainDataStorageAccess内部包含一个cache对象，CacheManager来创建和管理cache对象。</p> 
+  <h2><a id="2_DomainDataStorageAccess_88"></a>2. 实现DomainDataStorageAccess</h2> 
+  <p>DomainDataStorageAccess内部通过Cache类来真正的访问缓存，这样不同的cache类就能访问不同的缓存。将缓存的访问和缓存的具体实现分离。<br> DomainDataStorageAccess的实现代码如下：</p> 
+  <pre><code>public class MyDomainDataStorageAccess implements DomainDataStorageAccess {
+    private Cache cache;
+
+    public MyDomainDataStorageAccess(Cache cache) {
+        this.cache = cache;
+    }
+
+    @Override
+    public Object getFromCache(Object key, SharedSessionContractImplementor session) {
+        return cache.get(key);
+    }
+
+    @Override
+    public void putIntoCache(Object key, Object value, SharedSessionContractImplementor session) {
+        cache.put(key, value);
+    }
+
+    @Override
+    public boolean contains(Object key) {
+        return cache.contains(key);
+    }
+
+    @Override
+    public void evictData() {
+        cache.clear();
+    }
+
+    @Override
+    public void evictData(Object key) {
+        cache.remove(key);
+    }
+
+    @Override
+    public void release() {
+        cache = null;
+    }
+}
+
+</code></pre> 
+  <p>代码非常简单，对于缓存的操作都通过cache来实现。</p> 
+  <h2><a id="3_CacheManager__133"></a>3. CacheManager 的实现</h2> 
+  <p>CacheManager 用来管理cache，实则是cache的一个ConcurrentHashMap，具体的实现代码如下：</p> 
+  <pre><code>public class CacheManager {
+    private final Map&lt;String, Cache&gt; caches = new ConcurrentHashMap&lt;&gt;();
+
+    public Cache getCache(String cacheName) {
+        return caches.get(cacheName);
+    }
+
+    public void addCache(String cacheName, Cache cache) {
+        caches.put(cacheName, cache);
+    }
+
+    public void addCache(String cacheName) {
+        caches.put(cacheName, new Cache());
+    }
+
+    @Override
+    public String toString() {
+        return "CacheManager{" +
+                "caches=" + caches +
+                '}';
+    }
+}
+
+</code></pre> 
+  <h2><a id="4_Cache_161"></a>4. Cache实现</h2> 
+  <p>cache的代码和CacheManager 的代码有些类似，也是用ConcurrentHashMap来实现的</p> 
+  <pre><code>public class Cache {
+
+    private final Map&lt;Object, Object&gt; cache = new ConcurrentHashMap&lt;&gt;();
+
+    public Object get(Object key) {
+        return cache.get(key);
+    }
+
+    public boolean contains(Object key) {
+        return cache.containsKey(key);
+    }
+
+    public void clear() {
+        cache.clear();
+    }
+
+    public void remove(Object key) {
+        cache.remove(key);
+    }
+
+    public void put(Object key, Object value) {
+        cache.put(key, value);
+    }
+
+    @Override
+    public String toString() {
+        return "Cache{" +
+                "cache=" + cache +
+                '}';
+    }
+}
+
+</code></pre> 
+  <p>看到这里的朋友可能会有点晕了CacheManager 和 Cache 的代码十分相似啊，那么他们有什么实质的区别吗。了解redis的朋友们可以简单的理解为CacheManager 是redis里面的hash类型，Cache 就是hash类型的实际键值对对象。hibernate二级缓存的也是如此，CacheManager 管理不同的实体缓存(比如TeacherPo,StudentPo)，CacheManager 里面存放的是不同实体的缓存对象，key可理解为实体的class类名。Cache 就是相同类型的不同对象，比如TeacherPo有id为1，2，3等不同的对象，Cache 里面的key可以理解为对象的主键id，值为真正的实体对象。如果将CacheManager 理解为数据库中的实体PO的表的map集合，那么Cache 就是某张表里面的每一行的map集合。</p> 
+  <h2><a id="5__200"></a>5. 配置及测试</h2> 
+  <p><strong>实体缓存测试：</strong><br> 配置很简单，在配置文件中加上如下参数：</p> 
+  <pre><code> &lt;!--是否启用二级缓存--&gt;
+        &lt;property name="hibernate.cache.use_second_level_cache"&gt;true&lt;/property&gt;
+        &lt;!--缓存的具体实现--&gt;
+        &lt;property name="hibernate.cache.region.factory_class"&gt;com.foo.cache.MyRegionFactoryImpl&lt;/property&gt;
+</code></pre> 
+  <p>hibernate.cache.region.factory_class指定regionFactory的具体实现类。<br> 下面是测试的代码：</p> 
+  <pre><code> public static void main(String[] args) {
+        SessionFactoryUtil sessionFactoryUtil = new SessionFactoryUtil();
+        SessionFactory sessionFactory = sessionFactoryUtil.getSessionFactory();
+
+        //1.查询单个实体
+        doExecute(sessionFactory, new HibernateExecuteCallBack() {
+            @Override
+            public void execute(Session session) {
+                Event event = session.get(Event.class, 7L);
+                System.out.println(event);
+            }
+        });
+        //2.查询单个实体
+        doExecute(sessionFactory, new HibernateExecuteCallBack() {
+            @Override
+            public void execute(Session session) {
+                Event event = session.get(Event.class, 7L);
+                System.out.println(event);
+            }
+        });
+  ｝
+public static void doExecute(SessionFactory sessionFactory, HibernateExecuteCallBack executeCallBack) {
+        Session session = sessionFactory.openSession();
+        session.beginTransaction();
+
+        executeCallBack.execute(session);
+
+        session.getTransaction().commit();
+        session.close();
+    }
+
+    interface HibernateExecuteCallBack {
+        void execute(Session session);
+    }
+</code></pre> 
+  <p>在配置中我们开启了二级缓存，同时连续两次加载同一个实体，在每次加载后释放session，避免session级缓存。日志输出如下：</p> 
+  <pre><code>Hibernate: select event0_.id as id1_0_0_, event0_._date as _date2_0_0_, event0_.title as title3_0_0_ from event event0_ where event0_.id=?
+Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+</code></pre> 
+  <p>可以看到对应的sql语句只打印了一次，同时如果debug，会发现第二次查询时直接通过缓存查询出来的。</p> 
+  <p>上面我们用到的是实体缓存。下面测试一下查询缓存。<br> <strong>查询缓存配置：</strong><br> 配置文件添加如下配置</p> 
+  <pre><code>&lt;!--是否使用查询缓存--&gt;
+        &lt;property name="hibernate.cache.use_query_cache"&gt;true&lt;/property&gt;
+</code></pre> 
+  <p>同时在查询的时候手动设置query.setCacheable(true);如果不设置查询缓存不生效。<br> <strong>Iterator缓存测试</strong></p> 
+  <pre><code>//3.Iterate查询集合
+ public static void main(String[] args) {
+        SessionFactoryUtil sessionFactoryUtil = new SessionFactoryUtil();
+        SessionFactory sessionFactory = sessionFactoryUtil.getSessionFactory();
+        
+        doExecute(sessionFactory, new HibernateExecuteCallBack() {
+            @Override
+            public void execute(Session session) {
+                testIterateQuery(session,"from Event where id&gt;=7");
+            }
+        });
+        System.out.println("=====================================");
+        doExecute(sessionFactory, new HibernateExecuteCallBack() {
+            @Override
+            public void execute(Session session) {
+                testIterateQuery(session,"from Event where id&gt;=7");
+            }
+        });
+}
+ private static void testIterateQuery(Session session, String testHql) {
+        Query query = session.createQuery(testHql);
+        query.setCacheable(true);
+        @SuppressWarnings("unchecked")
+        Iterator&lt;Event&gt; list = (Iterator&lt;Event&gt;) query.iterate();
+        while (list.hasNext()) {
+            System.out.println("iterate语句测试query cache:" + list.next());
+        }
+    }
+</code></pre> 
+  <p>在上面我们使用Iterator来进行查询，同时设置 query.setCacheable(true)表明使用查询缓存（hibernate）。通过更改query.setCacheable(true)发现无论是否设置启用查询缓存，都会产生如下相同的日志：</p> 
+  <pre><code>Hibernate: select event0_.id as col_0_0_ from event event0_ where event0_.id&gt;=7
+Hibernate: select event0_.id as id1_0_0_, event0_._date as _date2_0_0_, event0_.title as title3_0_0_ from event event0_ where event0_.id=?
+iterate语句测试query cache:Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+Hibernate: select event0_.id as id1_0_0_, event0_._date as _date2_0_0_, event0_.title as title3_0_0_ from event event0_ where event0_.id=?
+iterate语句测试query cache:Event{id=8, title='A follow up event', date=2019-03-11 13:45:21.0}
+=====================================
+Hibernate: select event0_.id as col_0_0_ from event event0_ where event0_.id&gt;=7
+iterate语句测试query cache:Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+iterate语句测试query cache:Event{id=8, title='A follow up event', date=2019-03-11 13:45:21.0}
+CacheManager{caches={default-query-results-region=Cache{cache={}}, default-update-timestamps-region=Cache{cache={}}, com.foo.model.Event=Cache{cache={com.foo.model.Event#8=CacheEntry(com.foo.model.Event), com.foo.model.Event#7=CacheEntry(com.foo.model.Event)}}}}
+CacheManager{caches={default-query-results-region=Cache{cache={}}, default-update-timestamps-region=Cache{cache={}}, com.foo.model.Event=Cache{cache={com.foo.model.Event#8=CacheEntry(com.foo.model.Event), com.foo.model.Event#7=CacheEntry(com.foo.model.Event)}}}}
+
+</code></pre> 
+  <p>分析上面的日志我们不难发现，在第一次查询的时候除了发送查询的sql语句，还另外发送了2条查询实体的sql语句，并且通过打印当前缓存内容发现，缓存里面确实只有实体缓存而没有查询缓存。<br> 所以Iterate查询有如下特征：</p> 
+  <ul> 
+   <li>1、Iterate是通过查询出实体的id，再通过id去查询实体，如果查询结果有n条数据，那么总共会发送n+1条sql</li> 
+   <li>2、Iterate会用到实体缓存（二级缓存)，（通过上面第二次查询结果表明只发送了一条查询id的语句，实体查询是直接从二级缓存获取）</li> 
+   <li>3、Iterate不会使用查询缓存，（上面两次查询，发送了相同的sql语句，且缓存里面default-query-results-region查询缓存为空）</li> 
+   <li>4、Iterate也会使用到session缓存，（此条结果可自行证明，证明方法：关闭二级缓存，然后在一个doExecute里面执行两条sql，和分别在两个doExecute执行一条sql可以得出）</li> 
+  </ul> 
+  <p><strong>list缓存测试</strong></p> 
+  <pre><code>//4.List查询集合
+        doExecute(sessionFactory, new HibernateExecuteCallBack() {
+            @Override
+            public void execute(Session session) {
+                testListQuery(session, "from Event where id&gt;=7");
+            }
+        });
+        System.out.println("=====================================");
+        doExecute(sessionFactory, new HibernateExecuteCallBack() {
+            @Override
+            public void execute(Session session) {
+                testListQuery(session, "from Event where id&gt;=7");
+            }
+        });
+
+private static void testListQuery(Session session, String testHql) {
+        Query query = session.createQuery(testHql);
+        //必须开启查询缓存并且，手动设置缓存为true，查询缓存才生效
+        query.setCacheable(true);
+        @SuppressWarnings("unchecked")
+        List&lt;Event&gt; list = query.list();
+        for (Event event : list) {
+            System.out.println("list语句测试query cache:" + event);
+        }
+    }
+</code></pre> 
+  <p>同时开启查询缓存和二级缓存的测试结果如下：</p> 
+  <pre><code>Hibernate: select event0_.id as id1_0_, event0_._date as _date2_0_, event0_.title as title3_0_ from event event0_ where event0_.id&gt;=7
+list语句测试query cache:Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+list语句测试query cache:Event{id=8, title='A follow up event', date=2019-03-11 13:45:21.0}
+=====================================
+list语句测试query cache:Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+list语句测试query cache:Event{id=8, title='A follow up event', date=2019-03-11 13:45:21.0}
+CacheManager{caches={default-query-results-region=Cache{cache={sql: select event0_.id as id1_0_, event0_._date as _date2_0_, event0_.title as title3_0_ from event event0_ where event0_.id&gt;=7; parameters: ; named parameters: {}; transformer: org.hibernate.transform.CacheableResultTransformer@110f2=org.hibernate.cache.internal.QueryResultsCacheImpl$CacheItem@64a87f32}}, default-update-timestamps-region=Cache{cache={}}, com.foo.model.Event=Cache{cache={com.foo.model.Event#8=CacheEntry(com.foo.model.Event), com.foo.model.Event#7=CacheEntry(com.foo.model.Event)}}}}
+CacheManager{caches={default-query-results-region=Cache{cache={sql: select event0_.id as id1_0_, event0_._date as _date2_0_, event0_.title as title3_0_ from event event0_ where event0_.id&gt;=7; parameters: ; named parameters: {}; transformer: org.hibernate.transform.CacheableResultTransformer@110f2=org.hibernate.cache.internal.QueryResultsCacheImpl$CacheItem@64a87f32}}, default-update-timestamps-region=Cache{cache={}}, com.foo.model.Event=Cache{cache={com.foo.model.Event#8=CacheEntry(com.foo.model.Event), com.foo.model.Event#7=CacheEntry(com.foo.model.Event)}}}}
+
+</code></pre> 
+  <p>关闭查询缓存的测试结果如下（要关闭查询缓存只需设置query.setCacheable(false)即可）：</p> 
+  <pre><code>Hibernate: select event0_.id as id1_0_, event0_._date as _date2_0_, event0_.title as title3_0_ from event event0_ where event0_.id&gt;=7
+list语句测试query cache:Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+list语句测试query cache:Event{id=8, title='A follow up event', date=2019-03-11 13:45:21.0}
+=====================================
+Hibernate: select event0_.id as id1_0_, event0_._date as _date2_0_, event0_.title as title3_0_ from event event0_ where event0_.id&gt;=7
+list语句测试query cache:Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+list语句测试query cache:Event{id=8, title='A follow up event', date=2019-03-11 13:45:21.0}
+CacheManager{caches={default-query-results-region=Cache{cache={}}, default-update-timestamps-region=Cache{cache={}}, com.foo.model.Event=Cache{cache={com.foo.model.Event#8=CacheEntry(com.foo.model.Event), com.foo.model.Event#7=CacheEntry(com.foo.model.Event)}}}}
+CacheManager{caches={default-query-results-region=Cache{cache={}}, default-update-timestamps-region=Cache{cache={}}, com.foo.model.Event=Cache{cache={com.foo.model.Event#8=CacheEntry(com.foo.model.Event), com.foo.model.Event#7=CacheEntry(com.foo.model.Event)}}}}
+
+</code></pre> 
+  <p>开启查询缓存，关闭二级缓存测试结果如下：</p> 
+  <pre><code>Hibernate: select event0_.id as id1_0_, event0_._date as _date2_0_, event0_.title as title3_0_ from event event0_ where event0_.id&gt;=7
+list语句测试query cache:Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+list语句测试query cache:Event{id=8, title='A follow up event', date=2019-03-11 13:45:21.0}
+=====================================
+Hibernate: select event0_.id as id1_0_0_, event0_._date as _date2_0_0_, event0_.title as title3_0_0_ from event event0_ where event0_.id=?
+Hibernate: select event0_.id as id1_0_0_, event0_._date as _date2_0_0_, event0_.title as title3_0_0_ from event event0_ where event0_.id=?
+list语句测试query cache:Event{id=7, title='Our very first event!', date=2019-03-11 13:45:21.0}
+list语句测试query cache:Event{id=8, title='A follow up event', date=2019-03-11 13:45:21.0}
+CacheManager{caches={default-query-results-region=Cache{cache={sql: select event0_.id as id1_0_, event0_._date as _date2_0_, event0_.title as title3_0_ from event event0_ where event0_.id&gt;=7; parameters: ; named parameters: {}; transformer: org.hibernate.transform.CacheableResultTransformer@110f2=org.hibernate.cache.internal.QueryResultsCacheImpl$CacheItem@2ff501c3}}, default-update-timestamps-region=Cache{cache={}}, com.foo.model.Event=Cache{cache={}}}}
+CacheManager{caches={default-query-results-region=Cache{cache={sql: select event0_.id as id1_0_, event0_._date as _date2_0_, event0_.title as title3_0_ from event event0_ where event0_.id&gt;=7; parameters: ; named parameters: {}; transformer: org.hibernate.transform.CacheableResultTransformer@110f2=org.hibernate.cache.internal.QueryResultsCacheImpl$CacheItem@2ff501c3}}, default-update-timestamps-region=Cache{cache={}}, com.foo.model.Event=Cache{cache={}}}}
+
+</code></pre> 
+  <p>从上面的测试结果发现，在开启查询缓存后：第一次查询的时候只发送了一条sql，第二次查询没有发送任何的sql语句，并且CacheManager缓存了查询的sql语句，和相关的实体对象；在关闭查询缓存后，发送了2次sql，并且CacheManager里面没有缓存查询的sql语句。在开启查询缓存，关闭二级缓存后：查询sql只发送了一条，但是在第二次查询的时候单独发送了2条查询实体的sql语句。<br> 综上可以得出list查询有如下特征：</p> 
+  <ul> 
+   <li>1、list是通过一条sql查询出整个结果集，(Iterate是先查询id，再通过id查实体)</li> 
+   <li>2、list能使用查询缓存和二级缓存</li> 
+   <li>3、list也能使用到session缓存（证明同Iterate）</li> 
+   <li>4、查询缓存生效必须在二级缓存开启的情况下才能发挥作用（查询缓存依赖于二级缓存，证明方法：开启查询缓存，关闭二级缓存），否则hibernate只会缓存查询结果(或者说只缓存了实体的id)，而具体的实体还需要通过sql语句单独查询</li> 
+  </ul> 
+  <h1><a id="6__404"></a>6. 总结</h1> 
+  <p>通过上面的一系列讲解我们大致了解了要自己实现一个hibernate插件有哪些步骤，同时分析了查询缓存与二级缓存，Iterate和list的区别，大家有兴趣的话可以通过redis实现DomainDataStorageAccess ，使用redis作为hibernate的二级缓存。<br> 以上完整的代码在：<a href="https://github.com/Json-Lin/hibernate-cache-test" rel="nofollow">https://github.com/Json-Lin/hibernate-cache-test</a></p> 
+ </div> 
+ <link href="https://csdnimg.cn/release/phoenix/mdeditor/markdown_views-258a4616f7.css" rel="stylesheet"> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

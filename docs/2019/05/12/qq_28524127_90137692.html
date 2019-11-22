@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>分布式ID方案 « NotBeCN</title>
+  <meta name="description" content="         使用twitter的snowflake(雪花)算法，特点，生成不重复的有序的数字      util:   package util;   import java.lang.management.ManagementFactory; import java.net.InetAddress; im...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2019/05/12/qq_28524127_90137692.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">分布式ID方案</h1>
+    <p class="post-meta">May 12, 2019</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <p>使用twitter的snowflake(雪花)算法，特点，生成不重复的有序的数字</p> 
+  <p><img alt="" class="has" height="172" src="https://uzshare.com/_p?https://img-blog.csdnimg.cn/20190512102213194.png" width="557"></p> 
+  <p>util:</p> 
+  <p>package util;</p> 
+  <p>import java.lang.management.ManagementFactory;<br> import java.net.InetAddress;<br> import java.net.NetworkInterface;</p> 
+  <p>/**<br> &nbsp;* &lt;p&gt;名称：IdWorker.java&lt;/p&gt;<br> &nbsp;* &lt;p&gt;描述：分布式自增长ID&lt;/p&gt;<br> &nbsp;* &lt;pre&gt;<br> &nbsp;* &nbsp; &nbsp; Twitter的 Snowflake　JAVA实现方案<br> &nbsp;* &lt;/pre&gt;<br> &nbsp;* 核心代码为其IdWorker这个类实现，其原理结构如下，我分别用一个0表示一位，用—分割开部分的作用：<br> &nbsp;* 1||0---0000000000 0000000000 0000000000 0000000000 0 --- 00000 ---00000 ---000000000000<br> &nbsp;* 在上面的字符串中，第一位为未使用（实际上也可作为long的符号位），接下来的41位为毫秒级时间，<br> &nbsp;* 然后5位datacenter标识位，5位机器ID（并不算标识符，实际是为线程标识），<br> &nbsp;* 然后12位该毫秒内的当前毫秒内的计数，加起来刚好64位，为一个Long型。<br> &nbsp;* 这样的好处是，整体上按照时间自增排序，并且整个分布式系统内不会产生ID碰撞（由datacenter和机器ID作区分），<br> &nbsp;* 并且效率较高，经测试，snowflake每秒能够产生26万ID左右，完全满足需要。<br> &nbsp;* &lt;p&gt;<br> &nbsp;* 64位ID (42(毫秒)+5(机器ID)+5(业务编码)+12(重复累加))<br> &nbsp;*<br> &nbsp;* @author Polim<br> &nbsp;*/<br> public class IdWorker {<br> &nbsp; &nbsp; // 时间起始标记点，作为基准，一般取系统的最近时间（一旦确定不能变动）<br> &nbsp; &nbsp; private final static long twepoch = 1288834974657L;<br> &nbsp; &nbsp; // 机器标识位数<br> &nbsp; &nbsp; private final static long workerIdBits = 5L;<br> &nbsp; &nbsp; // 数据中心标识位数<br> &nbsp; &nbsp; private final static long datacenterIdBits = 5L;<br> &nbsp; &nbsp; // 机器ID最大值<br> &nbsp; &nbsp; private final static long maxWorkerId = -1L ^ (-1L &lt;&lt; workerIdBits);<br> &nbsp; &nbsp; // 数据中心ID最大值<br> &nbsp; &nbsp; private final static long maxDatacenterId = -1L ^ (-1L &lt;&lt; datacenterIdBits);<br> &nbsp; &nbsp; // 毫秒内自增位<br> &nbsp; &nbsp; private final static long sequenceBits = 12L;<br> &nbsp; &nbsp; // 机器ID偏左移12位<br> &nbsp; &nbsp; private final static long workerIdShift = sequenceBits;<br> &nbsp; &nbsp; // 数据中心ID左移17位<br> &nbsp; &nbsp; private final static long datacenterIdShift = sequenceBits + workerIdBits;<br> &nbsp; &nbsp; // 时间毫秒左移22位<br> &nbsp; &nbsp; private final static long timestampLeftShift = sequenceBits + workerIdBits + datacenterIdBits;</p> 
+  <p>&nbsp; &nbsp; private final static long sequenceMask = -1L ^ (-1L &lt;&lt; sequenceBits);<br> &nbsp; &nbsp; /* 上次生产id时间戳 */<br> &nbsp; &nbsp; private static long lastTimestamp = -1L;<br> &nbsp; &nbsp; // 0，并发控制<br> &nbsp; &nbsp; private long sequence = 0L;</p> 
+  <p>&nbsp; &nbsp; private final long workerId;<br> &nbsp; &nbsp; // 数据标识id部分<br> &nbsp; &nbsp; private final long datacenterId;</p> 
+  <p>&nbsp; &nbsp; public IdWorker(){<br> &nbsp; &nbsp; &nbsp; &nbsp; this.datacenterId = getDatacenterId(maxDatacenterId);<br> &nbsp; &nbsp; &nbsp; &nbsp; this.workerId = getMaxWorkerId(datacenterId, maxWorkerId);<br> &nbsp; &nbsp; }<br> &nbsp; &nbsp; /**<br> &nbsp; &nbsp; &nbsp;* @param workerId<br> &nbsp; &nbsp; &nbsp;* &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;工作机器ID<br> &nbsp; &nbsp; &nbsp;* @param datacenterId<br> &nbsp; &nbsp; &nbsp;* &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;序列号<br> &nbsp; &nbsp; &nbsp;*/<br> &nbsp; &nbsp; public IdWorker(long workerId, long datacenterId) {<br> &nbsp; &nbsp; &nbsp; &nbsp; if (workerId &gt; maxWorkerId || workerId &lt; 0) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; throw new IllegalArgumentException(String.format("worker Id can't be greater than %d or less than 0", maxWorkerId));<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; if (datacenterId &gt; maxDatacenterId || datacenterId &lt; 0) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; throw new IllegalArgumentException(String.format("datacenter Id can't be greater than %d or less than 0", maxDatacenterId));<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; this.workerId = workerId;<br> &nbsp; &nbsp; &nbsp; &nbsp; this.datacenterId = datacenterId;<br> &nbsp; &nbsp; }<br> &nbsp; &nbsp; /**<br> &nbsp; &nbsp; &nbsp;* 获取下一个ID<br> &nbsp; &nbsp; &nbsp;*<br> &nbsp; &nbsp; &nbsp;* @return<br> &nbsp; &nbsp; &nbsp;*/<br> &nbsp; &nbsp; public synchronized long nextId() {<br> &nbsp; &nbsp; &nbsp; &nbsp; long timestamp = timeGen();<br> &nbsp; &nbsp; &nbsp; &nbsp; if (timestamp &lt; lastTimestamp) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; throw new RuntimeException(String.format("Clock moved backwards. &nbsp;Refusing to generate id for %d milliseconds", lastTimestamp - timestamp));<br> &nbsp; &nbsp; &nbsp; &nbsp; }</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; if (lastTimestamp == timestamp) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; // 当前毫秒内，则+1<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; sequence = (sequence + 1) &amp; sequenceMask;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (sequence == 0) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; // 当前毫秒内计数满了，则等待下一秒<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; timestamp = tilNextMillis(lastTimestamp);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; } else {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; sequence = 0L;<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; lastTimestamp = timestamp;<br> &nbsp; &nbsp; &nbsp; &nbsp; // ID偏移组合生成最终的ID，并返回ID<br> &nbsp; &nbsp; &nbsp; &nbsp; long nextId = ((timestamp - twepoch) &lt;&lt; timestampLeftShift)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; | (datacenterId &lt;&lt; datacenterIdShift)<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; | (workerId &lt;&lt; workerIdShift) | sequence;</p> 
+  <p>&nbsp; &nbsp; &nbsp; &nbsp; return nextId;<br> &nbsp; &nbsp; }</p> 
+  <p>&nbsp; &nbsp; private long tilNextMillis(final long lastTimestamp) {<br> &nbsp; &nbsp; &nbsp; &nbsp; long timestamp = this.timeGen();<br> &nbsp; &nbsp; &nbsp; &nbsp; while (timestamp &lt;= lastTimestamp) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; timestamp = this.timeGen();<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; return timestamp;<br> &nbsp; &nbsp; }</p> 
+  <p>&nbsp; &nbsp; private long timeGen() {<br> &nbsp; &nbsp; &nbsp; &nbsp; return System.currentTimeMillis();<br> &nbsp; &nbsp; }</p> 
+  <p>&nbsp; &nbsp; /**<br> &nbsp; &nbsp; &nbsp;* &lt;p&gt;<br> &nbsp; &nbsp; &nbsp;* 获取 maxWorkerId<br> &nbsp; &nbsp; &nbsp;* &lt;/p&gt;<br> &nbsp; &nbsp; &nbsp;*/<br> &nbsp; &nbsp; protected static long getMaxWorkerId(long datacenterId, long maxWorkerId) {<br> &nbsp; &nbsp; &nbsp; &nbsp; StringBuffer mpid = new StringBuffer();<br> &nbsp; &nbsp; &nbsp; &nbsp; mpid.append(datacenterId);<br> &nbsp; &nbsp; &nbsp; &nbsp; String name = ManagementFactory.getRuntimeMXBean().getName();<br> &nbsp; &nbsp; &nbsp; &nbsp; if (!name.isEmpty()) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;/*<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; * GET jvmPid<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; */<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; mpid.append(name.split("@")[0]);<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; /*<br> &nbsp; &nbsp; &nbsp; &nbsp;* MAC + PID 的 hashcode 获取16个低位<br> &nbsp; &nbsp; &nbsp; &nbsp;*/<br> &nbsp; &nbsp; &nbsp; &nbsp; return (mpid.toString().hashCode() &amp; 0xffff) % (maxWorkerId + 1);<br> &nbsp; &nbsp; }</p> 
+  <p>&nbsp; &nbsp; /**<br> &nbsp; &nbsp; &nbsp;* &lt;p&gt;<br> &nbsp; &nbsp; &nbsp;* 数据标识id部分<br> &nbsp; &nbsp; &nbsp;* &lt;/p&gt;<br> &nbsp; &nbsp; &nbsp;*/<br> &nbsp; &nbsp; protected static long getDatacenterId(long maxDatacenterId) {<br> &nbsp; &nbsp; &nbsp; &nbsp; long id = 0L;<br> &nbsp; &nbsp; &nbsp; &nbsp; try {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; InetAddress ip = InetAddress.getLocalHost();<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; NetworkInterface network = NetworkInterface.getByInetAddress(ip);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; if (network == null) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; id = 1L;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } else {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; byte[] mac = network.getHardwareAddress();<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; id = ((0x000000FF &amp; (long) mac[mac.length - 1])<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; | (0x0000FF00 &amp; (((long) mac[mac.length - 2]) &lt;&lt; 8))) &gt;&gt; 6;<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; id = id % (maxDatacenterId + 1);<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; } catch (Exception e) {<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; System.out.println(" getDatacenterId: " + e.getMessage());<br> &nbsp; &nbsp; &nbsp; &nbsp; }<br> &nbsp; &nbsp; &nbsp; &nbsp; return id;<br> &nbsp; &nbsp; }</p> 
+  <p>&nbsp; &nbsp;&nbsp;<br> &nbsp; &nbsp; public static void main(String[] args) {<br> &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;<br> &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;IdWorker idWorker=new IdWorker(0,0);<br> &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;<br> &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;for(int i=0;i&lt;100;i++){<br> &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;long nextId = idWorker.nextId();<br> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;System.out.println(nextId);<br> &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;}<br> &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;<br> &nbsp; &nbsp; &nbsp;&nbsp; &nbsp;<br> &nbsp;&nbsp; &nbsp;}</p> 
+  <p>}</p> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>

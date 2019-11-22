@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Linux内核中的队列 kfifo【转】 « NotBeCN</title>
+  <meta name="description" content="             转自：http://airekans.github.io/c/2015/10/12/linux-kernel-data-structure-kfifo#api         在内核中经常会有需要用到队列来传递数据的时候，而在Linux内核中就有一个轻量而且实现非常巧妙的队列实现——kf...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="https://notbe.cn/2018/01/12/weixin_34008784_90122502.html">
+  <link rel="alternate" type="application/rss+xml" title="NotBeCN" href="https://notbe.cn/feed.xml" />
+</head>
+
+
+  <body>
+
+    <div class="header-placeholder"></div>
+<header class="header">
+  <div class="wrapper">
+    <div id="sidebar-toggle">TOC</div>
+    <a class="site-title" href="/">NotBeCN</a>
+    <nav class="site-nav">
+      
+        
+        <a class="page-link" href="/about/" target="_blank">关于</a>
+      
+        
+        <a class="page-link" href="https://uzshare.com" target="_blank">社区</a>
+      
+        
+        <a class="page-link" href="/donate/" target="_blank">Donate</a>
+      
+        
+        <a class="page-link" href="/games/shejiyazi/" target="_blank">射个鸭子</a>
+      
+    </nav>
+  </div>
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="col-main">
+          <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Linux内核中的队列 kfifo【转】</h1>
+    <p class="post-meta">Jan 12, 2018</p>
+  </header>
+
+  <article class="post-content">
+    <div id="article_content" class="article_content clearfix csdn-tracking-statistics" data-pid="blog" data-mod="popu_307" data-dsm="post"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <link rel="stylesheet" href="https://csdnimg.cn/release/phoenix/template/css/ck_htmledit_views-f57960eb32.css"> 
+ <div class="htmledit_views" id="content_views"> 
+  <div class="content-detail markdown-body"> 
+   <p>转自：<a href="http://airekans.github.io/c/2015/10/12/linux-kernel-data-structure-kfifo#api" rel="nofollow">http://airekans.github.io/c/2015/10/12/linux-kernel-data-structure-kfifo#api</a></p> 
+   <div> 
+    <p>在内核中经常会有需要用到队列来传递数据的时候，而在Linux内核中就有一个轻量而且实现非常巧妙的队列实现——kfifo。 简单来说kfifo是一个有限定大小的环形buffer，借用网络上的一个图片来说明一下是最清楚的：</p> 
+    <p><img src="http://blog.chinaunix.net/attachment/201404/10/18770639_1397093507W9w9.bmp" alt="kfifo-diagram"></p> 
+    <p><code class="highlighter-rouge">kfifo</code>本身并没有队列元素的概念，其内部只是一个buffer。在使用的时候需要用户知道其内部存储的内容，所以最好是用来存储定长对象。</p> 
+    <p><code class="highlighter-rouge">kfifo</code>有一个重要的特性，就是当使用场景是单生产者单消费者(1 Producer 1 Consumer，以下简称1P1C)的情况下，不需要加锁，所以在这种情况下的性能较高。</p> 
+    <p>本文中的所有代码均来自linux kernel 2.6.32，所以License也是GPLv2的。</p> 
+    <h1>定义及API</h1> 
+    <p>kfifo主要定义在<code class="highlighter-rouge">include/linux/kfifo.h</code>里面：</p> 
+    <div class="language-c highlighter-rouge"> 
+     <pre class="highlight"><code><span class="k">struct <span class="n">kfifo <span class="p">{ <span class="kt">unsigned <span class="kt">char <span class="o">*<span class="n">buffer<span class="p">; <span class="cm">/* the buffer holding the data */ <span class="kt">unsigned <span class="kt">int <span class="n">size<span class="p">; <span class="cm">/* the size of the allocated buffer */ <span class="kt">unsigned <span class="kt">int <span class="n">in<span class="p">; <span class="cm">/* data is added at offset (in % size) */ <span class="kt">unsigned <span class="kt">int <span class="n">out<span class="p">; <span class="cm">/* data is extracted from off. (out % size) */ <span class="n">spinlock_t <span class="o">*<span class="n">lock<span class="p">; <span class="cm">/* protects concurrent modifications */ <span class="p">}; <span class="k">extern <span class="k">struct <span class="n">kfifo <span class="o">*<span class="n">kfifo_init<span class="p">( <span class="kt">unsigned <span class="kt">char <span class="o">*<span class="n">buffer<span class="p">, <span class="kt">unsigned <span class="kt">int <span class="n">size<span class="p">, <span class="n">gfp_t <span class="n">gfp_mask<span class="p">, <span class="n">spinlock_t <span class="o">*<span class="n">lock<span class="p">); <span class="k">extern <span class="k">struct <span class="n">kfifo <span class="o">*<span class="n">kfifo_alloc<span class="p">( <span class="kt">unsigned <span class="kt">int <span class="n">size<span class="p">, <span class="n">gfp_t <span class="n">gfp_mask<span class="p">, <span class="n">spinlock_t <span class="o">*<span class="n">lock<span class="p">); <span class="k">extern <span class="kt">void <span class="n">kfifo_free<span class="p">(<span class="k">struct <span class="n">kfifo <span class="o">*<span class="n">fifo<span class="p">); <span class="k">extern <span class="kt">unsigned <span class="kt">int <span class="n">__kfifo_put<span class="p">(<span class="k">struct <span class="n">kfifo <span class="o">*<span class="n">fifo<span class="p">, <span class="k">const <span class="kt">unsigned <span class="kt">char <span class="o">*<span class="n">buffer<span class="p">, <span class="kt">unsigned <span class="kt">int <span class="n">len<span class="p">); <span class="k">extern <span class="kt">unsigned <span class="kt">int <span class="n">__kfifo_get<span class="p">(<span class="k">struct <span class="n">kfifo <span class="o">*<span class="n">fifo<span class="p">, <span class="kt">unsigned <span class="kt">char <span class="o">*<span class="n">buffer<span class="p">, <span class="kt">unsigned <span class="kt">int <span class="n">len<span class="p">); </span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre> 
+    </div> 
+    <p>可以看到在kfifo本身的定义里面，有一个<code class="highlighter-rouge">spinlock_t</code>，这是用来在多线程同时修改队列的时候加锁的。而其余的成员就很明显了，是用来表示队列的当前状态的。队列本身的内容存储在<code class="highlighter-rouge">buffer</code>里面。</p> 
+    <p>需要注意的是，kfifo要求队列的size是2的幂(2^n)，这样在后面操作的时候求余操作可以通过与运算来完成，从而更高效。</p> 
+    <p>初始化通过<code class="highlighter-rouge">kfifo_init</code>和<code class="highlighter-rouge">kfifo_alloc</code>完成。而对于队列操作的主要函数的是<code class="highlighter-rouge">kfifo_put</code>和<code class="highlighter-rouge">kfifo_get</code>。这两个函数会先加锁，然后调用<code class="highlighter-rouge">__kfifo_put</code>或者<code class="highlighter-rouge">__kfifo_get</code>。也就是说真正的逻辑是实现在这两个函数里。 之前也说过<code class="highlighter-rouge">kfifo</code>在1P1C的情况下是不需要加锁的，所以这里我们会着重看看这两个函数。</p> 
+    <h1>入队</h1> 
+    <p><code class="highlighter-rouge">__kfifo_put</code>的定义很短：</p> 
+    <div class="language-c highlighter-rouge"> 
+     <pre class="highlight"><code><span class="kt">unsigned <span class="kt">int <span class="nf">__kfifo_put<span class="p">(<span class="k">struct <span class="n">kfifo <span class="o">*<span class="n">fifo<span class="p">, <span class="k">const <span class="kt">unsigned <span class="kt">char <span class="o">*<span class="n">buffer<span class="p">, <span class="kt">unsigned <span class="kt">int <span class="n">len<span class="p">) <span class="p">{ <span class="kt">unsigned <span class="kt">int <span class="n">l<span class="p">; <span class="n">len <span class="o">= <span class="n">min<span class="p">(<span class="n">len<span class="p">, <span class="n">fifo<span class="o">-&gt;<span class="n">size <span class="o">- <span class="n">fifo<span class="o">-&gt;<span class="n">in <span class="o">+ <span class="n">fifo<span class="o">-&gt;<span class="n">out<span class="p">); <span class="cm">/* * Ensure that we sample the fifo-&gt;out index -before- we * start putting bytes into the kfifo. */ <span class="n">smp_mb<span class="p">(); <span class="cm">/* first put the data starting from fifo-&gt;in to buffer end */ <span class="n">l <span class="o">= <span class="n">min<span class="p">(<span class="n">len<span class="p">, <span class="n">fifo<span class="o">-&gt;<span class="n">size <span class="o">- <span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">in <span class="o">&amp; <span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">size <span class="o">- <span class="mi">1<span class="p">))); <span class="n">memcpy<span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">buffer <span class="o">+ <span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">in <span class="o">&amp; <span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">size <span class="o">- <span class="mi">1<span class="p">)), <span class="n">buffer<span class="p">, <span class="n">l<span class="p">); <span class="cm">/* then put the rest (if any) at the beginning of the buffer */ <span class="n">memcpy<span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">buffer<span class="p">, <span class="n">buffer <span class="o">+ <span class="n">l<span class="p">, <span class="n">len <span class="o">- <span class="n">l<span class="p">); <span class="cm">/* * Ensure that we add the bytes to the kfifo -before- * we update the fifo-&gt;in index. */ <span class="n">smp_wmb<span class="p">(); <span class="n">fifo<span class="o">-&gt;<span class="n">in <span class="o">+= <span class="n">len<span class="p">; <span class="k">return <span class="n">len<span class="p">; <span class="p">} </span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre> 
+    </div> 
+    <p>可以看到里面加了一些memory barrier来确保1P1C场景的正确，这里我们可以暂时忽略。</p> 
+    <p>主要的步骤如下：</p> 
+    <ol>
+     <li>计算len和队列余下容量的较小值，如果队列容量不足，则只会拷贝剩余容量的大小。</li> 
+     <li>先拷贝一部分内容到队列的尾部。</li> 
+     <li>如果队列尾部并不能容下所有的内容，则再在队列的头部空闲空间继续拷贝。</li> 
+     <li>把队列内容长度加上len</li> 
+     <li>返回新增内容的长度len</li> 
+    </ol>
+    <p>这里注意到in只有在<code class="highlighter-rouge">__kfifo_put</code>里面才会修改，而这个函数里面只会对in增加，所以in的值只会增加，不会减少。而in本身是<code class="highlighter-rouge">unsigned int</code>类型的，所以当in超出了2^32的时候，会自动从0开始继续。</p> 
+    <p>同时前面也说过，<code class="highlighter-rouge">kfifo</code>的size是2^n。所以当<code class="highlighter-rouge">in &gt; 2^n</code>的时候，<code class="highlighter-rouge">(in &amp; 2^n - 1) == (in % 2^n)</code>，所以这里可以用与操作替代求余来获取in在队列中实际的位置。</p> 
+    <h1>出队</h1> 
+    <p><code class="highlighter-rouge">__kfifo_get</code>的定义和<code class="highlighter-rouge">__kfifo_put</code>长度差不多：</p> 
+    <div class="language-c highlighter-rouge"> 
+     <pre class="highlight"><code><span class="kt">unsigned <span class="kt">int <span class="nf">__kfifo_get<span class="p">(<span class="k">struct <span class="n">kfifo <span class="o">*<span class="n">fifo<span class="p">, <span class="kt">unsigned <span class="kt">char <span class="o">*<span class="n">buffer<span class="p">, <span class="kt">unsigned <span class="kt">int <span class="n">len<span class="p">) <span class="p">{ <span class="kt">unsigned <span class="kt">int <span class="n">l<span class="p">; <span class="n">len <span class="o">= <span class="n">min<span class="p">(<span class="n">len<span class="p">, <span class="n">fifo<span class="o">-&gt;<span class="n">in <span class="o">- <span class="n">fifo<span class="o">-&gt;<span class="n">out<span class="p">); <span class="cm">/* * Ensure that we sample the fifo-&gt;in index -before- we * start removing bytes from the kfifo. */ <span class="n">smp_rmb<span class="p">(); <span class="cm">/* first get the data from fifo-&gt;out until the end of the buffer */ <span class="n">l <span class="o">= <span class="n">min<span class="p">(<span class="n">len<span class="p">, <span class="n">fifo<span class="o">-&gt;<span class="n">size <span class="o">- <span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">out <span class="o">&amp; <span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">size <span class="o">- <span class="mi">1<span class="p">))); <span class="n">memcpy<span class="p">(<span class="n">buffer<span class="p">, <span class="n">fifo<span class="o">-&gt;<span class="n">buffer <span class="o">+ <span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">out <span class="o">&amp; <span class="p">(<span class="n">fifo<span class="o">-&gt;<span class="n">size <span class="o">- <span class="mi">1<span class="p">)), <span class="n">l<span class="p">); <span class="cm">/* then get the rest (if any) from the beginning of the buffer */ <span class="n">memcpy<span class="p">(<span class="n">buffer <span class="o">+ <span class="n">l<span class="p">, <span class="n">fifo<span class="o">-&gt;<span class="n">buffer<span class="p">, <span class="n">len <span class="o">- <span class="n">l<span class="p">); <span class="cm">/* * Ensure that we remove the bytes from the kfifo -before- * we update the fifo-&gt;out index. */ <span class="n">smp_mb<span class="p">(); <span class="n">fifo<span class="o">-&gt;<span class="n">out <span class="o">+= <span class="n">len<span class="p">; <span class="k">return <span class="n">len<span class="p">; <span class="p">} </span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre> 
+    </div> 
+    <p>忽略掉memory barrier之后，主要步骤如下：</p> 
+    <ol>
+     <li>计算len和队列长度的较小值，如果队列内容不够，则只拷贝较小值的大小。</li> 
+     <li>拷贝队列尾部的内容到输出buffer里面。</li> 
+     <li>如果仍然有部分内容没有拷贝的话，则从队列头部拷贝余下的内容。</li> 
+     <li>队列内容长度减少len(也就是<code class="highlighter-rouge">out += len</code>)。</li> 
+     <li>返回拷贝内容的长度。</li> 
+    </ol>
+    <p>其实基本就是<code class="highlighter-rouge">__kfifo_put</code>的逆过程。</p> 
+    <p>那这里就有一个问题了，其实队列的长度并不一定要用<code class="highlighter-rouge">in</code>和<code class="highlighter-rouge">out</code>两个变量来表示啊，也可以用一个<code class="highlighter-rouge">len</code>变量来表示啊。那这里就涉及到了多线程的互斥问题了。</p> 
+    <h1>多线程互斥</h1> 
+    <p>这里我们只考虑最简单的多线程场景——1P1C。如果我们只用一个<code class="highlighter-rouge">len</code>来表示队列长度的话，那么看看<code class="highlighter-rouge">__kfifo_put</code>和<code class="highlighter-rouge">__kfifo_get</code>里面对这个变量都需要做修改，而且一个是<code class="highlighter-rouge">+=</code>操作，一个是<code class="highlighter-rouge">-=</code>。如果在不加锁的情况下，这两个操作并不是原子操作，所以如果只用一个<code class="highlighter-rouge">len</code>，我们必须用锁来保护，无论是多么简单的多线程场景。</p> 
+    <p>如果我们用<code class="highlighter-rouge">in</code>和<code class="highlighter-rouge">out</code>来表示队列的读边界和写边界的话，那么队列的长度可以用<code class="highlighter-rouge">in - out</code>来表示。而且就像我们看到的那样，<code class="highlighter-rouge">in</code>只会在<code class="highlighter-rouge">__kfifo_put</code>里面修改，而<code class="highlighter-rouge">out</code>也只会在<code class="highlighter-rouge">__kfifo_get</code>里面修改，所以无论是<code class="highlighter-rouge">in</code>或<code class="highlighter-rouge">out</code>都只会有一个线程修改，所以不会有互斥的问题。</p> 
+    <p>那是不是这样就线程安全了呢？并不是。</p> 
+    <p>还记得之前忽略掉的那些memory barrier吗？如果没有了那些barrier的话，代码仍然是不安全的。因为在多线程里面，我们不单只需要确保原子性，还需要保证不会有乱序(可见性)。而在没有锁或者memory barrier的情况下，没有办法保证在所有CPU上都不会出现乱序。而上面代码里面的memory barrier就是为了确保不出现乱序而加入的。</p> 
+    <p>简单介绍一下这几个memory barrier的作用：</p> 
+    <ol>
+     <li> <code class="highlighter-rouge">smp_rmb</code>保证读操作之间不会出现乱序</li> 
+     <li> <code class="highlighter-rouge">smp_wmb</code>保证写操作之间不会出现乱序</li> 
+     <li> <code class="highlighter-rouge">smp_mb</code>保证读写操作都不会出现乱序</li> 
+    </ol>
+    <p>接着我们可以把kfifo里面对<code class="highlighter-rouge">in</code>、<code class="highlighter-rouge">out</code>和<code class="highlighter-rouge">buffer</code>的读写操作归类一下，那么<code class="highlighter-rouge">__kfifo_put</code>的是下面这样：</p> 
+    <ol>
+     <li>R(in), R(out)</li> 
+     <li>R(in), W(buffer)</li> 
+     <li>W(in)</li> 
+    </ol>
+    <p>而<code class="highlighter-rouge">__kfifo_get</code>则是下面这样：</p> 
+    <ol>
+     <li>R(in), R(out)</li> 
+     <li>R(out), R(buffer)</li> 
+     <li>W(out)</li> 
+    </ol>
+    <p>我们先来看<code class="highlighter-rouge">__kfifo_put</code>，有几个内存操作是不可以出现乱序的： 1. R(out)和W(buffer)：因为我们需要知道<code class="highlighter-rouge">out</code>的最新值，否则可能出现明明有队列有空间，但是我们仍写不进去数据的情况。这里因为是要保证读写操作之间的顺序，所以需要用<code class="highlighter-rouge">smp_mb</code>。实际上在x86/64平台，连这个barrier也可以忽略，因为在x86上面，读后写是保证不会乱序的，不过Linux内核由于需要保证各个平台都能work，所以仍然需要这里加上。 2. W(buffer)和W(in)：这个顺序是必须要保证的，否则可能我们更新了<code class="highlighter-rouge">in</code>之后，这个时候buffer的内容其实并没有copy进去，但是这时候来了一个<code class="highlighter-rouge">__kfifo_get</code>，就把内容拷贝出去了，这个是不允许的。所以这里我们需要用<code class="highlighter-rouge">smp_wmb</code>。</p> 
+    <p>我们可以用下面这个图来表示<code class="highlighter-rouge">kfifo</code>在put的时候的状态：</p> 
+    <p><img src="https://yqfile.alicdn.com/img_bcb71bf072ec32bb6736f0060c5265dc.png" alt="kfifo_put states"></p> 
+    <p>类似的，<code class="highlighter-rouge">__kfifo_get</code>也有几个内存操作不可以乱序：</p> 
+    <ol>
+     <li>R(in)和R(buffer)：我们需要获取最新的<code class="highlighter-rouge">in</code>值，否则可能会出现明明队列有内容，但是我们却读不到。这里需要用<code class="highlighter-rouge">smp_rmb</code>。</li> 
+     <li>R(buffer)和W(out)：这个顺序也是必须保证的，因为如果我们在读buffer之前就更新的out的话，则可能出现正要读buffer之前，该内容已经被<code class="highlighter-rouge">__kfifo_put</code>覆盖了，则读出来并不是我们想要的内容。这里需要用<code class="highlighter-rouge">smp_mb</code>。</li> 
+    </ol>
+    <p><code class="highlighter-rouge">kfifo</code>在get的时候的状态可以用下面的图来表示：</p> 
+    <p><img src="https://yqfile.alicdn.com/img_e82158ffc8409d3ad774b3628b27d793.png" alt="kfifo_get states"></p> 
+    <p>所以有了上面kfifo的实现，也就有了一个非常高效的1P1C队列。当然如果是在其他的多线程场景，我们仍然需要用spinlock来保护<code class="highlighter-rouge">kfifo</code>。</p> 
+    <h1>性能比较</h1> 
+    <p>我建了一个repo(<a href="https://github.com/airekans/kfifo-benchmark" rel="nofollow">kfifo-benchmark</a>)来简单地比较了一下kfifo的性能。 我把kfifo port到了user space，同时简单地把<code class="highlighter-rouge">spinlock_t</code>替换成了<code class="highlighter-rouge">pthread_mutex_t</code>(<code class="highlighter-rouge">pthread_spinlock_t</code>默认并不在pthread，需要另外配置)。</p> 
+    <p>比较里面的三个case(可以自行到<a href="https://github.com/airekans/kfifo-benchmark/blob/master/main.cc" rel="nofollow">main.cc</a>里面去看)及性能如下(我用的是real time/wall time，所以时间越短表示越快)：</p> 
+    <ol>
+     <li>使用<code class="highlighter-rouge">__kfifo_put</code>和<code class="highlighter-rouge">__kfifo_get</code>的1P1C(无锁)：0m3.496s</li> 
+     <li>使用<code class="highlighter-rouge">kfifo_put</code>和<code class="highlighter-rouge">kfifo_get</code>的1P1C场景(mutex)：0m13.291s</li> 
+     <li>使用tpool里面的<code class="highlighter-rouge">BoundedBlockingQueue</code>默认特化的1P1C场景(mutex+condition variable)：0m17.791s</li> 
+    </ol>
+    <p>可以看出来，在1P1C场景下，kfifo的无锁版比加锁版本要快3.8x。而就算是kfifo的加锁版本，也比tpool中的<code class="highlighter-rouge">BoundedBlockingQueue</code>要快33%。</p> 
+    <hr>
+    <a href="http://creativecommons.org/licenses/by-sa/4.0/deed.zh" rel="nofollow"><img style="border-width:0;" src="https://yqfile.alicdn.com/img_2780aefe6b14e22f37855df2a05bb47b.png" alt="知识共享许可协议"></a>
+    <br>本
+    <span>作品由<a href="http://airekans.github.io" rel="nofollow">airekans</a>创作，采用<a href="http://creativecommons.org/licenses/by-sa/4.0/deed.zh" rel="nofollow">知识共享署名-相同方式共享 4.0 国际许可协议</a>进行许可。 </span> 
+   </div> 
+   <div> 
+    <div>
+     【作者】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">张昺华</a> 
+    </div> 
+    <div>
+     【出处】
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【博客园】 
+     <a href="http://www.cnblogs.com/sky-heaven/" rel="nofollow">http://www.cnblogs.com/sky-heaven/</a> 
+    </div> 
+    <div>
+     【新浪博客】 
+     <a href="http://blog.sina.com.cn/u/2049150530" rel="nofollow">http://blog.sina.com.cn/u/2049150530</a> 
+    </div> 
+    <div>
+     【知乎】 
+     <a href="http://www.zhihu.com/people/zhang-bing-hua" rel="nofollow">http://www.zhihu.com/people/zhang-bing-hua</a> 
+    </div> 
+    <div>
+     【我的作品---旋转倒立摆】 
+     <a href="http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5NDAzNjQw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【我的作品---自平衡自动循迹车】 
+     <a href="http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2" rel="nofollow">http://v.youku.com/v_show/id_XODM5MzYyNTIw.html?spm=a2hzp.8253869.0.0&amp;from=y1.7-2</a> 
+    </div> 
+    <div>
+     【新浪微博】 张昺华--sky
+    </div> 
+    <div>
+     【twitter】 @sky2030_
+    </div> 
+    <div>
+     【facebook】 张昺华 zhangbinghua
+    </div> 
+    <div>
+     本文版权归作者和博客园共有，欢迎转载，但未经作者同意必须保留此段声明，且在文章页面明显位置给出原文连接，否则保留追究法律责任的权利.
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+  </article>
+  
+  
+
+
+
+
+</div>
+
+        </div>
+        <div class="col-second">
+          <div class="col-box col-box-author">
+  <img class="avatar" src="https://uzstatic-360cdn.belost.xyz/theme/default/images/logo.png" alt="柚子社区">
+  <div class="col-box-title name">NotBeCN</div>
+  <!-- <p>最新资讯</p> -->
+  <p class="contact">
+    
+    <a href="mailto:fandyvon@163.com" target="_blank">邮箱</a>
+    
+    <a href="https://uzshare.com" target="_blank">柚子社区</a>
+    
+    <a href="https://uzzz.org" target="_blank">找组织</a>
+    
+  </p>
+</div>
+
+<div class="col-box">
+  <div class="col-box-title">最新</div>
+  <ul class="post-list">
+    
+      <li><a class="post-link" href="/2019/05/14/zxh1220_90138586.html">[原创软件] [软件发布] 定时备份文件发送邮箱，不再怕数据丢失了</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/weixin_45037290_90140056.html">Get智能写作满月记 ——产品篇</a></li>
+    
+      <li><a class="post-link" href="/2019/05/14/nulio__90138386.html">《深度探索C++对象模型》..............</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_41248707_90140031.html">mysql 多表联查之连接查询</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/qq_21122683_90125902.html">golang基础(二)</a></li>
+    
+      <li><a class="post-link" href="/2019/05/13/1557726108256.html">今日份的PTA刷题</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90137366.html">Android之折线图</a></li>
+    
+      <li><a class="post-link" href="/2019/05/12/zzzfffei_90136638.html">Android之实现选中时改变样式</a></li>
+    
+  </ul>
+</div>
+
+<div class="col-box post-toc hide">
+  <div class="col-box-title">目录</div>
+</div>
+
+<div class="col-box">
+  <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+  <!-- right_sidebar -->
+  <ins class="adsbygoogle"
+       style="display:block"
+       data-ad-client="ca-pub-8889449066804352"
+       data-ad-slot="2081363239"
+       data-ad-format="auto"
+       data-full-width-responsive="true"></ins>
+  <script>
+    (adsbygoogle = window.adsbygoogle || []).push({});
+  </script>
+</div>
+
+
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+<div class="wrapper">
+&copy; 2019 
+</div>
+</footer>
+
+<script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$']]}});</script>
+<script src="/js/easybook.js"></script>
+
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-123344652-5"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'UA-123344652-5');
+</script>
+
+
+<script data-ad-client="ca-pub-8889449066804352" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+
+<script>
+var _hmt = _hmt || [];
+(function() {
+  var hm = document.createElement("script");
+  hm.async = true;
+  hm.src = "https://hm.baidu.com/hm.js?9b378145d7399199b371d067f4c8be96";
+  var s = document.getElementsByTagName("script")[0]; 
+  s.parentNode.insertBefore(hm, s);
+})();
+</script>
+
+
+
+
+  </body>
+
+</html>
